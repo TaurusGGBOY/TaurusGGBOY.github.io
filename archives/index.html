@@ -555,8 +555,6 @@
                     
                       
                     
-                      
-                    
                     <span class="site-state-item-count">2</span>
                     <span class="site-state-item-name">标签</span>
                   </a>
@@ -741,7 +739,7 @@
 
 
 
-<script src="//unpkg.com/valine/dist/Valine.min.js"></script>
+<script src="//cdn.jsdelivr.net/npm/valine/dist/Valine.min.jss"></script>
 
 <script>
   var GUEST = ['nick', 'mail', 'link'];
@@ -751,15 +749,15 @@
   });
   new Valine({
     el: '#comments',
-    verify: false,
-    notify: false,
+    verify: true,
+    notify: true,
     appId: 'CjCtcDacNjR2EbUEKOI9TEFg-gzGzoHsz',
     appKey: 'wNwGaAMV6Gt1Hqh4FVaguuMV',
-    placeholder: 'Just go go',
+    placeholder: 'ヾﾉ≧∀≦)o来啊，快活啊!',
     avatar: 'mm',
     meta: guest,
     pageSize: '10' || 10,
-    visitor: false,
+    visitor: true,
     lang: '' || 'zh-cn'
   });
 </script>
