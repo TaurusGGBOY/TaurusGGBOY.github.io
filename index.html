@@ -366,6 +366,178 @@
   
   
   <div class="post-block">
+    <link itemprop="mainEntityOfPage" href="http://yoursite.com/2019/06/12/使用Playmaker实现简单的子弹射击/">
+
+    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
+      <meta itemprop="name" content="gaoguobin">
+      <meta itemprop="description" content>
+      <meta itemprop="image" content="/images/avatar.gif">
+    </span>
+
+    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="gaoguobin">
+    </span>
+
+    
+      <header class="post-header">
+
+        
+        
+          <h1 class="post-title" itemprop="name headline">
+                
+                
+                <a href="/2019/06/12/使用Playmaker实现简单的子弹射击/" class="post-title-link" itemprop="url">使用Playmaker实现简单的子弹射击</a>
+              
+            
+          </h1>
+        
+
+        <div class="post-meta">
+          <span class="post-time">
+
+            
+            
+            
+
+            
+              <span class="post-meta-item-icon">
+                <i class="fa fa-calendar-o"></i>
+              </span>
+              
+                <span class="post-meta-item-text">发表于</span>
+              
+
+              
+                
+              
+
+              <time title="创建时间：2019-06-12 12:22:34 / 修改时间：12:23:36" itemprop="dateCreated datePublished" datetime="2019-06-12T12:22:34+08:00">2019-06-12</time>
+            
+
+            
+              
+
+              
+            
+          </span>
+
+          
+
+          
+            
+            
+              
+              <span class="post-comments-count">
+                <span class="post-meta-divider">|</span>
+                <span class="post-meta-item-icon">
+                  <i class="fa fa-comment-o"></i>
+                </span>
+            
+                <span class="post-meta-item-text">评论数：</span>
+                <a href="/2019/06/12/使用Playmaker实现简单的子弹射击/#comments" itemprop="discussionUrl">
+                  <span class="post-comments-count valine-comment-count" data-xid="/2019/06/12/使用Playmaker实现简单的子弹射击/" itemprop="commentCount"></span>
+                </a>
+              </span>
+            
+          
+
+          
+          
+            <span id="/2019/06/12/使用Playmaker实现简单的子弹射击/" class="leancloud_visitors" data-flag-title="使用Playmaker实现简单的子弹射击">
+              <span class="post-meta-divider">|</span>
+              <span class="post-meta-item-icon">
+                <i class="fa fa-eye"></i>
+              </span>
+              
+                <span class="post-meta-item-text">阅读次数：</span>
+              
+                <span class="leancloud-visitors-count"></span>
+            </span>
+          
+
+          
+
+          
+
+          
+
+        </div>
+      </header>
+    
+
+    
+    
+    
+    <div class="post-body" itemprop="articleBody">
+
+      
+      
+
+      
+        
+          
+            <h1 id="第一步：创建场景"><a href="#第一步：创建场景" class="headerlink" title="第一步：创建场景"></a>第一步：创建场景</h1><p>创建一个场景<br>这里取名叫Shoot<br><img src="https://img-blog.csdnimg.cn/20190612120708987.png" alt="在这里插入图片描述"></p>
+<h1 id="第二步：创建子弹"><a href="#第二步：创建子弹" class="headerlink" title="第二步：创建子弹"></a>第二步：创建子弹</h1><p>这里使用一个Capsule作为一个子弹<br><img src="https://img-blog.csdnimg.cn/20190612120810974.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3EzNzg5OTI5NzE=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"><br>适当缩放和旋转一下<br><img src="https://img-blog.csdnimg.cn/20190612120835914.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3EzNzg5OTI5NzE=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"><br>这个大小比较合适</p>
+<h1 id="第三步：给子弹添加playmakerFSM"><a href="#第三步：给子弹添加playmakerFSM" class="headerlink" title="第三步：给子弹添加playmakerFSM"></a>第三步：给子弹添加playmakerFSM</h1><p><img src="https://img-blog.csdnimg.cn/20190612120922378.png" alt="在这里插入图片描述"><br><img src="https://img-blog.csdnimg.cn/20190612120936943.png" alt="在这里插入图片描述"><br>子弹状态机如上<br>每个状态参数如下<br>大概思路就是每一帧向某个方向运动<br>5秒之后自动摧毁<br><img src="https://img-blog.csdnimg.cn/20190612121028307.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3EzNzg5OTI5NzE=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"><br><img src="https://img-blog.csdnimg.cn/20190612121114987.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3EzNzg5OTI5NzE=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></p>
+<h1 id="第四步：将子弹设置为预制体"><a href="#第四步：将子弹设置为预制体" class="headerlink" title="第四步：将子弹设置为预制体"></a>第四步：将子弹设置为预制体</h1><p><img src="https://img-blog.csdnimg.cn/20190612121154737.png" alt="在这里插入图片描述"><br>在assets里面右键-》新建预制体-》将我们创建的Ammo拖入<br>删除Hierachy中的Ammo</p>
+<h1 id="第五步：创建枪，并添加FSM"><a href="#第五步：创建枪，并添加FSM" class="headerlink" title="第五步：创建枪，并添加FSM"></a>第五步：创建枪，并添加FSM</h1><p><img src="https://img-blog.csdnimg.cn/20190612121317285.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3EzNzg5OTI5NzE=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"><br>添加一个Cube作为枪<br>添加PlaymakerFSM组件<br>打开编辑器<br>修改状态如下图<br>其中等待输入的参数如下<br><img src="https://img-blog.csdnimg.cn/201906121214098.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3EzNzg5OTI5NzE=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"><br>生成子弹参数如下<br><img src="https://img-blog.csdnimg.cn/20190612121447301.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3EzNzg5OTI5NzE=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"><br>其中 CreateObject的时候，要选择Assets中的Ammo预制体<br>SPawnPoint为一个空物体，放在你要生成的子弹的位置 这里不赘述</p>
+<h1 id="第六步：运行-调试"><a href="#第六步：运行-调试" class="headerlink" title="第六步：运行 调试"></a>第六步：运行 调试</h1><p>可以看到 有一些坐标系的bug<br>这里就留给您自己解决了<br><img src="https://img-blog.csdnimg.cn/20190612121754919.gif" alt="在这里插入图片描述"></p>
+
+          
+        
+      
+    </div>
+
+    
+
+    
+    
+    
+
+    
+
+    
+      
+    
+    
+
+    
+
+    <footer class="post-footer">
+      
+
+      
+
+      
+
+      
+      
+        <div class="post-eof"></div>
+      
+    </footer>
+  </div>
+  
+  
+  
+  </article>
+
+
+    
+      
+
+  
+
+  
+  
+  
+
+  
+
+  <article class="post post-type-normal" itemscope itemtype="http://schema.org/Article">
+  
+  
+  
+  <div class="post-block">
     <link itemprop="mainEntityOfPage" href="http://yoursite.com/2019/05/02/造轮子第二步博客的进阶/">
 
     <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
@@ -559,7 +731,7 @@
   
   
   <div class="post-block">
-    <link itemprop="mainEntityOfPage" href="http://yoursite.com/2019/05/02/造轮子第一步自己搭建博客/">
+    <link itemprop="mainEntityOfPage" href="http://yoursite.com/2019/05/02/造轮子第一步自己搭建博客 - Copy/">
 
     <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
       <meta itemprop="name" content="gaoguobin">
@@ -579,7 +751,7 @@
           <h1 class="post-title" itemprop="name headline">
                 
                 
-                <a href="/2019/05/02/造轮子第一步自己搭建博客/" class="post-title-link" itemprop="url">造轮子第一步自己搭建博客</a>
+                <a href="/2019/05/02/造轮子第一步自己搭建博客 - Copy/" class="post-title-link" itemprop="url">造轮子第一步自己搭建博客</a>
               
             
           </h1>
@@ -645,8 +817,8 @@
                 </span>
             
                 <span class="post-meta-item-text">评论数：</span>
-                <a href="/2019/05/02/造轮子第一步自己搭建博客/#comments" itemprop="discussionUrl">
-                  <span class="post-comments-count valine-comment-count" data-xid="/2019/05/02/造轮子第一步自己搭建博客/" itemprop="commentCount"></span>
+                <a href="/2019/05/02/造轮子第一步自己搭建博客 - Copy/#comments" itemprop="discussionUrl">
+                  <span class="post-comments-count valine-comment-count" data-xid="/2019/05/02/造轮子第一步自己搭建博客 - Copy/" itemprop="commentCount"></span>
                 </a>
               </span>
             
@@ -654,7 +826,7 @@
 
           
           
-            <span id="/2019/05/02/造轮子第一步自己搭建博客/" class="leancloud_visitors" data-flag-title="造轮子第一步自己搭建博客">
+            <span id="/2019/05/02/造轮子第一步自己搭建博客 - Copy/" class="leancloud_visitors" data-flag-title="造轮子第一步自己搭建博客">
               <span class="post-meta-divider">|</span>
               <span class="post-meta-item-icon">
                 <i class="fa fa-eye"></i>
@@ -692,7 +864,7 @@
           <!--noindex-->
           
             <div class="post-button text-center">
-              <a class="btn" href="/2019/05/02/造轮子第一步自己搭建博客/" rel="contents">
+              <a class="btn" href="/2019/05/02/造轮子第一步自己搭建博客 - Copy/" rel="contents">
                 阅读全文 &raquo;
               </a>
             </div>
@@ -779,7 +951,7 @@
                 
                   <a href="/archives/">
                 
-                    <span class="site-state-item-count">2</span>
+                    <span class="site-state-item-count">3</span>
                     <span class="site-state-item-name">日志</span>
                   </a>
                 </div>
@@ -821,7 +993,9 @@
                     
                       
                     
-                    <span class="site-state-item-count">2</span>
+                      
+                    
+                    <span class="site-state-item-count">3</span>
                     <span class="site-state-item-name">标签</span>
                   </a>
                 </div>
