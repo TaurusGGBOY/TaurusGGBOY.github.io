@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>资中地震与页岩气关联性研究</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --color-primary: #1a3a4a;
+            --color-primary-light: #2d5a6e;
+            --color-accent: #e07a3d;
+            --color-accent-light: #f4a261;
+            --color-bg: #f8f7f4;
+            --color-bg-card: #ffffff;
+            --color-text: #2c2c2c;
+            --color-text-secondary: #5a5a5a;
+            --color-text-muted: #888;
+            --color-border: #e0ddd8;
+            --color-highlight: #fff4e6;
+            --font-sans: 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+            --font-serif: 'Source Serif 4', Georgia, serif;
+            --shadow-sm: 0 1px 3px rgba(0,0,0,0.08);
+            --shadow-md: 0 4px 12px rgba(0,0,0,0.1);
+            --radius-sm: 6px;
+            --radius-md: 12px;
+            --radius-lg: 20px;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+            font-size: 16px;
+        }
+
+        body {
+            font-family: var(--font-sans);
+            background: var(--color-bg);
+            color: var(--color-text);
+            line-height: 1.7;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* Header */
+        .header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 100;
+            background: rgba(248, 247, 244, 0.95);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid var(--color-border);
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .header-title {
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: var(--color-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 70%;
+        }
+
+        .header-date {
+            font-size: 0.75rem;
+            color: var(--color-text-muted);
+        }
+
+        /* Progress bar */
+        .progress-bar {
+            position: fixed;
+            top: 52px;
+            left: 0;
+            height: 3px;
+            background: var(--color-accent);
+            z-index: 99;
+            width: 0%;
+            transition: width 0.1s ease-out;
+        }
+
+        /* Main content */
+        .container {
+            max-width: 680px;
+            margin: 0 auto;
+            padding: 80px 20px 60px;
+        }
+
+        /* Hero section */
+        .hero {
+            padding: 40px 0 50px;
+            text-align: center;
+            border-bottom: 1px solid var(--color-border);
+            margin-bottom: 40px;
+        }
+
+        .hero-badge {
+            display: inline-block;
+            background: var(--color-primary);
+            color: #fff;
+            font-size: 0.7rem;
+            font-weight: 500;
+            padding: 4px 12px;
+            border-radius: 20px;
+            letter-spacing: 0.5px;
+            margin-bottom: 20px;
+        }
+
+        .hero h1 {
+            font-size: 1.75rem;
+            font-weight: 700;
+            color: var(--color-primary);
+            line-height: 1.3;
+            margin-bottom: 16px;
+            letter-spacing: -0.02em;
+        }
+
+        .hero-meta {
+            font-size: 0.85rem;
+            color: var(--color-text-secondary);
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 16px;
+        }
+
+        .hero-meta span {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .conclusion-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--color-highlight);
+            border: 1px solid var(--color-accent-light);
+            color: var(--color-accent);
+            font-size: 0.8rem;
+            font-weight: 500;
+            padding: 8px 14px;
+            border-radius: var(--radius-sm);
+            margin-top: 20px;
+        }
+
+        .conclusion-badge::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            background: var(--color-accent);
+            border-radius: 50%;
+        }
+
+        /* Sections */
+        section {
+            margin-bottom: 50px;
+            opacity: 0;
+            transform: translateY(20px);
+            animation: fadeInUp 0.6s ease forwards;
+        }
+
+        section:nth-child(1) { animation-delay: 0.1s; }
+        section:nth-child(2) { animation-delay: 0.15s; }
+        section:nth-child(3) { animation-delay: 0.2s; }
+        section:nth-child(4) { animation-delay: 0.25s; }
+        section:nth-child(5) { animation-delay: 0.3s; }
+        section:nth-child(6) { animation-delay: 0.35s; }
+
+        @keyframes fadeInUp {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid var(--color-primary);
+        }
+
+        .section-number {
+            width: 32px;
+            height: 32px;
+            background: var(--color-primary);
+            color: #fff;
+            font-size: 0.85rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+            flex-shrink: 0;
+        }
+
+        .section-title {
+            font-size: 1.15rem;
+            font-weight: 600;
+            color: var(--color-primary);
+        }
+
+        /* Content styling */
+        .content p {
+            margin-bottom: 16px;
+            text-align: justify;
+            font-size: 0.95rem;
+        }
+
+        .content strong {
+            color: var(--color-primary);
+            font-weight: 600;
+        }
+
+        /* Finding cards */
+        .finding-card {
+            background: var(--color-bg-card);
+            border-radius: var(--radius-md);
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: var(--shadow-sm);
+            border: 1px solid var(--color-border);
+        }
+
+        .finding-card h4 {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--color-primary);
+            margin-bottom: 12px;
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+        }
+
+        .finding-card h4::before {
+            content: attr(data-num);
+            background: var(--color-accent);
+            color: #fff;
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+
+        .finding-card p {
+            font-size: 0.9rem;
+            color: var(--color-text-secondary);
+            margin-bottom: 12px;
+        }
+
+        .finding-card p:last-child {
+            margin-bottom: 0;
+        }
+
+        /* Key evidence box */
+        .evidence-box {
+            background: linear-gradient(135deg, #1a3a4a 0%, #2d5a6e 100%);
+            color: #fff;
+            border-radius: var(--radius-md);
+            padding: 24px;
+            margin: 24px 0;
+        }
+
+        .evidence-box h4 {
+            font-size: 0.9rem;
+            font-weight: 600;
+            margin-bottom: 12px;
+            opacity: 0.9;
+        }
+
+        .evidence-box p {
+            font-size: 0.95rem;
+            line-height: 1.6;
+            margin-bottom: 0;
+        }
+
+        /* Claims table */
+        .claims-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+            margin: 20px 0;
+        }
+
+        .claims-table th {
+            background: var(--color-primary);
+            color: #fff;
+            padding: 12px 10px;
+            text-align: left;
+            font-weight: 500;
+        }
+
+        .claims-table th:first-child {
+            border-radius: var(--radius-sm) 0 0 0;
+        }
+
+        .claims-table th:last-child {
+            border-radius: 0 var(--radius-sm) 0 0;
+        }
+
+        .claims-table td {
+            padding: 12px 10px;
+            border-bottom: 1px solid var(--color-border);
+            vertical-align: top;
+        }
+
+        .claims-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .claims-table tr:nth-child(even) {
+            background: rgba(26, 58, 74, 0.03);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 500;
+        }
+
+        .badge-high {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .badge-unverified {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        /* Recommendation cards */
+        .recommendation {
+            background: var(--color-bg-card);
+            border-radius: var(--radius-md);
+            padding: 20px;
+            margin-bottom: 16px;
+            border-left: 4px solid var(--color-accent);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .recommendation h4 {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--color-primary);
+            margin-bottom: 8px;
+        }
+
+        .recommendation p {
+            font-size: 0.88rem;
+            color: var(--color-text-secondary);
+            margin-bottom: 0;
+        }
+
+        /* Bibliography */
+        .bib-list {
+            list-style: none;
+        }
+
+        .bib-list li {
+            font-size: 0.8rem;
+            color: var(--color-text-secondary);
+            padding: 10px 0;
+            border-bottom: 1px solid var(--color-border);
+            line-height: 1.5;
+        }
+
+        .bib-list li:last-child {
+            border-bottom: none;
+        }
+
+        .bib-list a {
+            color: var(--color-primary);
+            text-decoration: none;
+            word-break: break-all;
+        }
+
+        .bib-list a:hover {
+            text-decoration: underline;
+        }
+
+        /* Back to top */
+        .back-to-top {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            width: 48px;
+            height: 48px;
+            background: var(--color-primary);
+            color: #fff;
+            border: none;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: var(--shadow-md);
+            opacity: 0;
+            transform: translateY(20px);
+            transition: all 0.3s ease;
+            z-index: 90;
+        }
+
+        .back-to-top.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .back-to-top:hover {
+            background: var(--color-primary-light);
+            transform: translateY(-2px);
+        }
+
+        .back-to-top svg {
+            width: 24px;
+            height: 24px;
+        }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 40px 20px;
+            border-top: 1px solid var(--color-border);
+            margin-top: 60px;
+        }
+
+        .footer p {
+            font-size: 0.8rem;
+            color: var(--color-text-muted);
+        }
+
+        /* Responsive */
+        @media (max-width: 480px) {
+            html {
+                font-size: 15px;
+            }
+
+            .hero h1 {
+                font-size: 1.5rem;
+            }
+
+            .container {
+                padding: 70px 16px 50px;
+            }
+
+            .finding-card {
+                padding: 18px;
+            }
+
+            .claims-table {
+                font-size: 0.75rem;
+            }
+
+            .claims-table th,
+            .claims-table td {
+                padding: 10px 8px;
+            }
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --color-bg: #1a1a1a;
+                --color-bg-card: #252525;
+                --color-text: #e0e0e0;
+                --color-text-secondary: #a0a0a0;
+                --color-text-muted: #707070;
+                --color-border: #3a3a3a;
+                --color-highlight: #2d2a26;
+            }
+
+            .header {
+                background: rgba(26, 26, 26, 0.95);
+            }
+
+            .progress-bar {
+                background: var(--color-accent-light);
+            }
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <span class="header-title">资中地震与页岩气关联性研究</span>
+        <span class="header-date">2026-04-29</span>
+    </header>
+    <div class="progress-bar" id="progressBar"></div>
+
+    <main class="container">
+        <div class="hero">
+            <span class="hero-badge">研究报告</span>
+            <h1>四川内江市资中地震与页岩气开采关联性研究</h1>
+            <div class="hero-meta">
+                <span>生成日期：2026-04-29</span>
+            </div>
+            <div class="conclusion-badge">
+                结论等级：需要重点调查，不支持已可归因
+            </div>
+        </div>
+
+        <section id="executive-summary">
+            <div class="section-header">
+                <span class="section-number">1</span>
+                <h2 class="section-title">Executive Summary</h2>
+            </div>
+            <div class="content">
+                <p>本报告评估 2026 年 4 月四川内江市资中县连续浅源地震 是否与页岩气开采存在关联。公开地震资料显示，4 月 10 日至 17 日，资中及邻近区域出现密集有感地震；中国地震台网测定 4 月 15 日 09:43 发生 M4.1，4 月 16 日 00:12 发生 M4.2，4 月 17 日 06:22 发生 M4.4，震源深度多在 7 至 9 千米量级。</p>
+
+                <div class="evidence-box">
+                    <h4>核心发现</h4>
+                    <p>资中序列与页岩气开采关联性：地质上可疑、科学上可检验、证据上未闭合。最佳行动是启动公开、可复核的专项诱发地震评估。</p>
+                </div>
+
+                <p>页岩气背景确实重要。资中所在的内江-自贡-威远-荣县一带处在四川盆地南部页岩气开发格局内；国家能源局规划把威远勘探开发区列为重点建产区。科学文献也已证实，在四川盆地长宁、威远、昭通等页岩气区，水力压裂可通过孔隙压力扩散、孔弹性应力扰动、非震滑移和应力转移触发中强浅源地震。</p>
+
+                <p>但是，对"资中 2026 序列由页岩气开采触发"这一具体命题，公开资料缺少关键证据：没有逐井压裂时间、注入量、井轨迹、返排/处置数据；没有公开的高精度重定位目录、震源机制解、b 值演化、扩散前沿和井场距离检验。</p>
+            </div>
+        </section>
+
+        <section id="introduction">
+            <div class="section-header">
+                <span class="section-number">2</span>
+                <h2 class="section-title">研究背景与方法</h2>
+            </div>
+            <div class="content">
+                <p>本研究回答一个窄问题：2026 年 4 月四川内江市资中县地震序列 与 周边页岩气开发 是否存在可证实的因果关联。研究范围包括三个层次：</p>
+                <p><strong>第一层</strong>：地震事实，包括发震时间、震级、深度、空间聚集和官方应急响应。<br>
+                <strong>第二层</strong>：工业背景，包括资中周边是否处在页岩气资源与开发区带内。<br>
+                <strong>第三层</strong>：因果归因，包括四川盆地已有页岩气诱发地震研究能否外推到本次序列。</p>
+
+                <p>本报告不把"附近有页岩气"视为因果证据。诱发地震归因通常需要同时满足空间相关、时间相关、深度和构造一致性、注入参数响应、震源机制一致性、震群迁移规律、背景地震率突变等条件。</p>
+
+                <div class="finding-card">
+                    <h4 data-num="证据分级">本研究采用保守证据分级</h4>
+                    <p><strong>A级证据</strong>：官方或同行评议数据可直接支持的事实，例如 CENC/USGS 地震参数、国家能源局规划和 Nature/Scientific Reports 论文结果</p>
+                    <p><strong>B级证据</strong>：媒体转述官方或专家观点，例如中新社/新浪转载的专家判断和资中县应急管理局通报</p>
+                    <p><strong>C级证据</strong>：公众质疑或自媒体推测，本报告不把它作为证明，只把它作为社会关切来源</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="findings">
+            <div class="section-header">
+                <span class="section-number">3</span>
+                <h2 class="section-title">主要发现</h2>
+            </div>
+
+            <div class="finding-card">
+                <h4 data-num="Finding 1">2026 年 4 月资中序列是浅源、密集、有感的区域事件</h4>
+                <p>公开资料显示，资中县在 2026 年 4 月中旬出现连续地震。4 月 17 日 06:22 发生 M4.4 地震，震源深度 7.0 千米；4 月 15 日 09:43 发生 M4.1 地震，震源深度 9 千米。USGS 在 2026 年 4 月 10 日至 18 日记录 9 个 M4.3 至 M4.5 事件，均为浅源定位。</p>
+                <p>浅源特征使公众对工程诱发机制产生联想。水力压裂和注入诱发地震通常集中在几千米至十余千米内，与页岩储层、盖层、基底或隐伏断裂有关。</p>
+            </div>
+
+            <div class="finding-card">
+                <h4 data-num="Finding 2">资中周边有页岩气资源与开发背景</h4>
+                <p>国家能源局《页岩气发展规划（2016-2020 年）》把威远勘探开发区列为重点建产区。央视 2021 年报道，威荣页岩气田位于四川省内江市、自贡市境内，已提交探明储量 1247 亿立方米，平均埋深 3750 米。</p>
+                <p>但"区域有关联"不等于"震中附近有触发源"。现有公开资料未显示 2026 年 4 月资中震中 5 至 15 千米范围内哪些井正在压裂、钻井、试气、返排或废水处置。</p>
+            </div>
+
+            <div class="finding-card">
+                <h4 data-num="Finding 3">四川盆地已有多起页岩气诱发地震强证据案例</h4>
+                <p>Lei 等 2017 年在 Scientific Reports 研究四川盆地页岩气水力压裂地震，认为多条证据支持 Mw 最高 4.7 的地震由短期水力压裂注入诱发。</p>
+                <p>Meng、McGarr、Zhou 和 Zang 2019 年论文显示，在昭通与长宁页岩气田，临时台网三年记录超过 15,000 个地震，震级最高 Mw 4.7。</p>
+                <p>2025 年 Communications Earth & Environment 对 2019 年威远 ML 5.6 地震的研究更接近资中周边：2019 年 ML 5.6 地震发生在压裂结束 3 个月后，是全球较大的水力压裂触发地震之一。</p>
+            </div>
+
+            <div class="finding-card">
+                <h4 data-num="Finding 4">资中 2026 序列与已归因案例有相似点，也有关键差异</h4>
+                <p><strong>相似点</strong>：资中序列发生在四川盆地南部页岩气开发大区内；为浅源密集震群；震群短期聚集、震级从 M3 到 M4+；公众关注页岩气与地震风险并非空穴来风。</p>
+                <p><strong>差异</strong>：资中公开信息缺少井场坐标与作业曲线；未给出高精度震源重定位；未给出震源机制解；官方目前把该序列解释为褶皱发育过程中的局部应力调整。</p>
+            </div>
+
+            <div class="evidence-box">
+                <h4>归因评级</h4>
+                <p>本报告将资中序列评为"中等可疑、低归因确定性"。"中等可疑"来自地理重叠、浅源震群和四川盆地既有案例。"低归因确定性"来自缺少工业作业数据、高精度地震学数据和独立专项评估。</p>
+            </div>
+
+            <div class="finding-card">
+                <h4 data-num="Finding 5">官方"构造应力调整"解释与"诱发触发"并非逻辑互斥</h4>
+                <p>诱发地震研究中的"触发"并不要求人为活动创造全部构造应力。许多诱发地震是在已接近临界状态的断层或弱面上，由孔隙压力、孔弹性应力、非震滑移或小震应力转移提供最后扰动。</p>
+                <p>构造应力背景 与 工业触发机制 可以同时成立：褶皱和隐伏断层提供易发背景，注入或钻井提供触发扰动。</p>
+            </div>
+
+            <div class="finding-card">
+                <h4 data-num="Finding 6">最小可行专项评估需要六类数据</h4>
+                <p><strong>第一</strong>：发布完整地震目录（2026年4-5月，M1.0以下）</p>
+                <p><strong>第二</strong>：公布井场作业数据（时间表、井底轨迹、注入压力、注入量）</p>
+                <p><strong>第三</strong>：震源机制和应力分析</p>
+                <p><strong>第四</strong>：水文-地质模型</p>
+                <p><strong>第五</strong>：背景率检验（1970年以来的地震率和b值）</p>
+                <p><strong>第六</strong>：独立复核机制</p>
+            </div>
+        </section>
+
+        <section id="synthesis">
+            <div class="section-header">
+                <span class="section-number">4</span>
+                <h2 class="section-title">综合判断</h2>
+            </div>
+            <div class="content">
+                <p>综合来看，资中 2026 年 4 月地震序列有三重信号：</p>
+                <p><strong>地震学信号</strong>：浅源、密集、有感，并在短时间内出现多个 M4 级事件</p>
+                <p><strong>产业信号</strong>：内江处在威远-荣县、威荣等页岩气开发格局内，页岩气开发强度和经济重要性较高</p>
+                <p><strong>科学背景信号</strong>：四川盆地已有多篇同行评议研究把长宁、昭通、威远等页岩气区地震与水力压裂或相关工业活动联系起来</p>
+
+                <div class="evidence-box">
+                    <h4>核心判断</h4>
+                    <p>不能用"没有直接证据"结束问题，也不能用"周边有页岩气"直接定性。前者会忽视四川盆地已有诱发地震证据和公众风险感知，后者会跳过必要的地震学与工程数据检验。</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="recommendations">
+            <div class="section-header">
+                <span class="section-number">5</span>
+                <h2 class="section-title">建议</h2>
+            </div>
+
+            <div class="recommendation">
+                <h4>建议一：建立联合工作组</h4>
+                <p>建立资中-威远-内江页岩气地震联合工作组，成员包括地震、自然资源、能源、应急、生态环境部门，页岩气企业，以及独立高校/科研团队。目标不是先定责，而是先复算事实。</p>
+            </div>
+
+            <div class="recommendation">
+                <h4>建议二：发布脱敏数据包</h4>
+                <p>企业可隐藏商业敏感产量和配方，但应公开井底轨迹、作业时间窗、阶段注入量、压力区间、返排和处置井位置。</p>
+            </div>
+
+            <div class="recommendation">
+                <h4>建议三：布设临时密集台阵</h4>
+                <p>至少在震中周边 30 千米内加密短周期与宽频带台站，持续 3 至 6 个月，构建 M1 级以下微震目录。</p>
+            </div>
+
+            <div class="recommendation">
+                <h4>建议四：实施交通灯机制</h4>
+                <p>若震中 20 千米内存在正在进行的压裂、处置或高压注入活动，应设置震级、峰值地动速度、事件率和公众感知阈值；达到阈值时降压、暂停或停注。</p>
+            </div>
+
+            <div class="recommendation">
+                <h4>建议五：改进公众沟通</h4>
+                <p>政府通报应同时说明"当前结论""尚缺数据""下一步验证办法"。简单说"不要恐慌"不足以回应页岩气关切。</p>
+            </div>
+        </section>
+
+        <section id="claims">
+            <div class="section-header">
+                <span class="section-number">6</span>
+                <h2 class="section-title">Claims-Evidence Table</h2>
+            </div>
+            <table class="claims-table">
+                <thead>
+                    <tr>
+                        <th style="width: 40%">核心主张</th>
+                        <th style="width: 40%">支持证据</th>
+                        <th style="width: 20%">等级</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>资中 2026 年 4 月出现短期浅源地震序列</td>
+                        <td>CENC/中国地震局转载数据、媒体列出的连续 M3+ 事件、USGS 区域 M4+ 目录</td>
+                        <td><span class="badge badge-high">高</span></td>
+                    </tr>
+                    <tr>
+                        <td>内江-威远-荣县-自贡处于页岩气开发区带</td>
+                        <td>国家能源局规划、四川省发改委、中石化/央视公开资料</td>
+                        <td><span class="badge badge-high">高</span></td>
+                    </tr>
+                    <tr>
+                        <td>四川盆地页岩气开发可触发中强浅源地震</td>
+                        <td>Scientific Reports、USGS 收录 BSSA、Communications Earth & Environment 研究</td>
+                        <td><span class="badge badge-high">高</span></td>
+                    </tr>
+                    <tr>
+                        <td>资中 2026 序列由页岩气开采触发</td>
+                        <td>缺少井场作业数据、高精度重定位和机制解；现有官方解释偏自然构造</td>
+                        <td><span class="badge badge-unverified">未证实</span></td>
+                    </tr>
+                    <tr>
+                        <td>应启动专项评估</td>
+                        <td>区域相似性强、公众关切高、已归因案例存在、现有数据缺口明确</td>
+                        <td><span class="badge badge-high">高</span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section id="counterevidence">
+            <div class="section-header">
+                <span class="section-number">7</span>
+                <h2 class="section-title">反证登记</h2>
+            </div>
+            <div class="content">
+                <p><strong>反证一</strong>：官方与专家当前公开解释偏向自然构造应力调整。资中县应急管理局称小型地震可由周边地质褶皱发育过程中的应力局部调整导致。</p>
+                <p><strong>反证二</strong>：没有公开井场同步证据。强归因案例通常展示注入时间、井场位置和地震迁移之间的对应关系；资中序列目前没有这类公开材料。</p>
+                <p><strong>反证三</strong>：USGS 与中国地震台网定位存在尺度差异，USGS 深度常为 10 千米固定或近固定，不能直接用于精细深度归因。</p>
+                <p><strong>反证四</strong>：页岩气开采并非每个区域都会诱发可感地震。USGS 综述指出，大多数注入作业看起来并不会诱发地震，诱发地震集中在少数区域。</p>
+            </div>
+        </section>
+
+        <section id="limitations">
+            <div class="section-header">
+                <span class="section-number">8</span>
+                <h2 class="section-title">局限性说明</h2>
+            </div>
+            <div class="content">
+                <p>第一，公开资料不完整。地震台网公开速报适合应急认知，但不等于科研级重定位目录；震源深度和震中位置在不同机构之间存在误差。</p>
+                <p>第二，井场作业数据未公开。没有逐井压裂、钻井、采气和处置数据，本报告不能计算空间距离、时间滞后和压力扩散参数。</p>
+                <p>第三，四川盆地其他区块案例不能自动外推。长宁、昭通、威远的研究证明"川南页岩气开发可诱发地震"，并不证明"资中 2026 序列一定由页岩气诱发"。</p>
+                <p>第四，资中附近"未查明活动断层"并不等于没有隐伏弱面；同样，"未公开工业触发证据"也不等于没有工业触发。两类未知都要求数据补齐。</p>
+            </div>
+        </section>
+
+        <section id="bibliography">
+            <div class="section-header">
+                <span class="section-number">9</span>
+                <h2 class="section-title">参考文献</h2>
+            </div>
+            <ul class="bib-list">
+                <li>[1] 中国地震局地震预测研究所 (2026). "4月17日6时22分四川内江市资中县发生4.4级地震". <a href="https://www.ief.ac.cn/dzxx/info/2026/96082.html">查看</a></li>
+                <li>[2] 中新社/新浪财经 (2026). "四川内江市资中县连日发生多场地震". <a href="https://finance.sina.cn/2026-04-15/detail-inhupzpc8521222.d.html">查看</a></li>
+                <li>[4] USGS (2026). "USGS Earthquakes GeoJSON query: Neijiang region". <a href="https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson">查看</a></li>
+                <li>[5] 四川省发改委 (2022). "中石化第一家央地合资页岩气开发公司在四川注册成立". <a href="https://fgw.sc.gov.cn/sfgw/c106098/2022/1/25/4ab324781cad4947ae4ae9ccd3bb1f07.shtml">查看</a></li>
+                <li>[6] 国家能源局 (2016). "页岩气发展规划（2016-2020年）". <a href="https://ynb.nea.gov.cn/dtyw/zcgz/202309/t20230911_35508.html">查看</a></li>
+                <li>[8] Zhang et al. (2024). "The temporal and spatial evolution characteristics of induced seismicity in the Changning shale gas field". Scientific Reports. <a href="https://www.nature.com/articles/s41598-024-77443-1">查看</a></li>
+                <li>[9] Meng et al. (2019). "An investigation of seismicity induced by hydraulic fracturing in the Sichuan basin". BSSA. <a href="https://www.usgs.gov/publications/investigation-seismicity-induced-hydraulic-fracturing-sichuan-basin-china-based-data-a">查看</a></li>
+                <li>[10] Lei et al. (2017). "Fault reactivation and earthquakes with magnitudes of up to Mw4.7 induced by shale-gas hydraulic fracturing". Scientific Reports. <a href="https://www.nature.com/articles/s41598-017-08557-y">查看</a></li>
+                <li>[11] Zi et al. (2025). "The 11-month precursory fault activation of the 2019 ML 5.6 earthquake in the Weiyuan shale gas field". Communications Earth & Environment. <a href="https://www.nature.com/articles/s43247-025-02151-1">查看</a></li>
+                <li>[13] Rubinstein & Babaie Mahani (2015). "Myths and facts on wastewater injection, hydraulic fracturing". Seismological Research Letters. <a href="https://www.usgs.gov/publications/myths-and-facts-wastewater-injection-hydraulic-fracturing-enhanced-oil-recovery-and">查看</a></li>
+            </ul>
+        </section>
+
+        <footer class="footer">
+            <p>研究日期：2026-04-29 | 研究对象：2026年4月四川省内江市资中县浅源地震序列与川南页岩气开采活动的潜在关联</p>
+        </footer>
+    </main>
+
+    <button class="back-to-top" id="backToTop" aria-label="返回顶部">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 15l-6-6-6 6"/>
+        </svg>
+    </button>
+
+    <script>
+        // Progress bar
+        const progressBar = document.getElementById('progressBar');
+        const backToTop = document.getElementById('backToTop');
+
+        window.addEventListener('scroll', () => {
+            const scrollTop = window.scrollY;
+            const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+            const progress = (scrollTop / docHeight) * 100;
+            progressBar.style.width = progress + '%';
+
+            // Back to top button visibility
+            if (scrollTop > 500) {
+                backToTop.classList.add('visible');
+            } else {
+                backToTop.classList.remove('visible');
+            }
+        });
+
+        // Back to top
+        backToTop.addEventListener('click', () => {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        });
+
+        // Section animations on scroll
+        const sections = document.querySelectorAll('section');
+        const observerOptions = {
+            threshold: 0.1,
+            rootMargin: '0px 0px -50px 0px'
+        };
+
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.style.animationPlayState = 'running';
+                }
+            });
+        }, observerOptions);
+
+        sections.forEach(section => {
+            section.style.animationPlayState = 'paused';
+            observer.observe(section);
+        });
+    </script>
+</body>
+</html>
