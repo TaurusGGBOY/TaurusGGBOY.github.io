@@ -1,0 +1,984 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>光子计数CT质量控制体系建设 | 三甲医院汇报</title>
+  <style>
+    :root {
+      --bg: #f7f9fb;
+      --paper: #ffffff;
+      --ink: #162033;
+      --muted: #637083;
+      --light: #eef3f7;
+      --line: #d8e1ea;
+      --blue: #123a5a;
+      --blue-2: #1d5f88;
+      --teal: #128c7e;
+      --green: #2f855a;
+      --amber: #b7791f;
+      --red: #b42318;
+      --gray: #8a97a6;
+      --radius: 6px;
+      --shadow: 0 18px 48px rgba(18, 58, 90, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #dfe6ed;
+      color: var(--ink);
+      font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
+    }
+
+    body {
+      display: grid;
+      place-items: center;
+    }
+
+    .stage {
+      position: relative;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      background:
+        linear-gradient(90deg, rgba(18,58,90,0.045) 1px, transparent 1px) 0 0 / 80px 80px,
+        linear-gradient(180deg, rgba(18,58,90,0.035) 1px, transparent 1px) 0 0 / 80px 80px,
+        var(--paper);
+      box-shadow: var(--shadow);
+      transform-origin: center center;
+    }
+
+    .slide {
+      position: absolute;
+      inset: 0;
+      display: none;
+      padding: 72px 86px 58px;
+      background:
+        linear-gradient(180deg, rgba(18,58,90,0.025), transparent 32%),
+        var(--paper);
+    }
+
+    .slide.active { display: block; }
+
+    .topbar {
+      position: absolute;
+      top: 28px;
+      left: 42px;
+      right: 42px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: var(--gray);
+      font: 700 14px/1 Menlo, Consolas, monospace;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .slide-no {
+      position: absolute;
+      right: 42px;
+      bottom: 28px;
+      color: var(--gray);
+      font: 700 16px/1 Menlo, Consolas, monospace;
+    }
+
+    .section-tag {
+      display: inline-flex;
+      align-items: center;
+      height: 34px;
+      padding: 0 14px;
+      margin-bottom: 22px;
+      border: 1px solid #b8ccdc;
+      background: #f3f8fb;
+      color: var(--blue-2);
+      border-radius: 999px;
+      font: 800 14px/1 Menlo, Consolas, monospace;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3, p { margin: 0; }
+
+    h1 {
+      font-size: 78px;
+      line-height: 1.08;
+      font-weight: 850;
+      letter-spacing: 0;
+      color: var(--blue);
+      text-wrap: balance;
+    }
+
+    h2 {
+      font-size: 52px;
+      line-height: 1.13;
+      font-weight: 830;
+      letter-spacing: 0;
+      color: var(--blue);
+      text-wrap: balance;
+      margin-bottom: 30px;
+    }
+
+    h3 {
+      font-size: 27px;
+      line-height: 1.25;
+      font-weight: 760;
+      color: var(--ink);
+      text-wrap: balance;
+    }
+
+    p, li, td, th {
+      font-size: 21px;
+      line-height: 1.48;
+      color: var(--muted);
+      text-wrap: pretty;
+    }
+
+    b, strong { color: var(--ink); font-weight: 800; }
+
+    .title-slide {
+      display: none;
+      grid-template-columns: 1.03fr 0.97fr;
+      gap: 58px;
+      align-items: center;
+      padding: 82px 96px;
+    }
+
+    .title-slide.active { display: grid; }
+
+    .subtitle {
+      margin-top: 28px;
+      font-size: 31px;
+      line-height: 1.38;
+      color: #455366;
+      max-width: 1040px;
+    }
+
+    .meta-strip {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 48px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 36px;
+      padding: 7px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--blue-2);
+      font: 800 14px/1.2 Menlo, Consolas, monospace;
+      white-space: nowrap;
+    }
+
+    .pill.teal { color: var(--teal); border-color: #a5d8d2; background: #f1fbf9; }
+    .pill.amber { color: var(--amber); border-color: #ead4a8; background: #fffaf0; }
+    .pill.red { color: var(--red); border-color: #f0bbb4; background: #fff5f4; }
+
+    .card {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.92);
+      border-radius: var(--radius);
+      box-shadow: 0 8px 22px rgba(18, 58, 90, 0.06);
+    }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; }
+
+    .metric {
+      padding: 26px 28px;
+      min-height: 190px;
+    }
+
+    .metric .num {
+      font: 850 54px/1 Menlo, Consolas, monospace;
+      color: var(--blue);
+      margin-bottom: 12px;
+    }
+
+    .metric .label {
+      font-size: 22px;
+      font-weight: 800;
+      color: var(--ink);
+      margin-bottom: 8px;
+    }
+
+    .metric p { font-size: 18px; }
+
+    .note {
+      margin-top: 18px;
+      color: var(--gray);
+      font-size: 16px;
+      line-height: 1.42;
+    }
+
+    .agenda {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-top: 16px;
+    }
+
+    .agenda-item {
+      display: grid;
+      grid-template-columns: 86px 1fr;
+      gap: 22px;
+      align-items: center;
+      padding: 23px 26px;
+      min-height: 140px;
+    }
+
+    .agenda-num {
+      color: var(--teal);
+      font: 850 34px/1 Menlo, Consolas, monospace;
+    }
+
+    .agenda-item h3 { font-size: 26px; margin-bottom: 8px; }
+    .agenda-item p { font-size: 18px; }
+
+    .diagram-panel {
+      position: relative;
+      height: 690px;
+      padding: 34px;
+      background:
+        linear-gradient(90deg, rgba(18,58,90,0.05) 1px, transparent 1px) 0 0 / 42px 42px,
+        linear-gradient(180deg, rgba(18,58,90,0.04) 1px, transparent 1px) 0 0 / 42px 42px,
+        #fbfdff;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    .detector-row {
+      display: grid;
+      grid-template-columns: 1fr 70px 1fr;
+      gap: 18px;
+      align-items: center;
+      margin-top: 16px;
+    }
+
+    .detector-box {
+      padding: 24px;
+      min-height: 190px;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    .detector-box h3 { color: var(--blue); margin-bottom: 12px; }
+    .arrow {
+      height: 3px;
+      background: var(--teal);
+      position: relative;
+    }
+    .arrow:after {
+      content: "";
+      position: absolute;
+      right: -1px;
+      top: -7px;
+      border-left: 15px solid var(--teal);
+      border-top: 8px solid transparent;
+      border-bottom: 8px solid transparent;
+    }
+
+    .pixel-grid {
+      display: grid;
+      grid-template-columns: repeat(10, 1fr);
+      gap: 6px;
+      margin-top: 28px;
+    }
+
+    .pixel-grid span {
+      aspect-ratio: 1;
+      border: 1px solid #b9ccdb;
+      background: #f6fbff;
+      border-radius: 3px;
+      position: relative;
+    }
+
+    .pixel-grid span:nth-child(9n+2) { background: #e6f6f4; border-color: #9fd5ce; }
+    .pixel-grid span:nth-child(13n+1) { background: #fff7e6; border-color: #e4c887; }
+
+    .table-wrap {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: #fff;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th, td {
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--blue);
+      background: #eef5fa;
+      font-weight: 850;
+      font-size: 18px;
+    }
+
+    td {
+      font-size: 18px;
+      color: #536174;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    .split {
+      display: grid;
+      grid-template-columns: 0.95fr 1.05fr;
+      gap: 26px;
+      align-items: stretch;
+    }
+
+    .callout {
+      padding: 30px;
+      background: #f6fbff;
+      border: 1px solid #bfd6e8;
+      border-radius: var(--radius);
+    }
+
+    .callout h3 {
+      color: var(--blue);
+      margin-bottom: 14px;
+      font-size: 30px;
+    }
+
+    .callout p { font-size: 21px; color: #445366; }
+
+    .mini-list {
+      display: grid;
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .mini {
+      padding: 18px 20px;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: var(--radius);
+    }
+
+    .mini h3 { font-size: 22px; margin-bottom: 6px; color: var(--ink); }
+    .mini p { font-size: 17px; }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 18px;
+      margin-top: 28px;
+    }
+
+    .time-card {
+      padding: 24px;
+      min-height: 520px;
+      border-top: 5px solid var(--blue);
+    }
+    .time-card:nth-child(2) { border-top-color: var(--teal); }
+    .time-card:nth-child(3) { border-top-color: var(--amber); }
+    .time-card:nth-child(4) { border-top-color: var(--green); }
+
+    .time-card .time {
+      font: 850 28px/1 Menlo, Consolas, monospace;
+      color: var(--blue-2);
+      margin-bottom: 22px;
+    }
+
+    .time-card h3 { font-size: 25px; margin-bottom: 14px; }
+    .time-card ul { margin: 0; padding-left: 22px; }
+    .time-card li { font-size: 18px; margin: 10px 0; }
+
+    .matrix {
+      display: grid;
+      grid-template-columns: 280px repeat(3, 1fr);
+      gap: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: #fff;
+    }
+
+    .matrix > div {
+      min-height: 118px;
+      padding: 18px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .matrix > div:nth-child(4n) { border-right: 0; }
+    .matrix .head {
+      background: #eef5fa;
+      color: var(--blue);
+      font-weight: 850;
+      font-size: 20px;
+    }
+    .matrix .rowhead {
+      background: #f7fafc;
+      color: var(--ink);
+      font-weight: 850;
+      font-size: 21px;
+    }
+    .matrix p { font-size: 17px; }
+
+    .bars {
+      display: grid;
+      gap: 18px;
+      margin-top: 20px;
+    }
+
+    .bar-row {
+      display: grid;
+      grid-template-columns: 190px 1fr 120px;
+      gap: 18px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .track {
+      height: 18px;
+      background: #e8eef4;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .bar {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--blue-2), var(--teal));
+    }
+
+    .evidence-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin-top: 22px;
+    }
+
+    .evidence {
+      padding: 22px 24px;
+      min-height: 180px;
+      position: relative;
+    }
+
+    .evidence .ref {
+      font: 850 15px/1 Menlo, Consolas, monospace;
+      color: var(--teal);
+      margin-bottom: 12px;
+    }
+
+    .evidence h3 { font-size: 24px; margin-bottom: 8px; color: var(--blue); }
+    .evidence p { font-size: 18px; }
+
+    .source-list {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .source {
+      display: grid;
+      grid-template-columns: 74px 1fr;
+      gap: 14px;
+      padding: 16px;
+      min-height: 118px;
+    }
+
+    .source .idx {
+      color: var(--blue-2);
+      font: 850 20px/1 Menlo, Consolas, monospace;
+      white-space: nowrap;
+    }
+
+    .source h3 { font-size: 18px; line-height: 1.32; margin-bottom: 6px; }
+    .source p { font-size: 14px; line-height: 1.35; color: var(--gray); overflow-wrap: anywhere; }
+
+    .controls {
+      position: fixed;
+      left: 50%;
+      bottom: 18px;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 10px;
+      z-index: 10;
+      opacity: 0;
+      transition: opacity 160ms ease;
+    }
+    .controls:hover { opacity: 1; }
+
+    button {
+      height: 40px;
+      min-width: 92px;
+      border: 1px solid #aebdca;
+      background: #fff;
+      color: var(--blue);
+      border-radius: 999px;
+      font: 800 13px/1 Menlo, Consolas, monospace;
+      cursor: pointer;
+    }
+    button:hover { background: #eef5fa; }
+
+    .progress {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 5px;
+      background: #ced8e2;
+      z-index: 9;
+    }
+    .progress span {
+      display: block;
+      width: 0;
+      height: 100%;
+      background: linear-gradient(90deg, var(--blue), var(--teal), var(--amber));
+      transition: width 180ms ease;
+    }
+
+    @media print {
+      html, body { width: auto; height: auto; overflow: visible; background: #fff; }
+      .stage { width: 1920px; height: auto; transform: none !important; overflow: visible; box-shadow: none; }
+      .slide { position: relative; display: block !important; width: 1920px; height: 1080px; page-break-after: always; }
+      .controls, .progress { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="stage" id="stage">
+    <section class="slide title-slide active" data-screen-label="01 封面">
+      <div>
+        <div class="section-tag">PCCT QUALITY CONTROL</div>
+        <h1>光子计数 CT 质量控制体系建设</h1>
+        <p class="subtitle">面向三甲医院临床部署、验收测试与持续 QA 的汇报材料</p>
+        <div class="meta-strip">
+          <span class="pill">三甲医院医生汇报版</span>
+          <span class="pill teal">基础 CT QC + PCCT 专项 QC + 临床任务 QA</span>
+          <span class="pill amber">2026-05-15</span>
+        </div>
+      </div>
+      <div class="diagram-panel">
+        <h3 style="font-size:32px;color:var(--blue);">一句话结论</h3>
+        <p style="font-size:28px;line-height:1.42;margin-top:18px;color:#314255;">
+          PCCT 不是“更清楚的 CT”这么简单，而是一个同时输出解剖图像和能谱定量结果的平台；质量控制必须覆盖图像、剂量、能量、材料分解与临床任务可重复性。
+        </p>
+        <div class="grid-3" style="margin-top:42px;">
+          <div class="metric card"><div class="num">3</div><div class="label">质控层级</div><p>基础 CT QC、PCCT 专项 QC、临床任务 QA。</p></div>
+          <div class="metric card"><div class="num">25</div><div class="label">核心来源</div><p>期刊、ACR/AAPM、国家标准、FDA/厂商监管信息。</p></div>
+          <div class="metric card"><div class="num">19</div><div class="label">汇报页</div><p>面向医生与院内质控决策场景。</p></div>
+        </div>
+      </div>
+      <div class="slide-no">01 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="02 目录">
+      <div class="topbar"><span>PCCT QC</span><span>目录</span></div>
+      <div class="section-tag">AGENDA</div>
+      <h2>汇报路径：先讲临床价值，再讲如何管控质量</h2>
+      <div class="agenda">
+        <div class="agenda-item card"><div class="agenda-num">01</div><div><h3>为什么现在要讨论 PCCT QC</h3><p>PCCT 已从单厂商早期设备进入多厂商获批阶段，医院引进与使用都需要体系化管理。</p></div></div>
+        <div class="agenda-item card"><div class="agenda-num">02</div><div><h3>PCCT 相比传统 CT 改变了什么</h3><p>直接转换、逐光子计数、能量分箱、UHR 与能谱定量。</p></div></div>
+        <div class="agenda-item card"><div class="agenda-num">03</div><div><h3>现有 CT QC 哪些够、哪些不够</h3><p>ACR/GB/WS 做底线；UHR、VMI、碘/钙定量需要专项补充。</p></div></div>
+        <div class="agenda-item card"><div class="agenda-num">04</div><div><h3>三甲医院如何落地</h3><p>验收基线、日月季年 SOP、采购条款、临床任务闭环。</p></div></div>
+      </div>
+      <div class="slide-no">02 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="03 执行摘要">
+      <div class="topbar"><span>Executive Summary</span><span>核心判断</span></div>
+      <div class="section-tag">TAKEAWAYS</div>
+      <h2>给院内决策层的 4 个核心判断</h2>
+      <div class="grid-4">
+        <div class="metric card"><div class="num">01</div><div class="label">不是单纯探测器升级</div><p>PCCT 把 CT 从积分灰度成像推进到逐光子计数与能量分辨平台。</p></div>
+        <div class="metric card"><div class="num">02</div><div class="label">传统 QC 不够完整</div><p>CT 值、噪声、均匀性仍必要，但不足以覆盖 UHR 与能谱定量。</p></div>
+        <div class="metric card"><div class="num">03</div><div class="label">要按临床任务验证</div><p>心血管、肺部、骨关节、腹部肿瘤、儿科低剂量收益不同。</p></div>
+        <div class="metric card"><div class="num">04</div><div class="label">采购合同需写 QC 条款</div><p>UHR MTF、VMI 稳定性、碘/钙定量、软件升级后再基线。</p></div>
+      </div>
+      <div class="callout" style="margin-top:30px;">
+        <h3>建议采用三层质量体系</h3>
+        <p><strong>基础 CT QC</strong> 保证合规底线；<strong>PCCT 专项 QC</strong> 管住能量与 UHR；<strong>临床任务 QA</strong> 证明技术收益真实进入诊断流程。</p>
+      </div>
+      <div class="slide-no">03 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="04 技术变化">
+      <div class="topbar"><span>Technical Shift</span><span>技术机制</span></div>
+      <div class="section-tag">FROM EID TO PCD</div>
+      <h2>PCCT 改变的是探测链条，不只是图像后处理</h2>
+      <div class="split">
+        <div class="diagram-panel">
+          <div class="detector-row">
+            <div class="detector-box"><h3>EID-CT</h3><p>X 射线先转换为可见光，再由光电二极管积分读出；能量信息被加权混合。</p></div>
+            <div class="arrow"></div>
+            <div class="detector-box"><h3>PCCT</h3><p>半导体探测器直接把单个光子转换为电荷脉冲，并按能量阈值计数。</p></div>
+          </div>
+          <div class="pixel-grid" aria-label="detector pixels">
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+          </div>
+        </div>
+        <div>
+          <div class="mini-list">
+            <div class="mini"><h3>低电子噪声</h3><p>低能阈值可滤除部分电子噪声，低剂量和高分辨任务更有理论基础。</p></div>
+            <div class="mini"><h3>天然能谱数据</h3><p>每次扫描可产生 VMI、碘图、钙图、虚拟平扫等定量输出。</p></div>
+            <div class="mini"><h3>新误差源</h3><p>pile-up、阈值漂移、能量响应、charge sharing、K-escape、像素非均匀性。</p></div>
+            <div class="mini"><h3>QC 结论</h3><p>不能只看 CT 值和噪声；必须验证能谱输出和 UHR 任务是否长期可复现。</p></div>
+          </div>
+        </div>
+      </div>
+      <div class="slide-no">04 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="05 临床价值">
+      <div class="topbar"><span>Clinical Value</span><span>临床任务</span></div>
+      <div class="section-tag">TASK-BASED VALUE</div>
+      <h2>PCCT 价值是任务依赖的：不能用一个指标概括所有检查</h2>
+      <div class="matrix">
+        <div class="head">临床任务</div><div class="head">PCCT 潜在收益</div><div class="head">重点关注指标</div><div class="head">医生关注点</div>
+        <div class="rowhead">心血管</div><div><p>小血管、支架、钙化、运动伪影控制。</p></div><div><p>时间分辨率、碘图、CNR、钙定量一致性。</p></div><div><p>是否提升诊断信心，是否减少补扫或用药。</p></div>
+        <div class="rowhead">胸部</div><div><p>低剂量肺部筛查、肺小结节、间质性肺病纹理。</p></div><div><p>UHR、薄层噪声、NPS、小结节可见性。</p></div><div><p>低剂量下病灶边缘是否可靠。</p></div>
+        <div class="rowhead">骨关节</div><div><p>骨小梁、骨折线、肩腕颞骨等精细结构。</p></div><div><p>UHR MTF、骨 kernel、薄层噪声。</p></div><div><p>是否替代部分 CBCT 或减少不确定报告。</p></div>
+        <div class="rowhead">腹部肿瘤</div><div><p>低对比病灶、碘摄取、VMI、虚拟平扫。</p></div><div><p>VMI HU、碘密度误差、VNC 残留、CNR。</p></div><div><p>能否用于疗效评估和随访比较。</p></div>
+      </div>
+      <div class="slide-no">05 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="06 证据数据">
+      <div class="topbar"><span>Evidence</span><span>图像质量证据</span></div>
+      <div class="section-tag">SELECTED DATA</div>
+      <h2>关键研究数据：UHR、CNR、长期稳定性都有实证支持</h2>
+      <div class="grid-3">
+        <div class="metric card"><div class="num">16.5</div><div class="label">lp/cm</div><p>肩关节 PCD-CT UHR 骨 kernel ρ50；EID-CT sharp kernel 为 12.3 lp/cm [18]。</p></div>
+        <div class="metric card"><div class="num">59.2</div><div class="label">CNR</div><p>非增强胸部 PCD-CT CNR 59.2，对照 EID-CT 53.3，p&lt;0.001 [19]。</p></div>
+        <div class="metric card"><div class="num">0.11%</div><div class="label">VMI 70 keV 变化</div><p>2 年纵向研究中单源模式 VMI 70 keV 相对误差变化 [21]。</p></div>
+      </div>
+      <div class="bars">
+        <div class="bar-row"><span>EID sharp kernel</span><div class="track"><div class="bar" style="width:62%;"></div></div><span>12.3 lp/cm</span></div>
+        <div class="bar-row"><span>PCD non-UHR</span><div class="track"><div class="bar" style="width:60%;"></div></div><span>11.8 lp/cm</span></div>
+        <div class="bar-row"><span>PCD UHR bone</span><div class="track"><div class="bar" style="width:84%;"></div></div><span>16.5 lp/cm</span></div>
+      </div>
+      <p class="note">解释：这些数据支持“PCCT 有能力提供更高分辨或更好 CNR”，但仍需按本院协议和临床任务建立基线。</p>
+      <div class="slide-no">06 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="07 现有标准边界">
+      <div class="topbar"><span>Standards</span><span>现有标准边界</span></div>
+      <div class="section-tag">WHAT IS ENOUGH / NOT ENOUGH</div>
+      <h2>ACR / GB / WS 仍是底线，但不是 PCCT 全部答案</h2>
+      <div class="split">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>现有框架</th><th>覆盖内容</th><th>PCCT 缺口</th></tr></thead>
+            <tbody>
+              <tr><td>ACR CT QC</td><td>CT 值、噪声、均匀性、低/高对比分辨、剂量。</td><td>UHR MTF、能谱图像 CT 值、物质分解。</td></tr>
+              <tr><td>ACR phantom</td><td>高分辨模块最高 12 lp/cm。</td><td>PCCT UHR MTF 可接近 40 lp/cm，模体上限不足。</td></tr>
+              <tr><td>GB 17589-2011</td><td>CT 质量保证检测基本要求。</td><td>未细化 PCCT 能谱专项指标。</td></tr>
+              <tr><td>WS 519-2019</td><td>CT 质量控制检测要求、剂量和噪声方法。</td><td>未给出 VMI、碘图、阈值、pile-up 判定标准。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout">
+          <h3>落地原则</h3>
+          <p>用现有标准守住合规底线；用 PCCT 专项项目证明高端能力；用临床任务 QA 判断设备是否真正改善医生工作。</p>
+          <div class="mini-list">
+            <div class="mini"><h3>底线</h3><p>传统 CT QC 不能删。</p></div>
+            <div class="mini"><h3>补充</h3><p>UHR、VMI、碘/钙定量必须加。</p></div>
+          </div>
+        </div>
+      </div>
+      <div class="slide-no">07 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="08 三层质控">
+      <div class="topbar"><span>QC Architecture</span><span>三层架构</span></div>
+      <div class="section-tag">THREE-LAYER MODEL</div>
+      <h2>推荐三层体系：基础合规、专项性能、临床任务</h2>
+      <div class="grid-3">
+        <div class="callout"><h3>Layer 1 基础 CT QC</h3><p>水模、ACR/Gammex 464 或同等模体；CT 值、噪声、均匀性、低/高对比分辨、CTDI。目标是合规、稳定、可审计。</p></div>
+        <div class="callout"><h3>Layer 2 PCCT 专项 QC</h3><p>UHR MTF、NPS、VMI 稳定性、碘/钙浓度、VNC 残留、计数率线性、pile-up 相关非线性。目标是管住新技术风险。</p></div>
+        <div class="callout"><h3>Layer 3 临床任务 QA</h3><p>心血管、胸部、骨关节、腹部肿瘤、儿科低剂量等专科协议。目标是证明诊断价值进入临床流程。</p></div>
+      </div>
+      <div class="table-wrap" style="margin-top:26px;">
+        <table>
+          <thead><tr><th>问题</th><th>基础 CT QC 回答</th><th>PCCT 专项 QC 回答</th><th>临床任务 QA 回答</th></tr></thead>
+          <tbody>
+            <tr><td>设备是否稳定</td><td>CT 值、噪声、均匀性。</td><td>VMI、材料图、UHR 输出是否漂移。</td><td>医生读片信心是否稳定。</td></tr>
+            <tr><td>剂量是否合理</td><td>CTDIvol / CTDIw。</td><td>低剂量下能谱输出是否仍准确。</td><td>是否减少补扫或不必要增强。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="slide-no">08 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="09 验收基线">
+      <div class="topbar"><span>Acceptance</span><span>验收基线</span></div>
+      <div class="section-tag">BASELINE FIRST</div>
+      <h2>验收不能只看开机合格：要形成 3 张基线表</h2>
+      <div class="grid-3">
+        <div class="time-card card"><div class="time">表 1</div><h3>基础 CT QC 基线</h3><ul><li>CT 值、噪声、均匀性。</li><li>低/高对比分辨力。</li><li>CTDIvol / CTDIw。</li><li>伪影、层厚、FOV。</li></ul></div>
+        <div class="time-card card"><div class="time">表 2</div><h3>PCCT 专项基线</h3><ul><li>UHR MTF50 / MTF10。</li><li>VMI 40-190 keV 稳定性。</li><li>碘/钙/水材料分解。</li><li>mAs 梯度与 pile-up 风险。</li></ul></div>
+        <div class="time-card card"><div class="time">表 3</div><h3>临床任务基线</h3><ul><li>心血管、胸部、骨关节、腹部、儿科。</li><li>剂量、对比剂、重建序列。</li><li>阅片评分和报告使用率。</li><li>异常处置路径。</li></ul></div>
+      </div>
+      <div class="callout" style="margin-top:26px;"><h3>关键要求</h3><p>每次基线必须记录软件版本、协议名、kernel、QIR/IR level、VMI keV、material map 类型。否则后续趋势无法解释。</p></div>
+      <div class="slide-no">09 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="10 专项指标">
+      <div class="topbar"><span>Special QC</span><span>专项指标</span></div>
+      <div class="section-tag">WHAT TO ADD</div>
+      <h2>PCCT 应新增的专项检测项目</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>项目</th><th>推荐方法</th><th>判断重点</th><th>临床相关性</th></tr></thead>
+          <tbody>
+            <tr><td>UHR MTF</td><td>wire / slanted-edge phantom；记录 MTF50、MTF10。</td><td>是否超过传统 ACR phantom 上限；是否随 kernel/QIR 改变。</td><td>骨关节、肺小结节、耳颞骨、小血管。</td></tr>
+            <tr><td>NPS / 噪声纹理</td><td>均匀 phantom + 多重建参数。</td><td>不能只看 SD；迭代重建会改变噪声频谱。</td><td>低对比病灶和肺纹理。</td></tr>
+            <tr><td>VMI 稳定性</td><td>40、70、100、190 keV 代表点纵向监测。</td><td>HU 漂移、噪声、软件升级影响。</td><td>肿瘤随访、血管强化、疗效评估。</td></tr>
+            <tr><td>材料分解</td><td>碘/钙/水 spectral phantom。</td><td>浓度误差、VNC 残留、reference truth。</td><td>碘图、钙图、虚拟平扫。</td></tr>
+            <tr><td>高通量线性</td><td>mAs 梯度、体厚扩展环。</td><td>pile-up 导致计数损失或能谱偏差。</td><td>大体型、心脏、高 mA 协议。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="slide-no">10 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="11 SOP周期">
+      <div class="topbar"><span>SOP</span><span>检测周期</span></div>
+      <div class="section-tag">ROUTINE WORKFLOW</div>
+      <h2>日、月、季、年：不同频率解决不同问题</h2>
+      <div class="timeline">
+        <div class="time-card card"><div class="time">日检</div><h3>运行状态</h3><ul><li>报警与自动校准日志。</li><li>快速水模或厂商日检。</li><li>伪影目视检查。</li><li>重建输出是否完整。</li></ul></div>
+        <div class="time-card card"><div class="time">月检</div><h3>基础稳定性</h3><ul><li>CT 值、噪声、均匀性。</li><li>CTDIvol / 协议剂量。</li><li>标准与 UHR 模式抽查。</li><li>异常趋势记录。</li></ul></div>
+        <div class="time-card card"><div class="time">季检</div><h3>任务性能</h3><ul><li>心血管、胸部、骨关节等任务协议。</li><li>UHR MTF / NPS。</li><li>低对比 CNR。</li><li>医生主观评分。</li></ul></div>
+        <div class="time-card card"><div class="time">年检</div><h3>验收级复测</h3><ul><li>VMI 多能量点。</li><li>碘/钙材料分解。</li><li>高通量线性。</li><li>软件/硬件变更回顾。</li></ul></div>
+      </div>
+      <div class="slide-no">11 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="12 变更管理">
+      <div class="topbar"><span>Change Control</span><span>变更管理</span></div>
+      <div class="section-tag">WHEN TO RE-BASELINE</div>
+      <h2>哪些情况必须重新建立基线</h2>
+      <div class="grid-2">
+        <div class="callout"><h3>触发条件</h3><div class="mini-list">
+          <div class="mini"><h3>硬件变更</h3><p>探测器模块、X 线管、准直器、主控采集链路。</p></div>
+          <div class="mini"><h3>软件变更</h3><p>重建算法、QIR/IR、能谱算法、DICOM 输出、后处理软件升级。</p></div>
+          <div class="mini"><h3>协议变更</h3><p>kVp、mAs、pitch、rotation time、kernel、slice thickness、VMI keV。</p></div>
+          <div class="mini"><h3>异常事件</h3><p>环状伪影、材料图异常、VNC 残留升高、报告端序列缺失。</p></div>
+        </div></div>
+        <div class="callout"><h3>再基线范围</h3><p>不是全机重做一遍，而是重扫受影响协议与相关 phantom。</p>
+          <div class="table-wrap" style="margin-top:22px;">
+            <table>
+              <thead><tr><th>变更类型</th><th>至少复测</th></tr></thead>
+              <tbody>
+                <tr><td>能谱算法升级</td><td>VMI HU、碘/钙图、VNC。</td></tr>
+                <tr><td>UHR kernel 变化</td><td>MTF、NPS、薄层噪声。</td></tr>
+                <tr><td>心脏协议调整</td><td>时间分辨率、CNR、剂量。</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="slide-no">12 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="13 厂商格局">
+      <div class="topbar"><span>Vendors</span><span>厂商格局</span></div>
+      <div class="section-tag">MULTI-VENDOR ERA</div>
+      <h2>截至 2026-05-15：PCCT 已进入多厂商阶段</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>厂商/系统</th><th>监管状态与披露</th><th>对医院验收的意义</th></tr></thead>
+          <tbody>
+            <tr><td>Siemens NAEOTOM Alpha / Alpha class</td><td>2021 年 NAEOTOM Alpha 获 FDA clearance；2025 年 Alpha class 扩展，包含 Alpha.Peak、Alpha.Pro、Alpha.Prime [12,13]。</td><td>关注 CdTe 路线、双源/单源差异、0.2 mm、心脏时间分辨率、Quantum HD 与 QIR。</td></tr>
+            <tr><td>GE Photonova Spectra</td><td>2026-03-20 FDA K253520；GE 披露 Deep Silicon detector 与 8-bin energy resolution [14,15]。</td><td>关注 8-bin 输出、宽覆盖、UHD + spectral one-scan workflow、DICOM 与后处理生态。</td></tr>
+            <tr><td>联影 uCT Ultima</td><td>2025-08-25 NMPA marketing authorization；披露像素面积降至传统 1/9 [16]。</td><td>关注国产系统专项 QC、UHR 噪声补偿算法、国内售后与注册技术要求。</td></tr>
+            <tr><td>东软 NeuViz P10</td><td>2025 年披露 NMPA 市场批准；CZT direct conversion、8 cm detector [17]。</td><td>关注宽体系统高通量线性、能谱输出和多协议临床验收。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">厂商资料只用于确认监管状态与产品差异；临床收益仍应由本院任务验证和同行评议证据支撑。</p>
+      <div class="slide-no">13 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="14 采购验收条款">
+      <div class="topbar"><span>Procurement</span><span>采购验收</span></div>
+      <div class="section-tag">CONTRACT ITEMS</div>
+      <h2>采购文件建议写入的 PCCT 专项条款</h2>
+      <div class="grid-2">
+        <div class="callout"><h3>技术与验收</h3><div class="mini-list">
+          <div class="mini"><h3>探测器与能量输出</h3><p>材料、像素尺寸、能量 bin/阈值、VMI 范围、material map 类型。</p></div>
+          <div class="mini"><h3>UHR 验收</h3><p>MTF50/MTF10、最小层厚、骨/肺 kernel、低剂量 UHR 协议。</p></div>
+          <div class="mini"><h3>能谱定量</h3><p>碘/钙 phantom 方法、VNC 残留、DICOM 标签、报告端显示。</p></div>
+        </div></div>
+        <div class="callout"><h3>服务与管理</h3><div class="mini-list">
+          <div class="mini"><h3>年度专项 QA 支持</h3><p>厂商参与 UHR、VMI、材料分解复测并提供记录。</p></div>
+          <div class="mini"><h3>软件升级再验证</h3><p>升级前后自动触发受影响协议再基线。</p></div>
+          <div class="mini"><h3>培训与交接</h3><p>医生、技师、物理师、工程师分别培训；提供 QC 手册和异常处置路径。</p></div>
+        </div></div>
+      </div>
+      <div class="slide-no">14 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="15 组织治理">
+      <div class="topbar"><span>Governance</span><span>组织治理</span></div>
+      <div class="section-tag">WHO OWNS QC</div>
+      <h2>PCCT 质控不是一个人的工作：需要小组治理</h2>
+      <div class="grid-3">
+        <div class="callout"><h3>放射科医生</h3><p>定义临床任务、读片质量标准、报告是否使用能谱结果、异常是否影响诊断。</p></div>
+        <div class="callout"><h3>医学物理师</h3><p>设计验收方案、执行 MTF/NPS/剂量/能谱定量、维护趋势阈值。</p></div>
+        <div class="callout"><h3>技师团队</h3><p>执行日检月检、记录协议参数、发现伪影和输出缺失。</p></div>
+      </div>
+      <div class="grid-3" style="margin-top:22px;">
+        <div class="callout"><h3>医学工程</h3><p>厂商对接、硬件维护、合同条款、维修后复测闭环。</p></div>
+        <div class="callout"><h3>PACS/信息</h3><p>DICOM 能谱对象、后处理结果、报告系统字段、AI 接口。</p></div>
+        <div class="callout"><h3>厂商应用/工程</h3><p>协议优化、专项 phantom、软件升级说明、培训和异常定位。</p></div>
+      </div>
+      <div class="slide-no">15 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="16 90天路线图">
+      <div class="topbar"><span>Roadmap</span><span>90 天路线图</span></div>
+      <div class="section-tag">IMPLEMENTATION PLAN</div>
+      <h2>上线后 90 天：从设备验收到临床任务闭环</h2>
+      <div class="timeline">
+        <div class="time-card card"><div class="time">0-2 周</div><h3>资料与责任</h3><ul><li>收集注册证、技术要求、QC 手册。</li><li>明确质控小组和责任人。</li><li>选定重点临床任务。</li></ul></div>
+        <div class="time-card card"><div class="time">2-6 周</div><h3>建立基线</h3><ul><li>基础 CT phantom。</li><li>UHR MTF / NPS。</li><li>VMI 与碘/钙 phantom。</li><li>剂量与协议表。</li></ul></div>
+        <div class="time-card card"><div class="time">6-10 周</div><h3>任务验证</h3><ul><li>心血管/胸部/骨关节/腹部/儿科。</li><li>医生主观评分。</li><li>失败率、重建时间、报告使用率。</li></ul></div>
+        <div class="time-card card"><div class="time">10-12 周</div><h3>SOP 固化</h3><ul><li>日月季年表单。</li><li>越限处理流程。</li><li>软件升级再基线规则。</li><li>季度复盘会议。</li></ul></div>
+      </div>
+      <div class="slide-no">16 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="17 风险与结论">
+      <div class="topbar"><span>Risks & Conclusion</span><span>风险与结论</span></div>
+      <div class="section-tag">FINAL MESSAGE</div>
+      <h2>最终结论：把 PCCT 当作定量影像平台来管理</h2>
+      <div class="grid-2">
+        <div class="callout"><h3>主要风险</h3><div class="mini-list">
+          <div class="mini"><h3>过度泛化</h3><p>PCCT 不等于所有检查都自动更优；必须按任务验证。</p></div>
+          <div class="mini"><h3>只做基础 QC</h3><p>传统 CT 指标合格，不能代表 VMI、碘图、UHR 稳定。</p></div>
+          <div class="mini"><h3>忽略软件版本</h3><p>算法升级可能改变定量基线，需再验证。</p></div>
+        </div></div>
+        <div class="callout"><h3>管理结论</h3><p style="font-size:28px;line-height:1.42;color:#314255;">三甲医院引入 PCCT，应同步建立专项质控体系；否则高端设备的临床价值、科研价值和合规风险都无法被稳定管理。</p>
+          <div class="meta-strip" style="margin-top:32px;">
+            <span class="pill teal">先建基线</span>
+            <span class="pill teal">再做趋势</span>
+            <span class="pill teal">按任务验证</span>
+            <span class="pill amber">变更后复测</span>
+          </div>
+        </div>
+      </div>
+      <div class="slide-no">17 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="18 参考文献">
+      <div class="topbar"><span>References I</span><span>质控与标准</span></div>
+      <div class="section-tag">SELECTED REFERENCES</div>
+      <h2>质控、标准与定量验证依据</h2>
+      <div class="source-list">
+        <div class="source card"><div class="idx">[6]</div><div><h3>Ahmed et al. PCCT QA: Tips and caveats</h3><p>JACMP 2023. PCCT 质控专项文献，支持 UHR MTF 与多能谱 phantom。</p></div></div>
+        <div class="source card"><div class="idx">[7]</div><div><h3>ACR CT QC Manual</h3><p>ACR 2025 revision. 传统 CT QC 框架和厂商规格/趋势监测原则。</p></div></div>
+        <div class="source card"><div class="idx">[8]</div><div><h3>ACR CT Phantom Overview</h3><p>ACR phantom 覆盖 CT 值、噪声、低/高对比分辨、均匀性；高分辨模块至 12 lp/cm。</p></div></div>
+        <div class="source card"><div class="idx">[9]</div><div><h3>AAPM TG 233</h3><p>CT 性能评价与 task-based image quality 思路，支持按临床任务优化协议。</p></div></div>
+        <div class="source card"><div class="idx">[10]</div><div><h3>GB 17589-2011</h3><p>中国 CT 质量保证检测规范，是基础合规框架之一。</p></div></div>
+        <div class="source card"><div class="idx">[11]</div><div><h3>WS 519-2019 解读</h3><p>中国 CT 质量控制检测背景、噪声、CTDIw 与厂商说明书判定逻辑。</p></div></div>
+        <div class="source card"><div class="idx">[21]</div><div><h3>Liu et al. 2-year PCCT stability</h3><p>European Radiology 2024. VMI 与碘密度长期稳定性证据。</p></div></div>
+        <div class="source card"><div class="idx">[23]</div><div><h3>FDA CDRH spectral CT phantom</h3><p>材料定量准确性 phantom 方法；关注 beam hardening、pile-up、scatter、energy response。</p></div></div>
+      </div>
+      <p class="note">本页用于回答“PCCT 质控怎么做、传统 CT 标准是否仍适用、哪些专项指标必须新增”。</p>
+      <div class="slide-no">18 / 19</div>
+    </section>
+
+    <section class="slide" data-screen-label="19 参考文献">
+      <div class="topbar"><span>References II</span><span>技术、临床与监管</span></div>
+      <div class="section-tag">SELECTED REFERENCES</div>
+      <h2>技术原理、临床价值与监管依据</h2>
+      <div class="source-list">
+        <div class="source card"><div class="idx">[1-5]</div><div><h3>PCCT 技术原理与系统综述</h3><p>Taguchi 2013、Willemink 2018、Leng 2019、Flohr 2020、Rajendran 2022；支撑“逐光子计数、能量分辨、天然能谱输出”。</p></div></div>
+        <div class="source card"><div class="idx">[18]</div><div><h3>Patzer et al. Shoulder PCD-CT</h3><p>Scientific Reports 2023. UHR PCD-CT 与 EID-CT 肩关节图像质量比较。</p></div></div>
+        <div class="source card"><div class="idx">[19]</div><div><h3>Donuru et al. Chest PCD-CT</h3><p>European Journal of Radiology Open 2023. 非增强胸部 CT 剂量与 CNR 证据。</p></div></div>
+        <div class="source card"><div class="idx">[20]</div><div><h3>Chamberlin et al. Lung UHR PCCT</h3><p>Clinical Imaging 2023. 肺部 UHR phantom 与临床图像质量评估。</p></div></div>
+        <div class="source card"><div class="idx">[22]</div><div><h3>Zheng et al. Energy thresholds</h3><p>能量阈值优化、pile-up 与能量响应影响；支持阈值/计数率专项 QC。</p></div></div>
+        <div class="source card"><div class="idx">[24]</div><div><h3>Douek et al. Clinical applications</h3><p>Radiology 2023. PCCT 先导临床应用综述，提示按器官系统和任务验证。</p></div></div>
+        <div class="source card"><div class="idx">[25]</div><div><h3>McCollough et al. Standardization</h3><p>Investigative Radiology 2023. PCCT 定量成像与标准化需求。</p></div></div>
+        <div class="source card"><div class="idx">[12-17]</div><div><h3>厂商与监管资料</h3><p>Siemens、GE/FDA、联影、东软的 PCCT 监管状态、系统架构和产品差异。</p></div></div>
+      </div>
+      <p class="note">完整参考文献、URL、检索日期和证据台账见研究报告目录：PCCT_QC_Tertiary_Hospital_Research_20260515。</p>
+      <div class="slide-no">19 / 19</div>
+    </section>
+  </main>
+
+  <div class="controls">
+    <button id="prevBtn" type="button">PREV</button>
+    <button id="nextBtn" type="button">NEXT</button>
+  </div>
+  <div class="progress"><span id="progressBar"></span></div>
+
+  <script>
+    const stage = document.getElementById('stage');
+    const slides = Array.from(document.querySelectorAll('.slide'));
+    const progressBar = document.getElementById('progressBar');
+    const hashSlide = Number.parseInt(window.location.hash.replace('#', ''), 10);
+    let current = Number.isFinite(hashSlide) && hashSlide > 0
+      ? hashSlide - 1
+      : Number.parseInt(localStorage.getItem('pcct-white-deck-slide') || '0', 10);
+
+    function scaleStage() {
+      const scale = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+      stage.style.transform = `scale(${scale})`;
+    }
+
+    function showSlide(index) {
+      current = Math.max(0, Math.min(index, slides.length - 1));
+      slides.forEach((slide, idx) => slide.classList.toggle('active', idx === current));
+      progressBar.style.width = `${((current + 1) / slides.length) * 100}%`;
+      localStorage.setItem('pcct-white-deck-slide', String(current));
+      window.history.replaceState(null, '', `#${current + 1}`);
+    }
+
+    document.getElementById('prevBtn').addEventListener('click', () => showSlide(current - 1));
+    document.getElementById('nextBtn').addEventListener('click', () => showSlide(current + 1));
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') {
+        event.preventDefault();
+        showSlide(current + 1);
+      }
+      if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
+        event.preventDefault();
+        showSlide(current - 1);
+      }
+      if (event.key === 'Home') showSlide(0);
+      if (event.key === 'End') showSlide(slides.length - 1);
+    });
+
+    window.addEventListener('resize', scaleStage);
+    scaleStage();
+    showSlide(current);
+  </script>
+</body>
+</html>
