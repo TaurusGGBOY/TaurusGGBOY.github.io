@@ -1,0 +1,25 @@
+{
+  "name": "taurusggboy-github-io",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev --host 127.0.0.1",
+    "build": "astro check && astro build",
+    "verify:dist": "node scripts/verify-dist.mjs",
+    "preview": "astro preview --host 127.0.0.1",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "test:e2e": "sh -c 'if find tests/e2e -type f \\( -name \"*.spec.ts\" -o -name \"*.test.ts\" \\) 2>/dev/null | grep -q .; then playwright test --pass-with-no-tests; else echo \"No e2e tests found, skipping Playwright.\"; fi'"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^4.0.0",
+    "astro": "^5.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@astrojs/check": "^0.9.4",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

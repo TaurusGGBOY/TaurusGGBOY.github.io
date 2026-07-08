@@ -1,0 +1,40 @@
+---
+interface Props {
+  activePath: string;
+}
+
+type NavLink =
+  | { href: string; label: string; activeExact: string; activePrefix?: never }
+  | { href: string; label: string; activePrefix: string; activeExact?: never };
+
+const { activePath } = Astro.props;
+const links: NavLink[] = [
+  { href: "/", label: "Home", activeExact: "/" },
+  { href: "/archive/#writing", label: "Writing", activeExact: "/archive/#writing" },
+  { href: "/topics/web/", label: "Topics", activePrefix: "/topics/" },
+  { href: "/archive/", label: "Archive", activeExact: "/archive/" },
+  { href: "/about/", label: "About", activeExact: "/about/" },
+];
+
+function isActive(link: NavLink) {
+  if (link.activeExact !== undefined && activePath === link.activeExact) {
+    return true;
+  }
+
+  return link.activePrefix !== undefined && activePath.startsWith(link.activePrefix);
+}
+---
+
+<header class="site-header">
+  <nav class="site-nav" aria-label="Primary navigation">
+    <a class="brand" href="/">gaoguobin</a>
+    <div class="nav-links">
+      {links.map((link) => (
+        <a href={link.href} aria-current={isActive(link) ? "page" : undefined}>
+          {link.label}
+        </a>
+      ))}
+      <button class="icon-button" type="button" data-search-open aria-label="Open search">⌕</button>
+    </div>
+  </nav>
+</header>

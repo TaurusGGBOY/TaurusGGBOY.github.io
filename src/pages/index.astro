@@ -1,0 +1,102 @@
+---
+import { getCollection } from "astro:content";
+import type { CollectionEntry } from "astro:content";
+import CurrentFocus from "../components/CurrentFocus.astro";
+import FeaturedStory from "../components/FeaturedStory.astro";
+import PostCard from "../components/PostCard.astro";
+import PreviewDrawer from "../components/PreviewDrawer.astro";
+import ReadingQueue from "../components/ReadingQueue.astro";
+import SearchOverlay from "../components/SearchOverlay.astro";
+import TopicFilter from "../components/TopicFilter.astro";
+import BaseLayout from "../layouts/BaseLayout.astro";
+import { getSortedPosts, getTopics, type PostSummary } from "../lib/posts";
+
+const entries = await getCollection("posts");
+const posts: PostSummary[] = entries.map((entry: CollectionEntry<"posts">) => ({
+  slug: entry.slug,
+  title: entry.data.title,
+  date: entry.data.date,
+  summary: entry.data.summary,
+  tags: entry.data.tags,
+  featured: entry.data.featured,
+  readTime: entry.data.readTime,
+  href: `/posts/${entry.slug}/`,
+}));
+
+const sortedPosts = getSortedPosts(posts);
+const topics = getTopics(sortedPosts);
+const lead = sortedPosts[0];
+const highlights = sortedPosts.slice(1, 3);
+const recentPosts = sortedPosts.slice(3);
+---
+
+<BaseLayout
+  title="Personal Journal Magazine"
+  description="A personal journal magazine for web projects, game experiments, and technical notes."
+>
+  <section class="home-intro" aria-labelledby="home-title">
+    <p class="eyebrow">Personal journal magazine</p>
+    <h1 id="home-title">Notes on building, reading, and playing with software.</h1>
+    <p>
+      A small archive of project notes, game experiments, and practical writing from the path between idea and working system.
+    </p>
+  </section>
+
+  <FeaturedStory lead={lead} highlights={highlights} />
+
+  <div class="home-grid">
+    <section aria-labelledby="recent-writing-title">
+      <div class="dialog-head">
+        <h2 id="recent-writing-title">Recent writing</h2>
+        <button class="button" type="button" data-search-open>Search</button>
+      </div>
+      <div class="writing-list">
+        {recentPosts.length > 0 ? (
+          recentPosts.map((post) => <PostCard post={post} />)
+        ) : (
+          <p class="muted">More writing will appear here as the archive grows.</p>
+        )}
+      </div>
+    </section>
+
+    <aside class="side-rail" aria-label="Homepage tools">
+      <CurrentFocus />
+      <TopicFilter topics={topics} />
+      <ReadingQueue />
+    </aside>
+  </div>
+
+  <SearchOverlay posts={sortedPosts} />
+  <PreviewDrawer posts={sortedPosts} />
+
+  <div class="overlay" data-contact-modal hidden>
+    <section
+      class="overlay-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="contact-title"
+    >
+      <div class="dialog-head">
+        <h2 id="contact-title">Contact</h2>
+        <button class="icon-button" type="button" aria-label="Close contact form" data-contact-close>Close</button>
+      </div>
+      <form class="contact-form" data-contact-form>
+        <label for="contact-name">Name</label>
+        <input id="contact-name" name="name" type="text" autocomplete="name" required />
+
+        <label for="contact-email">Email</label>
+        <input id="contact-email" name="email" type="email" autocomplete="email" required />
+
+        <label for="contact-message">Message</label>
+        <textarea id="contact-message" name="message" rows="5" required></textarea>
+
+        <button class="button primary" type="submit">Send message</button>
+        <p class="muted" data-contact-success hidden>Message queued. Thank you for reaching out.</p>
+      </form>
+    </section>
+  </div>
+</BaseLayout>
+
+<script>
+  import "../scripts/home-interactions";
+</script>

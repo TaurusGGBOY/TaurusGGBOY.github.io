@@ -1,0 +1,26 @@
+---
+import type { PostSummary } from "../lib/posts";
+
+interface Props {
+  post: PostSummary;
+}
+
+const { post } = Astro.props;
+const serializedTags = JSON.stringify(post.tags);
+---
+
+<article class="post-card" data-post-card data-tags={serializedTags} data-slug={post.slug}>
+  <div class="meta">
+    <time datetime={post.date.toISOString()}>{post.date.toLocaleDateString("en", { year: "numeric", month: "short", day: "numeric" })}</time>
+    <span> · {post.readTime}</span>
+  </div>
+  <h3><a href={post.href}>{post.title}</a></h3>
+  <p>{post.summary}</p>
+  <div class="tag-row">
+    {post.tags.map((tag) => <span class="tag">{tag}</span>)}
+  </div>
+  <div class="post-actions">
+    <a class="button primary" href={post.href}>Read article</a>
+    <button class="button" type="button" data-preview-open={post.slug}>Preview</button>
+  </div>
+</article>

@@ -1,0 +1,75 @@
+---
+import { getCollection, type CollectionEntry } from "astro:content";
+import PostCard from "../../components/PostCard.astro";
+import PreviewDrawer from "../../components/PreviewDrawer.astro";
+import SearchOverlay from "../../components/SearchOverlay.astro";
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import {
+  filterPostsByTopic,
+  getSortedPosts,
+  getTopics,
+  type PostSummary,
+} from "../../lib/posts";
+
+export async function getStaticPaths() {
+  const entries = await getCollection("posts");
+  const posts: PostSummary[] = entries.map((entry: CollectionEntry<"posts">) => ({
+    slug: entry.slug,
+    title: entry.data.title,
+    date: entry.data.date,
+    summary: entry.data.summary,
+    tags: entry.data.tags,
+    featured: entry.data.featured,
+    readTime: entry.data.readTime,
+    href: `/posts/${entry.slug}/`,
+  }));
+
+  return getTopics(posts).map(({ name }) => ({
+    params: { topic: name },
+  }));
+}
+
+const { topic = "" } = Astro.params;
+const entries = await getCollection("posts");
+const posts: PostSummary[] = entries.map((entry: CollectionEntry<"posts">) => ({
+  slug: entry.slug,
+  title: entry.data.title,
+  date: entry.data.date,
+  summary: entry.data.summary,
+  tags: entry.data.tags,
+  featured: entry.data.featured,
+  readTime: entry.data.readTime,
+  href: `/posts/${entry.slug}/`,
+}));
+const sortedPosts = getSortedPosts(posts);
+const topicPosts = getSortedPosts(filterPostsByTopic(posts, topic));
+const pageTitle = topic ? `Topic: ${topic}` : "Topic";
+---
+
+<BaseLayout
+  title={`${pageTitle} · gaoguobin`}
+  description={`Posts filed under ${topic || "this topic"} in gaoguobin's personal journal magazine.`}
+  activePath="/topics/"
+>
+  <section class="home-intro" aria-labelledby="topic-title">
+    <p class="eyebrow">Topic</p>
+    <h1 id="topic-title">{pageTitle}</h1>
+    <p>
+      {topicPosts.length} {topicPosts.length === 1 ? "entry" : "entries"} collected from the writing archive.
+    </p>
+  </section>
+
+  <section aria-labelledby="topic-writing-title">
+    <h2 id="topic-writing-title">Writing</h2>
+    <div class="writing-list">
+      {topicPosts.map((post) => <PostCard post={post} />)}
+    </div>
+  </section>
+
+  <PreviewDrawer posts={topicPosts} />
+  <SearchOverlay posts={sortedPosts} />
+</BaseLayout>
+
+<script>
+  import "../../scripts/home-interactions";
+</script>
