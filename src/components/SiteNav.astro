@@ -6,8 +6,8 @@ interface Props {
 const { activePath } = Astro.props;
 const links = [
   { href: "/", label: "Home" },
-  { href: "/archive/", label: "Writing" },
-  { href: "/topics/web/", label: "Topics" },
+  { href: "/writing/", label: "Writing" },
+  { href: "/topics/", label: "Topics" },
   { href: "/archive/", label: "Archive" },
   { href: "/about/", label: "About" },
 ];
@@ -17,7 +17,7 @@ function isActive(href: string) {
     return activePath === "/";
   }
 
-  return activePath.startsWith(href);
+  return activePath === href || activePath.startsWith(href);
 }
 ---
 
