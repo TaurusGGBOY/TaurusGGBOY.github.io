@@ -1,0 +1,43 @@
+---
+import { getCollection, render, type CollectionEntry } from "astro:content";
+import BaseLayout from "../../layouts/BaseLayout.astro";
+
+interface Props {
+  post: CollectionEntry<"posts">;
+}
+
+export async function getStaticPaths() {
+  const posts = await getCollection("posts");
+
+  return posts.map((post: CollectionEntry<"posts">) => ({
+    params: { slug: post.slug },
+    props: { post },
+  }));
+}
+
+const { post } = Astro.props as Props;
+const { Content } = await render(post);
+---
+
+<BaseLayout
+  title={`${post.data.title} · gaoguobin`}
+  description={post.data.summary}
+  activePath="/archive/"
+>
+  <article class="post-card" aria-labelledby="post-title">
+    <p class="meta">
+      <time datetime={post.data.date.toISOString()}>
+        {post.data.date.toLocaleDateString("en", { year: "numeric", month: "short", day: "numeric" })}
+      </time>
+      <span> · {post.data.readTime}</span>
+    </p>
+    <h1 id="post-title">{post.data.title}</h1>
+    <p>{post.data.summary}</p>
+    <div class="tag-row" aria-label="Post topics">
+      {post.data.tags.map((tag: string) => (
+        <a class="tag" href={`/topics/${encodeURIComponent(tag.trim().toLowerCase())}/`}>{tag}</a>
+      ))}
+    </div>
+    <Content />
+  </article>
+</BaseLayout>
