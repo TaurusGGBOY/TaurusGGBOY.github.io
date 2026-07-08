@@ -1,0 +1,53 @@
+---
+import type { PostSummary } from "../lib/posts";
+
+interface Props {
+  posts: PostSummary[];
+}
+
+const { posts } = Astro.props;
+---
+
+<div class="overlay" data-search-overlay hidden>
+  <section
+    class="overlay-panel"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="search-writing-title"
+  >
+    <div class="dialog-head">
+      <h2 id="search-writing-title">Search writing</h2>
+      <button class="icon-button" type="button" aria-label="Close search" data-search-close>Close</button>
+    </div>
+
+    <form class="search-form" role="search">
+      <label for="search-writing-input">Search writing</label>
+      <input
+        id="search-writing-input"
+        type="search"
+        name="query"
+        autocomplete="off"
+        placeholder="Search by title, summary, or topic"
+        data-search-input
+      />
+    </form>
+
+    <div class="search-results" data-search-results>
+      {posts.map((post) => {
+        const searchText = [post.title, post.summary, post.tags.join(" ")].join(" ");
+
+        return (
+          <a
+            class="search-result"
+            href={post.href}
+            data-search-result
+            data-search-text={searchText}
+          >
+            <span>{post.title}</span>
+            <small>{post.summary}</small>
+          </a>
+        );
+      })}
+    </div>
+  </section>
+</div>

@@ -1,0 +1,75 @@
+---
+import type { PostSummary } from "../lib/posts";
+
+interface Props {
+  lead?: PostSummary;
+  highlights: PostSummary[];
+}
+
+const { lead, highlights } = Astro.props;
+---
+
+{
+  lead ? (
+    <section class="featured-grid" aria-labelledby="featured-heading">
+      <article
+        class="lead-story"
+        data-post-card
+        data-tags={JSON.stringify(lead.tags)}
+        data-slug={lead.slug}
+      >
+        <p class="eyebrow" id="featured-heading">Featured story</p>
+        <div class="meta">
+          <time datetime={lead.date.toISOString()}>
+            {lead.date.toLocaleDateString("en", { year: "numeric", month: "short", day: "numeric" })}
+          </time>
+          <span> · {lead.readTime}</span>
+        </div>
+        <h2><a href={lead.href}>{lead.title}</a></h2>
+        <p>{lead.summary}</p>
+        <div class="tag-row">
+          {lead.tags.map((tag) => <span class="tag">{tag}</span>)}
+        </div>
+        <div class="post-actions">
+          <a class="button primary" href={lead.href}>Read article</a>
+          <button class="button" type="button" data-preview-open={lead.slug}>Preview</button>
+        </div>
+      </article>
+
+      <div class="highlight-stack" aria-label="Highlighted writing">
+        {highlights.map((post) => (
+          <article
+            class="post-card"
+            data-post-card
+            data-tags={JSON.stringify(post.tags)}
+            data-slug={post.slug}
+          >
+            <div class="meta">
+              <time datetime={post.date.toISOString()}>
+                {post.date.toLocaleDateString("en", { year: "numeric", month: "short", day: "numeric" })}
+              </time>
+              <span> · {post.readTime}</span>
+            </div>
+            <h3><a href={post.href}>{post.title}</a></h3>
+            <p>{post.summary}</p>
+            <div class="tag-row">
+              {post.tags.map((tag) => <span class="tag">{tag}</span>)}
+            </div>
+            <div class="post-actions">
+              <a class="button primary" href={post.href}>Read article</a>
+              <button class="button" type="button" data-preview-open={post.slug}>Preview</button>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  ) : (
+    <section class="featured-grid" aria-labelledby="featured-heading">
+      <div class="lead-story">
+        <p class="eyebrow" id="featured-heading">Featured story</p>
+        <h2>No writing published yet</h2>
+        <p class="muted">New notes will appear here when they are added.</p>
+      </div>
+    </section>
+  )
+}
