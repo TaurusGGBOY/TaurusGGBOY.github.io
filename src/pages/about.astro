@@ -1,5 +1,20 @@
 ---
+import { getCollection, type CollectionEntry } from "astro:content";
+import SearchOverlay from "../components/SearchOverlay.astro";
 import BaseLayout from "../layouts/BaseLayout.astro";
+import { getSortedPosts, type PostSummary } from "../lib/posts";
+
+const entries = await getCollection("posts");
+const posts: PostSummary[] = getSortedPosts(entries.map((entry: CollectionEntry<"posts">) => ({
+  slug: entry.slug,
+  title: entry.data.title,
+  date: entry.data.date,
+  summary: entry.data.summary,
+  tags: entry.data.tags,
+  featured: entry.data.featured,
+  readTime: entry.data.readTime,
+  href: `/posts/${entry.slug}/`,
+})));
 ---
 
 <BaseLayout
@@ -17,4 +32,10 @@ import BaseLayout from "../layouts/BaseLayout.astro";
       The archive keeps older writing alive while the homepage makes current work easier to browse, search, and revisit.
     </p>
   </article>
+
+  <SearchOverlay posts={posts} />
 </BaseLayout>
+
+<script>
+  import "../scripts/home-interactions";
+</script>
