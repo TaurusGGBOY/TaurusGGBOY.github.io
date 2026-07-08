@@ -5,6 +5,24 @@ import {
   serializeQueuedSlugs,
 } from "../lib/queue";
 
+const INTERACTIONS_INITIALIZED_KEY = "homeInteractionsInitialized";
+
+interface QueueStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+interface QueueStore {
+  read(): string[];
+  write(slugs: string[]): void;
+}
+
+interface DialogOpeners {
+  contact: HTMLElement | null;
+  preview: HTMLElement | null;
+  search: HTMLElement | null;
+}
+
 export function normalizeSearchText(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -32,12 +50,46 @@ export function parsePostTags(value: string | null): string[] {
   return [];
 }
 
-function getQueuedSlugs(): string[] {
-  return deserializeQueuedSlugs(window.localStorage.getItem(QUEUE_STORAGE_KEY));
+export function createQueueStore(storage: QueueStorage | null | undefined): QueueStore {
+  let memoryQueue: string[] = [];
+  let useMemoryQueue = false;
+
+  return {
+    read() {
+      if (useMemoryQueue || !storage) {
+        return memoryQueue;
+      }
+
+      try {
+        return deserializeQueuedSlugs(storage.getItem(QUEUE_STORAGE_KEY));
+      } catch {
+        useMemoryQueue = true;
+        return memoryQueue;
+      }
+    },
+    write(slugs) {
+      const serializedSlugs = serializeQueuedSlugs(slugs);
+      memoryQueue = deserializeQueuedSlugs(serializedSlugs);
+
+      if (useMemoryQueue || !storage) {
+        return;
+      }
+
+      try {
+        storage.setItem(QUEUE_STORAGE_KEY, serializedSlugs);
+      } catch {
+        useMemoryQueue = true;
+      }
+    },
+  };
 }
 
-function setQueuedSlugs(slugs: string[]): void {
-  window.localStorage.setItem(QUEUE_STORAGE_KEY, serializeQueuedSlugs(slugs));
+function getLocalStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
 }
 
 function updateQueueCounts(count: number): void {
@@ -46,25 +98,71 @@ function updateQueueCounts(count: number): void {
   });
 }
 
-function closeSearchOverlay(searchOverlay: HTMLElement | null): void {
-  if (searchOverlay) {
-    searchOverlay.hidden = true;
+function isFocusableElement(element: Element | null): element is HTMLElement {
+  return element instanceof HTMLElement && typeof element.focus === "function";
+}
+
+function getActiveElement(): HTMLElement | null {
+  return isFocusableElement(document.activeElement) ? document.activeElement : null;
+}
+
+function focusDialogElement(dialog: HTMLElement, preferredElement?: HTMLElement | null): void {
+  window.requestAnimationFrame(() => {
+    const focusTarget =
+      preferredElement ??
+      dialog.querySelector<HTMLElement>(
+        "button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
+      ) ??
+      dialog;
+
+    if (!dialog.hasAttribute("tabindex")) {
+      dialog.setAttribute("tabindex", "-1");
+    }
+
+    focusTarget.focus();
+  });
+}
+
+function restoreFocus(opener: HTMLElement | null, closedDialog: HTMLElement): void {
+  if (opener?.isConnected) {
+    opener.focus();
+    return;
+  }
+
+  const activeElement = getActiveElement();
+  if (activeElement && closedDialog.contains(activeElement)) {
+    activeElement.blur();
   }
 }
 
-function closePreviewDrawer(previewDrawer: HTMLElement | null): void {
-  if (previewDrawer) {
-    previewDrawer.hidden = true;
+function closeSearchOverlay(searchOverlay: HTMLElement | null, opener: HTMLElement | null): void {
+  if (!searchOverlay || searchOverlay.hidden) {
+    return;
   }
+
+  searchOverlay.hidden = true;
+  restoreFocus(opener, searchOverlay);
 }
 
-function closeContactModal(contactModal: HTMLElement | null): void {
-  if (contactModal) {
-    contactModal.hidden = true;
+function closePreviewDrawer(previewDrawer: HTMLElement | null, opener: HTMLElement | null): void {
+  if (!previewDrawer || previewDrawer.hidden) {
+    return;
   }
+
+  previewDrawer.hidden = true;
+  restoreFocus(opener, previewDrawer);
 }
 
-function initializeSearch(): void {
+function closeContactModal(contactModal: HTMLElement | null, opener: HTMLElement | null): void {
+  if (!contactModal || contactModal.hidden) {
+    return;
+  }
+
+  contactModal.hidden = true;
+  restoreFocus(opener, contactModal);
+}
+
+function initializeSearch(openers: DialogOpeners): void {
   const searchOverlay = document.querySelector<HTMLElement>("[data-search-overlay]");
   const searchInput = document.querySelector<HTMLInputElement>("[data-search-input]");
   const searchResults = Array.from(document.querySelectorAll<HTMLElement>("[data-search-result]"));
@@ -76,13 +174,14 @@ function initializeSearch(): void {
         return;
       }
 
+      openers.search = getActiveElement();
       searchOverlay.hidden = false;
-      window.requestAnimationFrame(() => searchInput?.focus());
+      focusDialogElement(searchOverlay, searchInput);
     });
   });
 
   document.querySelectorAll<HTMLButtonElement>("[data-search-close]").forEach((button) => {
-    button.addEventListener("click", () => closeSearchOverlay(searchOverlay));
+    button.addEventListener("click", () => closeSearchOverlay(searchOverlay, openers.search));
   });
 
   searchForm?.addEventListener("submit", (event) => {
@@ -116,6 +215,7 @@ function initializeTopics(): void {
       const isActive = Boolean(normalizedTopic) && normalizeSearchText(button.dataset.topic ?? "") === normalizedTopic;
       button.setAttribute("aria-pressed", String(isActive));
     });
+    topicReset?.setAttribute("aria-pressed", String(normalizedTopic === null));
   };
 
   topicButtons.forEach((button) => {
@@ -123,11 +223,12 @@ function initializeTopics(): void {
     button.addEventListener("click", () => setActiveTopic(button.dataset.topic ?? null));
   });
 
+  topicReset?.setAttribute("aria-pressed", "true");
   topicReset?.addEventListener("click", () => setActiveTopic(null));
 }
 
-function initializeQueue(): void {
-  updateQueueCounts(getQueuedSlugs().length);
+function initializeQueue(queueStore: QueueStore): void {
+  updateQueueCounts(queueStore.read().length);
 
   document.querySelectorAll<HTMLButtonElement>("[data-queue-add]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -136,14 +237,14 @@ function initializeQueue(): void {
         return;
       }
 
-      const queuedSlugs = addQueuedSlug(getQueuedSlugs(), slug);
-      setQueuedSlugs(queuedSlugs);
+      const queuedSlugs = addQueuedSlug(queueStore.read(), slug);
+      queueStore.write(queuedSlugs);
       updateQueueCounts(queuedSlugs.length);
     });
   });
 }
 
-function initializePreview(): void {
+function initializePreview(openers: DialogOpeners): void {
   const previewDrawer = document.querySelector<HTMLElement>("[data-preview-drawer]");
   const previewPanels = Array.from(document.querySelectorAll<HTMLElement>("[data-preview-panel]"));
 
@@ -154,33 +255,39 @@ function initializePreview(): void {
         return;
       }
 
+      openers.preview = getActiveElement();
       previewPanels.forEach((panel) => {
         panel.hidden = panel.dataset.previewPanel !== slug;
       });
       previewDrawer.hidden = false;
+      const activePanel = previewPanels.find((panel) => panel.dataset.previewPanel === slug);
+      focusDialogElement(previewDrawer, activePanel?.querySelector<HTMLElement>("a, button") ?? null);
     });
   });
 
   document.querySelectorAll<HTMLButtonElement>("[data-preview-close]").forEach((button) => {
-    button.addEventListener("click", () => closePreviewDrawer(previewDrawer));
+    button.addEventListener("click", () => closePreviewDrawer(previewDrawer, openers.preview));
   });
 }
 
-function initializeContact(): void {
+function initializeContact(openers: DialogOpeners): void {
   const contactModal = document.querySelector<HTMLElement>("[data-contact-modal]");
   const contactSuccess = document.querySelector<HTMLElement>("[data-contact-success]");
   const contactForm = document.querySelector<HTMLFormElement>("[data-contact-form]");
+  const contactFirstInput = contactForm?.querySelector<HTMLElement>("input, textarea, button");
 
   document.querySelectorAll<HTMLButtonElement>("[data-contact-open]").forEach((button) => {
     button.addEventListener("click", () => {
       if (contactModal) {
+        openers.contact = getActiveElement();
         contactModal.hidden = false;
+        focusDialogElement(contactModal, contactFirstInput);
       }
     });
   });
 
   document.querySelectorAll<HTMLButtonElement>("[data-contact-close]").forEach((button) => {
-    button.addEventListener("click", () => closeContactModal(contactModal));
+    button.addEventListener("click", () => closeContactModal(contactModal, openers.contact));
   });
 
   contactForm?.addEventListener("submit", (event) => {
@@ -192,25 +299,37 @@ function initializeContact(): void {
   });
 }
 
-function initializeEscapeKey(): void {
+function initializeEscapeKey(openers: DialogOpeners): void {
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") {
       return;
     }
 
-    closeSearchOverlay(document.querySelector<HTMLElement>("[data-search-overlay]"));
-    closePreviewDrawer(document.querySelector<HTMLElement>("[data-preview-drawer]"));
-    closeContactModal(document.querySelector<HTMLElement>("[data-contact-modal]"));
+    closeSearchOverlay(document.querySelector<HTMLElement>("[data-search-overlay]"), openers.search);
+    closePreviewDrawer(document.querySelector<HTMLElement>("[data-preview-drawer]"), openers.preview);
+    closeContactModal(document.querySelector<HTMLElement>("[data-contact-modal]"), openers.contact);
   });
 }
 
 export function initializeHomeInteractions(): void {
-  initializeSearch();
+  if (document.documentElement.dataset[INTERACTIONS_INITIALIZED_KEY] === "true") {
+    return;
+  }
+
+  document.documentElement.dataset[INTERACTIONS_INITIALIZED_KEY] = "true";
+  const queueStore = createQueueStore(getLocalStorage());
+  const openers: DialogOpeners = {
+    contact: null,
+    preview: null,
+    search: null,
+  };
+
+  initializeSearch(openers);
   initializeTopics();
-  initializeQueue();
-  initializePreview();
-  initializeContact();
-  initializeEscapeKey();
+  initializeQueue(queueStore);
+  initializePreview(openers);
+  initializeContact(openers);
+  initializeEscapeKey(openers);
 }
 
 if (typeof document !== "undefined") {

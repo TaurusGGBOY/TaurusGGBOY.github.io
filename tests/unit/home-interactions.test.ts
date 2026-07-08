@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeSearchText, parsePostTags } from "../../src/scripts/home-interactions";
+import { createQueueStore, normalizeSearchText, parsePostTags } from "../../src/scripts/home-interactions";
 
 describe("homepage interaction helpers", () => {
   it("normalizes search text for case-insensitive filtering", () => {
@@ -12,5 +12,20 @@ describe("homepage interaction helpers", () => {
 
   it("falls back to comma separated tags", () => {
     expect(parsePostTags("web, games, notes")).toEqual(["web", "games", "notes"]);
+  });
+
+  it("keeps queue state in memory when storage throws", () => {
+    const store = createQueueStore({
+      getItem() {
+        throw new Error("storage blocked");
+      },
+      setItem() {
+        throw new Error("storage blocked");
+      },
+    });
+
+    expect(store.read()).toEqual([]);
+    store.write(["alpha"]);
+    expect(store.read()).toEqual(["alpha"]);
   });
 });
