@@ -1,21 +1,34 @@
 ---
 import { getCollection, render, type CollectionEntry } from "astro:content";
+import SearchOverlay from "../../components/SearchOverlay.astro";
 import BaseLayout from "../../layouts/BaseLayout.astro";
+import { getSortedPosts, type PostSummary } from "../../lib/posts";
 
 interface Props {
   post: CollectionEntry<"posts">;
+  allPosts: PostSummary[];
 }
 
 export async function getStaticPaths() {
   const posts = await getCollection("posts");
+  const allPosts: PostSummary[] = getSortedPosts(posts.map((entry: CollectionEntry<"posts">) => ({
+    slug: entry.slug,
+    title: entry.data.title,
+    date: entry.data.date,
+    summary: entry.data.summary,
+    tags: entry.data.tags,
+    featured: entry.data.featured,
+    readTime: entry.data.readTime,
+    href: `/posts/${entry.slug}/`,
+  })));
 
   return posts.map((post: CollectionEntry<"posts">) => ({
     params: { slug: post.slug },
-    props: { post },
+    props: { post, allPosts },
   }));
 }
 
-const { post } = Astro.props as Props;
+const { post, allPosts } = Astro.props as Props;
 const { Content } = await render(post);
 ---
 
@@ -40,4 +53,10 @@ const { Content } = await render(post);
     </div>
     <Content />
   </article>
+
+  <SearchOverlay posts={allPosts} />
 </BaseLayout>
+
+<script>
+  import "../../scripts/home-interactions";
+</script>
