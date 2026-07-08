@@ -1,0 +1,36 @@
+---
+interface Props {
+  activePath: string;
+}
+
+const { activePath } = Astro.props;
+const links = [
+  { href: "/", label: "Home" },
+  { href: "/archive/", label: "Writing" },
+  { href: "/topics/web/", label: "Topics" },
+  { href: "/archive/", label: "Archive" },
+  { href: "/about/", label: "About" },
+];
+
+function isActive(href: string) {
+  if (href === "/") {
+    return activePath === "/";
+  }
+
+  return activePath.startsWith(href);
+}
+---
+
+<header class="site-header">
+  <nav class="site-nav" aria-label="Primary navigation">
+    <a class="brand" href="/">gaoguobin</a>
+    <div class="nav-links">
+      {links.map((link) => (
+        <a href={link.href} aria-current={isActive(link.href) ? "page" : undefined}>
+          {link.label}
+        </a>
+      ))}
+      <button class="icon-button" type="button" data-search-open aria-label="Open search">⌕</button>
+    </div>
+  </nav>
+</header>
