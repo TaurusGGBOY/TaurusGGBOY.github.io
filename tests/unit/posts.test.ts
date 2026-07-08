@@ -59,11 +59,56 @@ describe("post helpers", () => {
     ]);
   });
 
+  it("normalizes topics and counts each topic once per post", () => {
+    expect(
+      getTopics([
+        {
+          ...posts[0],
+          tags: [" web", "Web", "web ", " ", ""],
+        },
+        {
+          ...posts[1],
+          tags: ["WEB", "Game"],
+        },
+        {
+          ...posts[2],
+          tags: ["game", "Frontend"],
+        },
+      ]),
+    ).toEqual([
+      { name: "game", count: 2 },
+      { name: "web", count: 2 },
+      { name: "frontend", count: 1 },
+    ]);
+  });
+
   it("filters posts by topic case-insensitively", () => {
     expect(filterPostsByTopic(posts, "WEB").map((post) => post.slug)).toEqual([
       "newer-note",
       "newest-featured",
     ]);
+  });
+
+  it("filters posts by normalized topic and trimmed tags", () => {
+    expect(
+      filterPostsByTopic(
+        [
+          {
+            ...posts[0],
+            tags: [" unity ", "game"],
+          },
+          {
+            ...posts[1],
+            tags: ["backend", " Web"],
+          },
+          {
+            ...posts[2],
+            tags: ["frontend", "web "],
+          },
+        ],
+        " WEB ",
+      ).map((post) => post.slug),
+    ).toEqual(["newer-note", "newest-featured"]);
   });
 
   it("searches title, summary, and tags case-insensitively", () => {
