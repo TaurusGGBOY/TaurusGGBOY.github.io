@@ -7,4 +7,57 @@ featured: true
 readTime: "5 min read"
 ---
 
-This post records a small interaction design problem: turning input into a visible projectile behavior. The new site treats posts like this as technical field notes.
+有点尴尬。早上看到一个付费咨询，由于在上课说中午来回答，结果中午回来做完了别人关了……
+
+那么就发出来服务大家8
+
+# 第一步：创建场景
+
+创建一个场景
+这里取名叫Shoot
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20190612120708987.png)
+
+# 第二步：创建子弹
+
+这里使用一个Capsule作为一个子弹
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20190612120810974.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3EzNzg5OTI5NzE=,size_16,color_FFFFFF,t_70)
+适当缩放和旋转一下
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20190612120835914.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3EzNzg5OTI5NzE=,size_16,color_FFFFFF,t_70)
+这个大小比较合适
+
+# 第三步：给子弹添加playmakerFSM
+
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20190612120922378.png)
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20190612120936943.png)
+子弹状态机如上
+每个状态参数如下
+大概思路就是每一帧向某个方向运动
+5秒之后自动摧毁
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20190612121028307.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3EzNzg5OTI5NzE=,size_16,color_FFFFFF,t_70)
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20190612121114987.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3EzNzg5OTI5NzE=,size_16,color_FFFFFF,t_70)
+
+# 第四步：将子弹设置为预制体
+
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20190612121154737.png)
+在assets里面右键-》新建预制体-》将我们创建的Ammo拖入
+删除Hierachy中的Ammo
+
+# 第五步：创建枪，并添加FSM
+
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20190612121317285.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3EzNzg5OTI5NzE=,size_16,color_FFFFFF,t_70)
+添加一个Cube作为枪
+添加PlaymakerFSM组件
+打开编辑器
+修改状态如下图
+其中等待输入的参数如下
+![在这里插入图片描述](https://img-blog.csdnimg.cn/201906121214098.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3EzNzg5OTI5NzE=,size_16,color_FFFFFF,t_70)
+生成子弹参数如下
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20190612121447301.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3EzNzg5OTI5NzE=,size_16,color_FFFFFF,t_70)
+其中 CreateObject的时候，要选择Assets中的Ammo预制体
+SPawnPoint为一个空物体，放在你要生成的子弹的位置 这里不赘述
+
+# 第六步：运行 调试
+
+可以看到 有一些坐标系的bug
+这里就留给您自己解决了
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20190612121754919.gif)
