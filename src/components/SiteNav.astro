@@ -3,21 +3,25 @@ interface Props {
   activePath: string;
 }
 
+type NavLink =
+  | { href: string; label: string; activeExact: string; activePrefix?: never }
+  | { href: string; label: string; activePrefix: string; activeExact?: never };
+
 const { activePath } = Astro.props;
-const links = [
-  { href: "/", label: "Home" },
-  { href: "/writing/", label: "Writing" },
-  { href: "/topics/", label: "Topics" },
-  { href: "/archive/", label: "Archive" },
-  { href: "/about/", label: "About" },
+const links: NavLink[] = [
+  { href: "/", label: "Home", activeExact: "/" },
+  { href: "/archive/#writing", label: "Writing", activeExact: "/archive/#writing" },
+  { href: "/topics/web/", label: "Topics", activePrefix: "/topics/" },
+  { href: "/archive/", label: "Archive", activeExact: "/archive/" },
+  { href: "/about/", label: "About", activeExact: "/about/" },
 ];
 
-function isActive(href: string) {
-  if (href === "/") {
-    return activePath === "/";
+function isActive(link: NavLink) {
+  if (link.activeExact !== undefined && activePath === link.activeExact) {
+    return true;
   }
 
-  return activePath === href || activePath.startsWith(href);
+  return link.activePrefix !== undefined && activePath.startsWith(link.activePrefix);
 }
 ---
 
@@ -26,7 +30,7 @@ function isActive(href: string) {
     <a class="brand" href="/">gaoguobin</a>
     <div class="nav-links">
       {links.map((link) => (
-        <a href={link.href} aria-current={isActive(link.href) ? "page" : undefined}>
+        <a href={link.href} aria-current={isActive(link) ? "page" : undefined}>
           {link.label}
         </a>
       ))}
