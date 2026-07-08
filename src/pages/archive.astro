@@ -2,6 +2,7 @@
 import { getCollection, type CollectionEntry } from "astro:content";
 import PostCard from "../components/PostCard.astro";
 import PreviewDrawer from "../components/PreviewDrawer.astro";
+import SearchOverlay from "../components/SearchOverlay.astro";
 import BaseLayout from "../layouts/BaseLayout.astro";
 import { getSortedPosts, type PostSummary } from "../lib/posts";
 
@@ -42,6 +43,7 @@ const posts: PostSummary[] = getSortedPosts(entries.map((entry: CollectionEntry<
   </section>
 
   <PreviewDrawer posts={posts} />
+  <SearchOverlay posts={posts} />
 </BaseLayout>
 
 <script>
