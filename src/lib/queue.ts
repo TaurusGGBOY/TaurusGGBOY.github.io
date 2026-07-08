@@ -26,7 +26,8 @@ export function addQueuedSlug(slugs: string[], slug: string): string[] {
 }
 
 export function removeQueuedSlug(slugs: string[], slug: string): string[] {
-  return uniqueSafeSlugs(slugs).filter((item) => item !== slug);
+  const normalized = slug.trim();
+  return uniqueSafeSlugs(slugs).filter((item) => item !== normalized);
 }
 
 function uniqueSafeSlugs(slugs: string[]): string[] {

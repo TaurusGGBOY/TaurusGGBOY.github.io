@@ -29,4 +29,8 @@ describe("queue helpers", () => {
   it("removes a slug", () => {
     expect(removeQueuedSlug(["alpha", "beta"], "alpha")).toEqual(["beta"]);
   });
+
+  it("trims the removal target before removing", () => {
+    expect(removeQueuedSlug(["alpha"], " alpha ")).toEqual([]);
+  });
 });
