@@ -28,7 +28,9 @@ test("search overlay navigates to a matching post", async ({ page }) => {
   await searchDialog.getByLabel("Search writing").fill("backend");
 
   const matchingResult = searchDialog.getByRole("link", { name: /后端项目/i });
+  const nonmatchingResult = searchDialog.getByRole("link", { name: /Playmaker/i });
   await expect(matchingResult).toBeVisible();
+  await expect(nonmatchingResult).toBeHidden();
   await matchingResult.click();
 
   await expect(page).toHaveURL(/\/posts\/backend-project-notes\/$/);
@@ -36,19 +38,23 @@ test("search overlay navigates to a matching post", async ({ page }) => {
 });
 
 test("topic filtering narrows and restores visible post cards", async ({ page }) => {
-  const activeCards = page.locator("[data-post-card]:not([hidden])");
-  const initialCardCount = await activeCards.count();
+  const visibleCards = page.locator("[data-post-card]:visible");
+  const initialCardCount = await visibleCards.count();
+  const finalFantasyCard = page.locator("[data-post-card][data-slug='final-fantasy-seven-reset']");
+  const playmakerCard = page.locator("[data-post-card][data-slug='playmaker-bullet-shooting']");
+  const backendCard = page.locator("[data-post-card][data-slug='backend-project-notes']");
 
   await page.getByRole("button", { name: /^game\s+\d+$/i }).click();
 
-  await expect(page.locator("[data-post-card][data-slug='final-fantasy-seven-reset']")).not.toHaveAttribute("hidden", "");
-  await expect(page.locator("[data-post-card][data-slug='playmaker-bullet-shooting']")).not.toHaveAttribute("hidden", "");
-  await expect(page.locator("[data-post-card][data-slug='backend-project-notes']")).toHaveAttribute("hidden", "");
-  expect(await activeCards.count()).toBeLessThan(initialCardCount);
+  await expect(finalFantasyCard).toBeVisible();
+  await expect(playmakerCard).toBeVisible();
+  await expect(backendCard).toBeHidden();
+  expect(await visibleCards.count()).toBeLessThan(initialCardCount);
 
   await page.getByRole("button", { name: "All writing" }).click();
 
-  await expect(activeCards).toHaveCount(initialCardCount);
+  await expect(backendCard).toBeVisible();
+  await expect(visibleCards).toHaveCount(initialCardCount);
 });
 
 test("preview drawer can add the previewed post to the reading queue", async ({ page }) => {

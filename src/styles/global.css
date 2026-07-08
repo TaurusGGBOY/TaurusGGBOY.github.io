@@ -336,6 +336,10 @@ button {
   display: none;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .overlay-panel {
   display: grid;
   gap: 20px;
