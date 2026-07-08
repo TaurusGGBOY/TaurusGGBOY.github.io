@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createQueueStore, normalizeSearchText, parsePostTags } from "../../src/scripts/home-interactions";
+import {
+  createQueueStore,
+  getFocusableElementSelector,
+  normalizeSearchText,
+  parsePostTags,
+} from "../../src/scripts/home-interactions";
 
 describe("homepage interaction helpers", () => {
   it("normalizes search text for case-insensitive filtering", () => {
@@ -27,5 +32,13 @@ describe("homepage interaction helpers", () => {
     expect(store.read()).toEqual([]);
     store.write(["alpha"]);
     expect(store.read()).toEqual(["alpha"]);
+  });
+
+  it("exposes a selector for interactive descendants that skips disabled controls", () => {
+    const selector = getFocusableElementSelector();
+
+    expect(selector).toContain("button:not([disabled])");
+    expect(selector).toContain("[href]");
+    expect(selector).toContain("[tabindex]:not([tabindex='-1'])");
   });
 });

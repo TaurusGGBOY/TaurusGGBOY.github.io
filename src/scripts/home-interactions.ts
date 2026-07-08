@@ -6,6 +6,14 @@ import {
 } from "../lib/queue";
 
 const INTERACTIONS_INITIALIZED_KEY = "homeInteractionsInitialized";
+const FOCUSABLE_ELEMENT_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])",
+].join(", ");
 
 interface QueueStorage {
   getItem(key: string): string | null;
@@ -48,6 +56,10 @@ export function parsePostTags(value: string | null): string[] {
   }
 
   return [];
+}
+
+export function getFocusableElementSelector(): string {
+  return FOCUSABLE_ELEMENT_SELECTOR;
 }
 
 export function createQueueStore(storage: QueueStorage | null | undefined): QueueStore {
@@ -102,24 +114,35 @@ function isFocusableElement(element: Element | null): element is HTMLElement {
   return element instanceof HTMLElement && typeof element.focus === "function";
 }
 
+function getFocusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(getFocusableElementSelector())).filter(
+    (element) =>
+      !element.hidden &&
+      !element.closest("[hidden]") &&
+      element.getAttribute("aria-hidden") !== "true" &&
+      element.tabIndex >= 0,
+  );
+}
+
 function getActiveElement(): HTMLElement | null {
   return isFocusableElement(document.activeElement) ? document.activeElement : null;
 }
 
+function focusElementInDialog(dialog: HTMLElement, element: HTMLElement | null): void {
+  if (!dialog.hasAttribute("tabindex")) {
+    dialog.setAttribute("tabindex", "-1");
+  }
+
+  (element ?? dialog).focus();
+}
+
 function focusDialogElement(dialog: HTMLElement, preferredElement?: HTMLElement | null): void {
   window.requestAnimationFrame(() => {
+    const focusableElements = getFocusableElements(dialog);
     const focusTarget =
-      preferredElement ??
-      dialog.querySelector<HTMLElement>(
-        "button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
-      ) ??
-      dialog;
+      preferredElement && focusableElements.includes(preferredElement) ? preferredElement : focusableElements[0] ?? null;
 
-    if (!dialog.hasAttribute("tabindex")) {
-      dialog.setAttribute("tabindex", "-1");
-    }
-
-    focusTarget.focus();
+    focusElementInDialog(dialog, focusTarget);
   });
 }
 
@@ -311,6 +334,72 @@ function initializeEscapeKey(openers: DialogOpeners): void {
   });
 }
 
+function getActiveOpenDialog(dialogs: HTMLElement[]): HTMLElement | null {
+  const activeElement = getActiveElement();
+  const dialogWithFocus = dialogs.find((dialog) => !dialog.hidden && activeElement && dialog.contains(activeElement));
+  if (dialogWithFocus) {
+    return dialogWithFocus;
+  }
+
+  for (let index = dialogs.length - 1; index >= 0; index -= 1) {
+    const dialog = dialogs[index];
+    if (!dialog.hidden) {
+      return dialog;
+    }
+  }
+
+  return null;
+}
+
+function trapFocusInDialog(event: KeyboardEvent, dialog: HTMLElement): void {
+  if (event.key !== "Tab") {
+    return;
+  }
+
+  const focusableElements = getFocusableElements(dialog);
+  if (focusableElements.length === 0) {
+    event.preventDefault();
+    focusElementInDialog(dialog, null);
+    return;
+  }
+
+  const activeElement = getActiveElement();
+  if (!activeElement || !dialog.contains(activeElement)) {
+    event.preventDefault();
+    focusableElements[0]?.focus();
+    return;
+  }
+
+  const firstElement = focusableElements[0];
+  const lastElement = focusableElements.at(-1);
+
+  if (event.shiftKey && activeElement === firstElement) {
+    event.preventDefault();
+    lastElement?.focus();
+    return;
+  }
+
+  if (!event.shiftKey && activeElement === lastElement) {
+    event.preventDefault();
+    firstElement.focus();
+  }
+}
+
+function initializeFocusTrap(): void {
+  const dialogs = [
+    document.querySelector<HTMLElement>("[data-search-overlay]"),
+    document.querySelector<HTMLElement>("[data-contact-modal]"),
+    document.querySelector<HTMLElement>("[data-preview-drawer]"),
+  ].filter((dialog): dialog is HTMLElement => dialog !== null);
+
+  document.addEventListener("keydown", (event) => {
+    const activeDialog = getActiveOpenDialog(dialogs);
+    if (activeDialog) {
+      trapFocusInDialog(event, activeDialog);
+    }
+  });
+}
+
 export function initializeHomeInteractions(): void {
   if (document.documentElement.dataset[INTERACTIONS_INITIALIZED_KEY] === "true") {
     return;
@@ -330,6 +419,7 @@ export function initializeHomeInteractions(): void {
   initializePreview(openers);
   initializeContact(openers);
   initializeEscapeKey(openers);
+  initializeFocusTrap();
 }
 
 if (typeof document !== "undefined") {
