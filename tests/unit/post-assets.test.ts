@@ -18,6 +18,7 @@ describe("post image assets", () => {
       const post = readFileSync(join(postsDir, file), "utf8");
       expect(post).not.toContain("gitee.com/agaogao/photobed");
       expect(post).not.toContain("q5jmnw63e.bkt.clouddn.com");
+      expect(post).not.toContain("img-blog.csdnimg.cn");
 
       let match = imageReferencePattern.exec(post);
 
@@ -27,7 +28,7 @@ describe("post image assets", () => {
       }
     }
 
-    expect(imagePaths).toHaveLength(26);
+    expect(imagePaths).toHaveLength(38);
 
     for (const imagePath of imagePaths) {
       expect(existsSync(join(repoRoot, "public", imagePath))).toBe(true);
