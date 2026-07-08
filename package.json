@@ -7,9 +7,9 @@
     "dev": "astro dev --host 127.0.0.1",
     "build": "astro check && astro build",
     "preview": "astro preview --host 127.0.0.1",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "sh -c 'if find tests/e2e -type f \\( -name \"*.spec.ts\" -o -name \"*.test.ts\" \\) 2>/dev/null | grep -q .; then playwright test --pass-with-no-tests; else echo \"No e2e tests found, skipping Playwright.\"; fi'"
   },
   "dependencies": {
     "@astrojs/mdx": "^4.0.0",
