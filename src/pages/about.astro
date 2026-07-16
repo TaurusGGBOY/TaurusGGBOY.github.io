@@ -1,41 +1,25 @@
 ---
-import { getCollection, type CollectionEntry } from "astro:content";
-import SearchOverlay from "../components/SearchOverlay.astro";
-import BaseLayout from "../layouts/BaseLayout.astro";
-import { getSortedPosts, type PostSummary } from "../lib/posts";
 
-const entries = await getCollection("posts");
-const posts: PostSummary[] = getSortedPosts(entries.map((entry: CollectionEntry<"posts">) => ({
-  slug: entry.slug,
-  title: entry.data.title,
-  date: entry.data.date,
-  summary: entry.data.summary,
-  tags: entry.data.tags,
-  featured: entry.data.featured,
-  readTime: entry.data.readTime,
-  href: `/posts/${entry.slug}/`,
-})));
+import { getEntry, render } from "astro:content";
+import Markdown from "@components/misc/Markdown.astro";
+import I18nKey from "../i18n/i18nKey";
+import { i18n } from "../i18n/translation";
+import MainGridLayout from "../layouts/MainGridLayout.astro";
+
+const aboutPost = await getEntry("spec", "about");
+
+if (!aboutPost) {
+	throw new Error("About page content not found");
+}
+
+const { Content } = await render(aboutPost);
 ---
-
-<BaseLayout
-  title="About · gaoguobin"
-  description="About gaoguobin and this personal journal magazine."
-  activePath="/about/"
->
-  <article class="post-card" aria-labelledby="about-title">
-    <p class="eyebrow">About</p>
-    <h1 id="about-title">About gaoguobin</h1>
-    <p>
-      This site is a personal journal magazine for technical notes, web experiments, game development notes, and project reflections.
-    </p>
-    <p>
-      The archive keeps older writing alive while the homepage makes current work easier to browse, search, and revisit.
-    </p>
-  </article>
-
-  <SearchOverlay posts={posts} />
-</BaseLayout>
-
-<script>
-  import "../scripts/home-interactions";
-</script>
+<MainGridLayout title={i18n(I18nKey.about)} description={i18n(I18nKey.about)}>
+    <div class="flex w-full rounded-[var(--radius-large)] overflow-hidden relative min-h-32">
+        <div class="card-base z-10 px-9 py-6 relative w-full ">
+            <Markdown class="mt-2">
+                <Content />
+            </Markdown>
+        </div>
+    </div>
+</MainGridLayout>

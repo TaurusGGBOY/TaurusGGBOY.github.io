@@ -1,51 +1,13 @@
 ---
-import { getCollection, type CollectionEntry } from "astro:content";
-import PostCard from "../components/PostCard.astro";
-import PreviewDrawer from "../components/PreviewDrawer.astro";
-import SearchOverlay from "../components/SearchOverlay.astro";
-import BaseLayout from "../layouts/BaseLayout.astro";
-import { getSortedPosts, type PostSummary } from "../lib/posts";
+import ArchivePanel from "@components/ArchivePanel.svelte";
+import I18nKey from "@i18n/i18nKey";
+import { i18n } from "@i18n/translation";
+import MainGridLayout from "@layouts/MainGridLayout.astro";
+import { getSortedPostsList } from "../utils/content-utils";
 
-const entries = await getCollection("posts");
-const posts: PostSummary[] = getSortedPosts(entries.map((entry: CollectionEntry<"posts">) => ({
-  slug: entry.slug,
-  title: entry.data.title,
-  date: entry.data.date,
-  summary: entry.data.summary,
-  tags: entry.data.tags,
-  featured: entry.data.featured,
-  readTime: entry.data.readTime,
-  href: `/posts/${entry.slug}/`,
-})));
+const sortedPostsList = await getSortedPostsList();
 ---
 
-<BaseLayout
-  title="Archive · gaoguobin"
-  description="All migrated notes and articles from gaoguobin's personal journal magazine."
-  activePath="/archive/"
->
-  <section class="home-intro" aria-labelledby="archive-title">
-    <p class="eyebrow">Archive</p>
-    <h1 id="archive-title">All writing, notes, and project entries.</h1>
-    <p>
-      A complete index of migrated posts, sorted with featured work first and recent entries close behind.
-    </p>
-  </section>
-
-  <section id="writing" aria-labelledby="writing-title">
-    <div class="dialog-head">
-      <h2 id="writing-title">Writing</h2>
-      <a class="button" href="/topics/web/">Browse topics</a>
-    </div>
-    <div class="writing-list">
-      {posts.map((post) => <PostCard post={post} />)}
-    </div>
-  </section>
-
-  <PreviewDrawer posts={posts} />
-  <SearchOverlay posts={posts} />
-</BaseLayout>
-
-<script>
-  import "../scripts/home-interactions";
-</script>
+<MainGridLayout title={i18n(I18nKey.archive)}>
+    <ArchivePanel sortedPosts={sortedPostsList} client:only="svelte"></ArchivePanel>
+</MainGridLayout>

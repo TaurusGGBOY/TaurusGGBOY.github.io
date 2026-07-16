@@ -2,30 +2,23 @@
   "extends": "astro/tsconfigs/strict",
   "compilerOptions": {
     "baseUrl": ".",
+    "strictNullChecks": true,
+    "allowJs": false,
+    "declaration": true,
+    "plugins": [
+      {
+        "name": "@astrojs/ts-plugin"
+      }
+    ],
     "paths": {
+      "@components/*": ["src/components/*"],
+      "@assets/*": ["src/assets/*"],
+      "@constants/*": ["src/constants/*"],
+      "@utils/*": ["src/utils/*"],
+      "@i18n/*": ["src/i18n/*"],
+      "@layouts/*": ["src/layouts/*"],
       "@/*": ["src/*"]
     }
   },
-  "include": [
-    ".astro/types.d.ts",
-    "astro.config.mjs",
-    "playwright.config.ts",
-    "src/**/*",
-    "tests/**/*.ts",
-    "vitest.config.ts"
-  ],
-  "exclude": [
-    ".astro",
-    "Archives",
-    "categories",
-    "css",
-    "dist",
-    "images",
-    "js",
-    "lib",
-    "node_modules",
-    "page",
-    "posts",
-    "vendors"
-  ]
+  "include": ["src/**/*"]
 }
