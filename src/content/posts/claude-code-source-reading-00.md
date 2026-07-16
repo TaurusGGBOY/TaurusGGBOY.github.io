@@ -85,6 +85,8 @@ npm registry 当前的 `latest` 是 2.1.211，`stable` 是 2.1.204，说明 Clau
 
 ## 整个系列会讲什么
 
+![Claude Code 源码解读系列路线图](/images/posts/claude-code-source-reading-00/series-roadmap.png)
+
 这一篇 00 先解决源码从哪里来的问题。接下来 47 篇不会按照目录顺序逐个介绍文件，而是沿着一次请求的执行过程向外展开。我们先建立系统模型，再进入 Agent 内核，然后补齐安全、上下文、扩展、宿主和产品能力。下面逐篇说明每篇文章要回答的问题。
 
 ### S0：先建立阅读边界和系统全景
