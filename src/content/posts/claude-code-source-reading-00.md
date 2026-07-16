@@ -6,7 +6,7 @@ tags: ["claude-code", "source-code", "ai-agent", "security"]
 category: "AI / Security"
 draft: false
 image: "/images/posts/claude-code-source-reading-00/claude-code-highres.png"
-imagePosition: "right"
+imagePosition: "left"
 ---
 
 2026 年 3 月 31 日，Anthropic 发布了 Claude Code 2.1.88。不到两个小时，这个版本里的源码就被人公开了。随后发生的事情包括撤包、GitHub 大规模下架，以及攻击者借“泄露版 Claude Code”传播窃密木马。

@@ -27,7 +27,7 @@ describe("Fuwari post frontmatter", () => {
 		expect(source).toContain(
 			'image: "/images/posts/claude-code-source-reading-00/claude-code-highres.png"',
 		);
-		expect(source).toContain('imagePosition: "right"');
+		expect(source).toContain('imagePosition: "left"');
 
 		const body = source.replace(/^---[\s\S]*?---\s*/, "");
 		expect(body).not.toContain("claude-code-highres.png");
