@@ -38,7 +38,7 @@ test("mobile navigation exposes Fuwari archive and about links", async ({ page }
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Menu" }).click();
+  await page.locator("#nav-menu-switch").click();
   const menu = page.locator("#nav-menu-panel");
   await expect(menu).toBeVisible();
   await expect(menu.getByRole("link", { name: "归档" })).toBeVisible();

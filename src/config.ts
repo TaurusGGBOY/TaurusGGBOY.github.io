@@ -51,7 +51,7 @@ export const navBarConfig: NavBarConfig = {
 };
 
 export const profileConfig: ProfileConfig = {
-	avatar: "/images/avatar.gif",
+	avatar: "https://github.com/TaurusGGBOY.png?size=256",
 	name: "gaoguobin",
 	bio: "记录软件、游戏实验和一路上的学习。",
 	links: [],
