@@ -1,10 +1,10 @@
 ---
 title: "Claude Code源码解读00：从源码泄露开始，读懂 Claude Code 2.1.88"
-date: "2026-07-16"
-summary: "从 Claude Code 2.1.88 的 source map 泄露开始，沿时间线梳理 Anthropic 的撤包、DMCA、恶意软件利用及后续影响，并介绍整个源码解读系列。"
+published: 2026-07-16
+description: "从 Claude Code 2.1.88 的 source map 泄露开始，沿时间线梳理 Anthropic 的撤包、DMCA、恶意软件利用及后续影响，并介绍整个源码解读系列。"
 tags: ["claude-code", "source-code", "ai-agent", "security"]
-featured: true
-readTime: "18 min read"
+category: "AI / Security"
+draft: false
 ---
 
 2026 年 3 月 31 日，Anthropic 发布了 Claude Code 2.1.88。不到两个小时，这个版本里的源码就被人公开了。随后发生的事情包括撤包、GitHub 大规模下架，以及攻击者借“泄露版 Claude Code”传播窃密木马。

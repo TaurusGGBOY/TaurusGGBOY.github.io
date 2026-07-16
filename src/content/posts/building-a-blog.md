@@ -1,10 +1,10 @@
 ---
 title: "造轮子第一步：自己搭建博客"
-date: "2019-05-02"
-summary: "Notes from rebuilding a personal blog from the ground up, including theme choices, static publishing, and the tradeoffs of owning the site."
+published: 2019-05-02
+description: "Notes from rebuilding a personal blog from the ground up, including theme choices, static publishing, and the tradeoffs of owning the site."
 tags: ["blog", "hexo", "frontend"]
-featured: true
-readTime: "4 min read"
+category: "Web"
+draft: false
 ---
 
 既然想要拿到五年之后的ssp的话，总的有一些自己造轮子的东西。`
