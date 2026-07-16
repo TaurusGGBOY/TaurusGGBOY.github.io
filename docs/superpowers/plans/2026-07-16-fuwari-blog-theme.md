@@ -134,6 +134,7 @@ git commit -m "feat: configure Fuwari for gaoguobin blog"
 
 **Files:**
 - Modify: `src/content/config.ts`
+- Modify: `package.json` and `pnpm-lock.yaml` to make the existing Vitest test command available after the Fuwari template import
 - Modify: `src/content/posts/backend-project-notes.mdx`
 - Modify: `src/content/posts/building-a-blog.md`
 - Modify: `src/content/posts/claude-code-source-reading-00.md`
@@ -143,6 +144,8 @@ git commit -m "feat: configure Fuwari for gaoguobin blog"
 - [ ] **Step 1: Add a frontmatter validation test before changing the posts**
 
 Create `tests/unit/fuwari-content.test.ts` that reads each file in `src/content/posts` and asserts every post has `title`, `published`, `description`, `tags`, `category`, and `draft` frontmatter keys. The test must also assert that no post still contains the old keys `date`, `summary`, `featured`, or `readTime`.
+
+If the imported Fuwari package no longer includes Vitest, add the existing repository's `vitest` dev dependency and retain the `test` script before running this test; Task 5 will complete the Playwright/test-script alignment.
 
 - [ ] **Step 2: Run the new validation test and confirm the expected failure**
 
