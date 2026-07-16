@@ -18,6 +18,17 @@ function frontmatterKeys(source: string): Set<string> {
 }
 
 describe("Fuwari post frontmatter", () => {
+	it("assigns the Claude Code 00 cover image", async () => {
+		const source = await readFile(
+			join(postsDirectory, "claude-code-source-reading-00.md"),
+			"utf8",
+		);
+
+		expect(source).toContain(
+			'image: "/images/posts/claude-code-source-reading-00/claude-code-highres.png"',
+		);
+	});
+
 	it("uses the Fuwari schema for every post", async () => {
 		const postFiles = (await readdir(postsDirectory))
 			.filter((file) => file.endsWith(".md") || file.endsWith(".mdx"))

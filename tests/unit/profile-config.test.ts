@@ -8,6 +8,6 @@ describe("profile configuration", () => {
 
 	it("enables the homepage banner image", () => {
 		expect(siteConfig.banner.enable).toBe(true);
-		expect(siteConfig.banner.src).toBe("/images/home-banner.jpg");
+		expect(siteConfig.banner.src).toBe("/images/home-banner-hd.png");
 	});
 });
