@@ -9,7 +9,9 @@
     "build": "astro build && pagefind --site dist",
     "preview": "astro preview",
     "astro": "astro",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "verify:dist": "node scripts/verify-dist.mjs",
     "type-check": "tsc --noEmit --isolatedDeclarations",
     "new-post": "node scripts/new-post.js",
     "format": "biome format --write ./src",
@@ -71,6 +73,7 @@
     "@types/markdown-it": "^14.1.2",
     "@types/mdast": "^4.0.4",
     "@types/sanitize-html": "^2.16.0",
+    "@playwright/test": "^1.55.0",
     "postcss-import": "^16.1.1",
     "postcss-nesting": "^13.0.2",
     "vitest": "^2.1.0"

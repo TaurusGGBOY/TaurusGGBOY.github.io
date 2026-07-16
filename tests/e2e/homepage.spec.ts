@@ -1,102 +1,68 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
-const queueStorageKey = "gaoguobin-reading-queue";
+async function expectOk(page: Page, path: string) {
+  const response = await page.goto(path);
+  expect(response?.status(), `${path} should respond successfully`).toBe(200);
+}
 
-test.beforeEach(async ({ page }) => {
+test("Fuwari core routes respond and identify the site", async ({ page }) => {
+  await expectOk(page, "/");
+  await expect(page.getByRole("link", { name: "gaoguobin" }).first()).toBeVisible();
+
+  await expectOk(page, "/archive/");
+  await expectOk(page, "/about/");
+
+  await expectOk(page, "/posts/backend-project-notes/");
+  await expect(page.getByText("Web 乱序 1：怎么打开一个后端项目", { exact: true }).first()).toBeVisible();
+
+  // Fuwari exposes tag filtering through the archive query route.
+  await expectOk(page, "/archive/?tag=backend");
+});
+
+test("Fuwari search interaction opens the search results panel", async ({ page }) => {
   await page.goto("/");
-  await page.evaluate((storageKey) => window.localStorage.removeItem(storageKey), queueStorageKey);
-  await page.reload();
-  await page.addStyleTag({ content: "astro-dev-toolbar { display: none !important; pointer-events: none !important; }" });
+
+  const mobileSearchButton = page.getByRole("button", { name: "Search Panel" });
+  if (await mobileSearchButton.isVisible()) {
+    await mobileSearchButton.click();
+    await page.getByPlaceholder("Search").fill("backend");
+  } else {
+    await page.getByPlaceholder("搜索").fill("backend");
+  }
+  const searchPanel = page.locator("#search-panel");
+  await expect(searchPanel).toBeVisible();
+  await expect(searchPanel.getByRole("link").first()).toBeVisible();
 });
 
-test("homepage renders the magazine structure", async ({ page }) => {
-  await expect(page.getByRole("navigation", { name: "Primary navigation" })).toBeVisible();
-  await expect(
-    page.getByRole("heading", { level: 1, name: "Notes on building, reading, and playing with software." }),
-  ).toBeVisible();
-  await expect(page.getByRole("complementary", { name: "Homepage tools" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Current focus" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Recent writing" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Reading queue" })).toBeVisible();
-});
-
-test("search overlay navigates to a matching post", async ({ page }) => {
-  await page.getByRole("button", { name: "Open search" }).click();
-
-  const searchDialog = page.getByRole("dialog", { name: "Search writing" });
-  await expect(searchDialog).toBeVisible();
-  await searchDialog.getByLabel("Search writing").fill("backend");
-
-  const matchingResult = searchDialog.getByRole("link", { name: /后端项目/i });
-  const nonmatchingResult = searchDialog.getByRole("link", { name: /Playmaker/i });
-  await expect(matchingResult).toBeVisible();
-  await expect(nonmatchingResult).toBeHidden();
-  await matchingResult.click();
-
-  await expect(page).toHaveURL(/\/posts\/backend-project-notes\/$/);
-  await expect(page.getByRole("heading", { level: 1, name: "Web 乱序 1：怎么打开一个后端项目" })).toBeVisible();
-});
-
-test("topic filtering narrows and restores visible post cards", async ({ page }) => {
-  const visibleCards = page.locator("[data-post-card]:visible");
-  const initialCardCount = await visibleCards.count();
-  const finalFantasyCard = page.locator("[data-post-card][data-slug='final-fantasy-seven-reset']");
-  const playmakerCard = page.locator("[data-post-card][data-slug='playmaker-bullet-shooting']");
-  const backendCard = page.locator("[data-post-card][data-slug='backend-project-notes']");
-
-  await page.getByRole("button", { name: /^game\s+\d+$/i }).click();
-
-  await expect(finalFantasyCard).toBeVisible();
-  await expect(playmakerCard).toBeVisible();
-  await expect(backendCard).toBeHidden();
-  expect(await visibleCards.count()).toBeLessThan(initialCardCount);
-
-  await page.getByRole("button", { name: "All writing" }).click();
-
-  await expect(backendCard).toBeVisible();
-  await expect(visibleCards).toHaveCount(initialCardCount);
-});
-
-test("preview drawer can add the previewed post to the reading queue", async ({ page }) => {
-  const firstPreviewButton = page.getByRole("button", { name: "Preview" }).first();
-  const previewedSlug = await firstPreviewButton.getAttribute("data-preview-open");
-  await firstPreviewButton.click();
-
-  const previewDrawer = page.locator("[data-preview-drawer]");
-  await expect(previewDrawer).toBeVisible();
-  await expect(previewDrawer.getByRole("heading", { name: "Preview" })).toBeVisible();
-
-  await previewDrawer.getByRole("button", { name: "Add to queue" }).click();
-
-  await expect(page.locator("[data-queue-count]").first()).toHaveText("1");
-  const storedQueue = await page.evaluate((storageKey) => window.localStorage.getItem(storageKey), queueStorageKey);
-  expect(storedQueue).not.toBeNull();
-  expect(JSON.parse(storedQueue ?? "[]")).toEqual([previewedSlug]);
-});
-
-test("contact modal accepts a visitor message", async ({ page }) => {
-  await page.getByRole("button", { name: "Contact" }).click();
-
-  const contactDialog = page.getByRole("dialog", { name: "Contact" });
-  await expect(contactDialog).toBeVisible();
-  await contactDialog.getByLabel("Name").fill("Ada Lovelace");
-  await contactDialog.getByLabel("Email").fill("ada@example.com");
-  await contactDialog.getByLabel("Message").fill("I would like to talk about backend project notes.");
-  await contactDialog.getByRole("button", { name: "Send message" }).click();
-
-  await expect(contactDialog.getByText("Message queued. Thank you for reaching out.")).toBeVisible();
-});
-
-test("mobile navigation exposes brand and archive/about links", async ({ page }) => {
+test("mobile navigation exposes Fuwari archive and about links", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
 
-  const primaryNavigation = page.getByRole("navigation", { name: "Primary navigation" });
-  await expect(primaryNavigation.getByRole("link", { name: "gaoguobin" })).toBeVisible();
-  await expect(primaryNavigation.getByRole("link", { name: "Archive" })).toBeVisible();
+  await page.getByRole("button", { name: "Menu" }).click();
+  const menu = page.locator("#nav-menu-panel");
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole("link", { name: "归档" })).toBeVisible();
+  await expect(menu.getByRole("link", { name: "关于" })).toBeVisible();
+});
 
-  await primaryNavigation.getByRole("link", { name: "About" }).click();
+test("light and dark theme controls switch the document theme", async ({ page }) => {
+  await page.goto("/");
 
-  await expect(page).toHaveURL(/\/about\/$/);
-  await expect(page.getByRole("heading", { level: 1, name: "About gaoguobin" })).toBeVisible();
+  const themeSwitch = page.getByRole("menuitem", { name: "Light/Dark Mode" });
+  if (await page.getByRole("button", { name: "暗色" }).isVisible()) {
+    await themeSwitch.hover();
+    await page.getByRole("button", { name: "暗色" }).click();
+  } else {
+    await themeSwitch.click();
+    await themeSwitch.click();
+  }
+  await expect(page.locator("html")).toHaveClass(/dark/);
+
+  if (await page.getByRole("button", { name: "亮色" }).isVisible()) {
+    await themeSwitch.hover();
+    await page.getByRole("button", { name: "亮色" }).click();
+  } else {
+    await themeSwitch.click();
+  }
+  await expect(page.locator("html")).not.toHaveClass(/dark/);
 });
