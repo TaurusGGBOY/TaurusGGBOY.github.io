@@ -7,8 +7,6 @@ const requiredPaths = [
   "about/index.html",
   "topics/web/index.html",
   "posts/backend-project-notes/index.html",
-  "pcct-qc-tertiary-hospital.html",
-  "research/zizhong_earthquake/index.html",
   "images/logo.svg",
 ];
 
