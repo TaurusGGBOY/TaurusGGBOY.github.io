@@ -256,6 +256,7 @@ git commit -m "test: verify Fuwari routes and post assets"
 **Files:**
 - Modify: `.github/workflows/pages.yml`
 - Modify: `vitest.config.ts` and `playwright.config.ts`
+- Modify: `src/content/spec/about.md` to remove the imported Fuwari demo copy
 - Replace: `tests/e2e/homepage.spec.ts` with Fuwari smoke coverage
 - Remove: `tests/unit/posts.test.ts`, `tests/unit/queue.test.ts`, `tests/unit/home-interactions.test.ts` when their imported custom modules are removed
 - Modify: `package.json` to retain Vitest, Playwright, and the repository's test scripts alongside Fuwari's scripts
@@ -277,6 +278,8 @@ Keep mobile navigation and light/dark theme checks using Fuwari's stable accessi
 - [ ] **Step 2: Switch GitHub Actions to pnpm**
 
 Update `.github/workflows/pages.yml` to use Node 20, `pnpm/action-setup@v4` with the package manager version from `package.json`, `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm exec vitest run`, and `pnpm exec playwright test`. Keep the existing Pages permissions, artifact upload, deployment job, and `dist` artifact path.
+
+Replace the template's demo About content with a short gaoguobin introduction and keep it free of Fuwari placeholder text.
 
 - [ ] **Step 3: Run the complete local verification suite**
 
