@@ -1,5 +1,5 @@
 ---
-title: "Claude Code源码解读00：从源码泄露开始，读懂 Claude Code 2.1.88"
+title: "Claude Code源码解读00：从源码泄露开始，读懂 Claude Code"
 published: 2026-07-16
 description: "从 Claude Code 2.1.88 的 source map 泄露开始，沿时间线梳理 Anthropic 的撤包、DMCA、恶意软件利用及后续影响，并介绍整个源码解读系列。"
 tags: ["claude-code", "source-code", "ai-agent", "security"]

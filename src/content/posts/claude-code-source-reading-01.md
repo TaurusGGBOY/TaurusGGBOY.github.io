@@ -1,5 +1,5 @@
 ---
-title: "Claude Code源码解读01：从系统地图开始，认识 Claude Code 2.1.88"
+title: "Claude Code源码解读01：从系统地图开始，认识 Claude Code 的整体架构"
 published: 2026-07-17
 description: "从 Claude Code 2.1.88 的系统地图开始，理解入口、查询内核、上下文、执行状态和扩展能力之间的边界。"
 tags: ["claude-code", "source-code", "ai-agent", "architecture"]
@@ -8,8 +8,6 @@ draft: false
 image: "/images/posts/claude-code-source-reading-01/claude-code-source-reading-00.png"
 imagePosition: "left"
 ---
-
-![Claude Code 源码解读 00 配图](/images/posts/claude-code-source-reading-01/claude-code-source-reading-00.png)
 
 ## 回答上一篇的问题
 
