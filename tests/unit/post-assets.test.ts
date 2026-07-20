@@ -28,7 +28,7 @@ describe("post image assets", () => {
       }
     }
 
-    expect(imagePaths).toHaveLength(42);
+    expect(imagePaths).toHaveLength(43);
 
     for (const imagePath of imagePaths) {
       expect(existsSync(join(repoRoot, "public", imagePath))).toBe(true);
