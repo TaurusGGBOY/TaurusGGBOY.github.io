@@ -1,6 +1,7 @@
 ---
 title: "把 SearXNG 变成可靠的本地搜索服务"
 published: 2026-07-20T21:23:33+08:00
+updated: 2026-07-20T21:48:11+08:00
 description: "从一次真实部署出发，整理 SearXNG 的通用安装、JSON API、服务常驻、逐引擎验收、Agent 接入与维护方法。"
 tags: ["searxng", "self-hosted", "ai-agent", "search"]
 category: "AI / Tools"
@@ -126,19 +127,152 @@ done
 
 我的实例目前把五个中文和英文 Web 引擎放在 `general` 分类中。写这篇文章前重新验收时，四个引擎正常返回，百度仍被 CAPTCHA 挂起。这反而验证了逐引擎测试的价值：服务是健康的，上游并不保证同时健康。
 
-## 我为什么修改了两个引擎
+## 四个引擎分别怎么配置
 
-迁移完成后，我把本地源码与上游基线做了 diff。改动集中在两个文件：百度引擎增加约 88 行，夸克引擎增加 15 行。
+下面四段来自我当前可以运行的配置，但代理端口都换成了占位符。你需要先在自己的代理程序、网关或云网络中准备对应出口，再把 `<...>` 替换成真实地址。
 
-百度的匿名 JSON 入口很快会跳到 CAPTCHA。我的本地补丁先解析移动端 HTML，失败后再尝试隔离的 JSON 出口，并缓存最近一次成功结果。夸克对单个出口的请求阈值较低，因此在检测到 CAPTCHA 后，让本地网络层轮换出口重试。
+先决定是否需要全局代理。原生服务通常不会继承交互式 Shell 的 `HTTP_PROXY`，所以我的默认出口写在 `outgoing` 中：
 
-这类补丁有三个明确代价：
+```yaml
+outgoing:
+  request_timeout: 3.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true
+  proxies:
+    all://:
+      - http://<DEFAULT_PROXY_HOST>:<DEFAULT_PROXY_PORT>
+```
 
-- 页面结构变化后，解析器需要跟着维护。
-- 本地分支升级时要重新审查和移植补丁。
-- 多代理只是降低单点阻塞概率，不能绕过服务条款或保证长期可用。
+这里的全局代理会被没有单独声明 `proxies` 的引擎使用。某个引擎需要独立地区或多个出口时，再在它自己的配置块里覆盖。SearXNG 的 [`outgoing` 文档](https://docs.searxng.org/admin/settings/settings_outgoing.html)说明了代理列表、重试和 HTTP/2 的配置方式。
 
-所以我不会建议每个读者照抄这两个文件。更通用的处理顺序是：减少引擎数量和请求频率，调整超时，选择在自己网络中稳定的上游，最后才考虑维护本地补丁。搜索引擎持续要求验证码时，也应该尊重其访问策略，而不是无限重试。
+### 360 搜索：只改配置
+
+360 搜索使用上游自带的 `360search.py`，我的部署没有修改源码。配置只做了三件事：启用引擎、给它一个稳定名称和快捷名、把超时放宽到 10 秒。
+
+```yaml
+engines:
+  - name: 360search
+    engine: 360search
+    shortcut: 360so
+    categories: [general]
+    timeout: 10.0
+    disabled: false
+```
+
+`name` 是调用 API 时使用的引擎名，因此可以用 `engines=360search` 单独测试；`engine` 才是加载的 Python 模块。`categories` 在上游模块里已有默认值，我仍建议显式写出来，复制到其他项目时更容易看懂。
+
+这个引擎每次查询会先访问 `https://www.so.com/s` 获取 Cookie，再带 Cookie 发出搜索请求，所以 3 秒的全局默认超时有时偏紧。上游源码还明确处理了“非中国 IP 可能返回空响应”的情况。如果你的服务器在海外，优先给它选择中国大陆或访问 `so.com` 稳定的出口；没有这个问题时，让它继承全局代理即可。
+
+如果配置后得到空数组而 `unresponsive_engines` 也是空的，不一定是解析器正常，更可能是上游对当前出口返回了空页面。此时要换出口并直接检查响应体。
+
+### Bing：名称保留 Bing，实现换成 Yahoo
+
+我的网络中，Bing 公共 HTML 入口对共享代理出口经常返回 CAPTCHA 或降级页面。这里没有修改 `bing.py`，而是保留 `name: bing` 作为外部调用名称，内部改用 SearXNG 自带的 `yahoo` 引擎：
+
+```yaml
+engines:
+  - name: bing
+    engine: yahoo
+    shortcut: bi
+    categories: [general]
+    language: zh-CN
+    timeout: 10.0
+    enable_http2: false
+    retries: 2
+    retry_on_http_error: [500]
+    proxies:
+      all://:
+        - http://<BING_PROXY_HOST>:<BING_PROXY_PORT>
+    disabled: false
+```
+
+这个选择有几个容易忽略的点：
+
+- `name: bing` 让现有客户端继续使用 `engines=bing`，不需要知道内部换了实现。
+- `engine: yahoo` 加载的是 `searx/engines/yahoo.py`，并不是在伪装请求头访问 Bing。
+- 当前上游实现会把 `language: zh-CN` 映射到 `hk.search.yahoo.com`；换成 `zh-TW` 会选择台湾域名，英文则通常进入 `search.yahoo.com`。
+- Yahoo 的[官方帮助页](https://en-maktoob.help.yahoo.com/kb/SLN35619.html)说明，其算法搜索结果由 Microsoft Bing 提供。它适合做本机兼容路由，但响应结构、附加内容和直接访问 Bing 仍可能不同。
+- 我固定使用一个对 Yahoo 稳定的独立出口，关闭 HTTP/2，并对偶发的 HTTP 500 最多重试 2 次。
+
+如果你的网络能稳定访问 Bing，继续使用上游 `engine: bing` 更简单。只有在直接 Bing 路径长期不稳定、Yahoo 路径经过实测可用时，才需要这种替换。
+
+### 夸克：多出口配置加 CAPTCHA 重试补丁
+
+夸克的基础配置使用 `quark` 引擎，并把通用搜索与图片搜索拆开。我的 `general` 配置如下：
+
+```yaml
+engines:
+  - name: quark
+    engine: quark
+    shortcut: qk
+    quark_category: general
+    categories: [general]
+    proxies:
+      all://:
+        - http://<QUARK_PROXY_HOST>:<EXIT_1_PORT>
+        - http://<QUARK_PROXY_HOST>:<EXIT_2_PORT>
+        - http://<QUARK_PROXY_HOST>:<EXIT_3_PORT>
+        - http://<QUARK_PROXY_HOST>:<EXIT_4_PORT>
+    timeout: 15.0
+    retries: 3
+    max_keepalive_connections: 0
+    keepalive_expiry: 0
+    disabled: false
+```
+
+四个地址必须对应相互隔离的出口，只把同一个上游节点监听到四个端口没有意义。`timeout: 15.0` 给页面加载和代理切换留出空间；`max_keepalive_connections: 0` 与 `keepalive_expiry: 0` 避免连接池把后续请求黏在旧连接上。
+
+`retries: 3` 主要处理网络异常和符合重试条件的 HTTP 错误。夸克返回 CAPTCHA 时，HTTP 状态仍可能是 200，因此只写代理列表和 `retries` 不会自动换出口。
+
+我在 `searx/engines/quark.py` 的 `response()` 中增加了约 15 行：检测到 Alibaba X5SEC CAPTCHA 后，使用 SearXNG 的 `http_get()` 重新请求同一 URL，最多尝试 4 次。网络层每次重试会推进代理列表；四个出口都失败后，才抛出 `SearxEngineCaptchaException` 并暂停引擎 15 分钟。
+
+实现时不要用裸 `requests.get()` 绕开 SearXNG 网络层，否则引擎级 `proxies`、超时和连接设置不会生效。重试次数也应该与实际出口数一致，而不是无限循环。
+
+如果你不维护源码，可以先只用上面的配置。它能处理普通网络故障，但遇到状态码为 200 的 CAPTCHA 时仍会失败，这是配置版与补丁版的边界。
+
+### 百度：移动 HTML、JSON 备用出口和成功缓存
+
+百度是四个引擎中改动最多的一个。`settings.yml` 里的 `general` 配置是：
+
+```yaml
+engines:
+  - name: baidu
+    engine: baidu
+    shortcut: bd
+    baidu_category: general
+    categories: [general]
+    baidu_fallback_proxies:
+      - http://<BAIDU_PROXY_HOST>:<EXIT_1_PORT>
+      - http://<BAIDU_PROXY_HOST>:<EXIT_2_PORT>
+    disabled: false
+```
+
+主请求没有单独写 `proxies`，因此会继承前面的全局 `outgoing.proxies`。`baidu_fallback_proxies` 只供备用 JSON 请求使用，并且是我的本地扩展字段：**原版 `baidu.py` 不认识它，单独复制这段 YAML 不会得到相同效果。**
+
+本地 `baidu.py` 相对上游基线修改了约 88 行，处理顺序如下：
+
+1. `general` 请求去掉 `tn=json`，改用移动端 User-Agent 获取 HTML，并保持禁止自动跟随 CAPTCHA 重定向。
+2. 新增 `parse_general_html()`，从移动结果页的 `article` 卡片中提取标题、链接和摘要。
+3. HTML 解析失败或遇到 CAPTCHA 后，`fetch_general_json()` 按顺序尝试 `baidu_fallback_proxies`，每个出口使用 10 秒超时、禁用 HTTP/2、禁止自动重定向。
+4. 成功结果按“查询词 + 分页起点”缓存 15 分钟。当前请求和备用出口都失败时，返回最近一次成功缓存；没有缓存才把引擎标记为 CAPTCHA。
+
+这要求源码中新增 `httpx`、`lxml.html`、URL 查询解析和 `EngineCache` 相关逻辑。两个备用代理也应该是不同出口，否则只是重复同一次失败。
+
+百度的匿名接口仍可能把所有出口送进 CAPTCHA。我在更新本文时重新测试，360 搜索、Bing 兼容路由和夸克都有结果，百度依然处于 CAPTCHA 暂停状态。因此这套配置是“减少失败并提供降级”，不是保证可用。
+
+### 哪些配置可以直接搬走
+
+| 引擎 | 只改 `settings.yml` | 需要本地源码 | 关键网络要求 |
+| --- | --- | --- | --- |
+| 360 搜索 | 可以 | 不需要 | 对 `so.com` 稳定，海外服务器可能需要中国出口 |
+| Bing 兼容路由 | 可以 | 不需要 | Yahoo 可用的固定出口，建议 HTTP/1.1 |
+| 夸克 | 部分可用 | CAPTCHA 自动换出口需要 | 多个真正隔离的出口 |
+| 百度 | 不够 | 移动 HTML、JSON fallback 和缓存需要 | 默认出口加至少两个备用出口 |
+
+迁移到其他项目时，先复制 360 搜索和 Bing 兼容路由并单独验收，再决定是否承担夸克、百度补丁的维护成本。修改 SearXNG 源码后，要记录上游 commit、本地分支和完整 diff；升级前重新审查这两个引擎文件。
+
+这类补丁还要遵守上游服务的访问策略。多出口和缓存用于降低偶发阻塞，不应该变成高频抓取或无限绕过验证码的工具。
 
 ## 把 SearXNG 接给 Agent
 
