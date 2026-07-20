@@ -1,6 +1,6 @@
 ---
 title: "Claude Code源码解读03：第一次提问前，它到底做了什么"
-published: 2026-07-20
+published: 2026-07-20T17:10:40+08:00
 description: "拆解 Claude Code 在第一次请求前完成的入口分流、配置加载、项目信任、会话恢复、能力装配与宿主挂载。"
 tags: ["claude-code", "source-code", "ai-agent", "startup"]
 category: "AI / Architecture"
