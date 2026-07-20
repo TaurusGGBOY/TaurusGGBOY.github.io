@@ -38,7 +38,7 @@ describe("Fuwari post frontmatter", () => {
 			.filter((file) => file.endsWith(".md") || file.endsWith(".mdx"))
 			.sort();
 
-		expect(postFiles).toHaveLength(7);
+		expect(postFiles).toHaveLength(8);
 
 		for (const file of postFiles) {
 			const keys = frontmatterKeys(await readFile(join(postsDirectory, file), "utf8"));
