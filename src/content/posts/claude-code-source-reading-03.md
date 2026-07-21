@@ -204,6 +204,95 @@ export async function setup(
 
 一个是建立运行基础，例如 Node.js 版本、工作目录、worktree、会话 ID、日志与后台服务。另一个是尽早拒绝不安全组合。例如 `bypassPermissions` 或 `--dangerously-skip-permissions` 不是只改一个布尔值；源码还会检查 root/sudo、容器、沙箱和网络条件。也就是说，权限模式既是请求阶段的工具执行规则，也是启动阶段能否继续运行的前置条件。
 
+## 无法直连 Claude 时，跳过的是首次 Onboarding
+
+部分中国网络环境无法直接访问 Anthropic 服务，用户通常会先配置兼容的 API 网关或云服务，再启动 Claude Code。这时首次 Onboarding 里的官方登录路径可能无法完成。源码为“是否已经走完首次引导”保留了一个持久化配置项：`hasCompletedOnboarding`。
+
+先要澄清名字：它跳过的不是上一节的 `setup()`，而是 `showSetupScreens()` 里的 `Onboarding` 组件。Node.js 版本、工作目录、权限安全检查、目录信任、MCP 审批和自定义 API Key 确认仍然会按各自条件执行。
+
+```tsx
+export async function showSetupScreens(
+  root: Root,
+  permissionMode: PermissionMode,
+  allowDangerouslySkipPermissions: boolean,
+  commands?: Command[],
+  claudeInChrome?: boolean,
+  devChannels?: ChannelEntry[],
+): Promise<boolean> {
+  const config = getGlobalConfig()
+  let onboardingShown = false
+
+  if (!config.theme || !config.hasCompletedOnboarding) {
+    onboardingShown = true
+    const { Onboarding } = await import('./components/Onboarding.js')
+    await showSetupDialog(
+      root,
+      done => (
+        <Onboarding
+          onDone={() => {
+            completeOnboarding()
+            void done()
+          }}
+        />
+      ),
+      { onChangeAppState },
+    )
+  }
+
+  // 后面继续处理目录信任、MCP 审批和 API Key 确认
+  return onboardingShown
+}
+```
+
+**功能：** `showSetupScreens()` 读取全局配置，决定是否动态加载首次引导界面。只有 `theme` 已有有效值，并且 `hasCompletedOnboarding` 为真，才会跳过这段 `Onboarding`；判断使用的是逻辑或，因此只设置其中一个字段还不够。本文省略了函数前后的测试、Demo、信任和审批分支，末尾 `return` 用来说明返回值语义，并不表示源码在 Onboarding 后立即返回。
+
+**参数与关键值：**
+
+- `root`：必填的 Ink `Root`，用于渲染阻塞式设置对话框。
+- `permissionMode`：必填 `PermissionMode`；它影响后续权限提示，合法值与上一节 `setup()` 相同，但不改变这里的 Onboarding 判断。
+- `allowDangerouslySkipPermissions`：必填布尔值；`true` 允许后续危险权限模式提示进入相应分支，`false` 不允许。它同样不能跳过 Onboarding。
+- `commands`：可选 `Command[]`，省略时为 `undefined`；后续传给目录信任界面，用来展示相关命令信息。
+- `claudeInChrome`：可选布尔值；`true`、`false` 或省略为 `undefined`，用于后续 Chrome 集成设置分支，不参与本段条件。
+- `devChannels`：可选 `ChannelEntry[]`，省略时为 `undefined`；内容来自运行时开发通道配置，静态源码无法穷举。
+- `config.theme`：类型是 `ThemeSetting`，可选值为 `auto`、`dark`、`light`、`light-daltonized`、`dark-daltonized`、`light-ansi`、`dark-ansi`；新配置的默认值是 `dark`。`auto` 会在运行时跟随系统深浅色模式。
+- `config.hasCompletedOnboarding`：类型是可选布尔值。`true` 表示已完成；`false` 或 `undefined` 都会显示引导。`null` 不属于声明的合法类型；如果损坏或手工编辑的配置让它进入这段 JavaScript 判断，也会因为是假值而显示引导。
+- 返回值：`Promise<boolean>`；`true` 表示本次确实展示过 Onboarding，`false` 表示没有展示。它不是“整个 setup 是否成功”的状态码。
+
+用户正常完成引导时，标志位由 `completeOnboarding()` 写入，而不是只存在于当前进程内存中：
+
+```ts
+export function completeOnboarding(): void {
+  saveGlobalConfig(current => ({
+    ...current,
+    hasCompletedOnboarding: true,
+    lastOnboardingVersion: MACRO.VERSION,
+  }))
+}
+```
+
+**功能：** `completeOnboarding()` 保留当前全局配置的其他字段，把首次引导标记为已完成，并记录完成引导时的 Claude Code 版本。它返回 `void`，写入动作由 `saveGlobalConfig()` 完成。
+
+**字段说明：**
+
+- `current`：`saveGlobalConfig()` 传入的当前 `GlobalConfig`，不是用户参数；展开它可以避免覆盖 API、项目、主题等无关配置。
+- `hasCompletedOnboarding: true`：这里没有 `false` 分支。要跳过首次引导，全局配置最终必须读出真值。
+- `lastOnboardingVersion`：写入当前构建的 `MACRO.VERSION`。它是版本字符串，不是布尔开关；后续版本可以据此判断是否需要重新展示引导。
+
+从代码阅读落到实际配置时，最小意图相当于让全局配置包含下面两个字段；已有文件必须保留其他内容，不能整文件覆盖：
+
+```json
+{
+  "theme": "dark",
+  "hasCompletedOnboarding": true
+}
+```
+
+**配置作用：** 这两个字段共同让 `!config.theme || !config.hasCompletedOnboarding` 为假，从而不加载首次 Onboarding。`theme` 可以替换成上文列出的任一合法值；合法配置中的 `hasCompletedOnboarding` 应写成 JSON 布尔值 `true`，字符串 `"true"` 不符合 `GlobalConfig` 的类型约定。
+
+默认全局文件是 `~/.claude.json`。源码还兼容 Claude 配置目录下旧的 `.config.json`；如果设置了 `CLAUDE_CONFIG_DIR` 或使用带 OAuth 后缀的配置，实际文件名也会变化，所以修改前应以 `getGlobalClaudeFile()` 的路径规则和本机现有文件为准。第三方服务的地址与凭据是另一层配置：源码确认受信任的用户级 `settings.env` 可以在首次引导前应用 `ANTHROPIC_BASE_URL`，但某个网关是否兼容、需要哪些模型名，取决于服务提供方，静态源码不能替它作保证。
+
+另外三个看似相近的分支不要混用：`IS_DEMO` 会让整个 `showSetupScreens()` 提前返回，但它是 Demo 模式；`CLAUBBIT` 只跳过后面的信任与审批子段，并不跳过 Onboarding；非交互的 `-p` 根本不会进入 `showSetupScreens()`，却也不再是普通交互式 REPL。对需要保留交互体验的用户，真正对应首次引导状态的仍是 `hasCompletedOnboarding`。
+
 ## 认证、信任和项目配置有先后关系
 
 很多初始化工作都需要读配置，但并不是所有配置从进程启动的第一毫秒起就可以被信任。
