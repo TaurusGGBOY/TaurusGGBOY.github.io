@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 async function expectOk(page: Page, path: string) {
-  const response = await page.goto(path);
+  const response = await page.goto(path, { waitUntil: "domcontentloaded" });
   expect(response?.status(), `${path} should respond successfully`).toBe(200);
 }
 
@@ -20,7 +20,7 @@ test("Fuwari core routes respond and identify the site", async ({ page }) => {
 });
 
 test("Fuwari search interaction opens the search results panel", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/", { waitUntil: "domcontentloaded" });
 
   const mobileSearchButton = page.getByRole("button", { name: "Search Panel" });
   if (await mobileSearchButton.isVisible()) {
@@ -36,7 +36,7 @@ test("Fuwari search interaction opens the search results panel", async ({ page }
 
 test("mobile navigation exposes Fuwari archive and about links", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await page.goto("/", { waitUntil: "domcontentloaded" });
 
   await page.locator("#nav-menu-switch").click();
   const menu = page.locator("#nav-menu-panel");
@@ -46,7 +46,7 @@ test("mobile navigation exposes Fuwari archive and about links", async ({ page }
 });
 
 test("light and dark theme controls switch the document theme", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/", { waitUntil: "domcontentloaded" });
 
   const themeSwitch = page.getByRole("menuitem", { name: "Light/Dark Mode" });
   if (await page.getByRole("button", { name: "暗色" }).isVisible()) {
