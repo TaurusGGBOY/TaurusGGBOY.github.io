@@ -49,7 +49,7 @@ jobs:
         run: pnpm verify:dist
 
       - name: Install Chromium
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm exec playwright install chromium
 
       - name: End-to-end smoke tests
         run: pnpm exec playwright test
