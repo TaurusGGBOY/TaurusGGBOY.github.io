@@ -52,7 +52,7 @@ jobs:
         run: pnpm exec playwright install chromium
 
       - name: End-to-end smoke tests
-        run: pnpm exec playwright test
+        run: pnpm exec playwright test --workers=1
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
