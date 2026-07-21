@@ -1,0 +1,149 @@
+diff --git a/searx/engines/baidu.py b/searx/engines/baidu.py
+index 8aa2f2f6f..28cfa179a 100644
+--- a/searx/engines/baidu.py
++++ b/searx/engines/baidu.py
+@@ -9,12 +9,15 @@
+ 
+ import typing as t
+ 
+-from urllib.parse import urlencode
++from urllib.parse import parse_qs, urlencode, urlparse
+ from datetime import datetime
+ from html import unescape
+ import time
+ import json
+ 
++import httpx
++from lxml import html
++
+ from searx.exceptions import SearxEngineAPIException, SearxEngineCaptchaException, SearxEngineAccessDeniedException
+ from searx.enginelib import EngineCache
+ from searx.network import get as http_get
+@@ -35,6 +38,7 @@ categories = []
+ results_per_page = 10
+ 
+ baidu_category = 'general'
++baidu_fallback_proxies = []
+ 
+ time_range_support = True
+ time_range_dict = {"day": 86400, "week": 604800, "month": 2592000, "year": 31536000}
+@@ -43,6 +47,7 @@ image_base_url = "https://image.baidu.com/"
+ 
+ COOKIE_CACHE_KEY = "cookie"
+ COOKIE_CACHE_EXPIRATION_SECONDS = 3600
++GENERAL_CACHE_EXPIRATION_SECONDS = 900
+ 
+ CACHE: EngineCache
+ """Stores cookies from Baidu image search warmup."""
+@@ -80,7 +85,6 @@ def request(query, params):
+                 "wd": query,
+                 "rn": results_per_page,
+                 "pn": (page_num - 1) * results_per_page,
+-                "tn": "json",
+             },
+         },
+         'images': {
+@@ -120,6 +124,15 @@ def request(query, params):
+     if baidu_category == 'images':
+         params["cookies"] = get_image_cookies(params["headers"])
+ 
++    if baidu_category == 'general':
++        # The JSON endpoint quickly redirects anonymous clients to CAPTCHA.
++        # Baidu's mobile HTML response exposes structured result cards and is
++        # substantially more stable for a low-volume local metasearch service.
++        params["headers"]["User-Agent"] = (
++            "Mozilla/5.0 (Linux; Android 14; Pixel 8) "
++            "AppleWebKit/537.36 Chrome/138.0.0.0 Mobile Safari/537.36"
++        )
++
+     params["url"] = f"{query_url}?{urlencode(query_params)}"
+     params["allow_redirects"] = False
+     return params
+@@ -127,10 +140,36 @@ def request(query, params):
+ 
+ def response(resp):
+     # Detect Baidu Captcha, it will redirect to wappass.baidu.com
+-    if 'wappass.baidu.com/static/captcha' in resp.headers.get('Location', ''):
++    captcha_redirect = 'wappass.baidu.com/static/captcha' in resp.headers.get('Location', '')
++    if captcha_redirect and baidu_category != 'general':
+         raise SearxEngineCaptchaException()
+ 
+     text = resp.text
++    if baidu_category == 'general':
++        request_query = parse_qs(urlparse(str(resp.request.url)).query)
++        query = request_query.get('wd', [''])[0]
++        page_start = int(request_query.get('pn', ['0'])[0])
++        cache_key = f'general:{query}:{page_start}'
++
++        if not captcha_redirect and not text.lstrip().startswith('{'):
++            try:
++                results = parse_general_html(text)
++                CACHE.set(cache_key, results, expire=GENERAL_CACHE_EXPIRATION_SECONDS)
++                return results
++            except SearxEngineAPIException:
++                pass
++
++        results = fetch_general_json(query, page_start, resp.request.headers)
++        if results:
++            cache_results = [{k: v for k, v in item.items() if k != 'publishedDate'} for item in results]
++            CACHE.set(cache_key, cache_results, expire=GENERAL_CACHE_EXPIRATION_SECONDS)
++            return results
++
++        cached_results = CACHE.get(cache_key)
++        if cached_results:
++            return cached_results
++        raise SearxEngineCaptchaException()
++
+     if baidu_category == 'images':
+         # baidu's JSON encoder wrongly quotes / and ' characters by \\ and \'
+         text = text.replace(r"\/", "/").replace(r"\'", "'")
+@@ -142,6 +181,49 @@ def response(resp):
+     return parsers[baidu_category](data)
+ 
+ 
++def parse_general_html(text):
++    results = []
++    dom = html.fromstring(text)
++
++    for article in dom.xpath('//article[@rl-link-data-url]'):
++        url = article.get('rl-link-data-url')
++        title_nodes = article.xpath('.//*[@role="title"]')
++        if not url or not title_nodes:
++            continue
++
++        title = html_to_text(' '.join(title_nodes[0].itertext())).strip()
++        summary_nodes = article.xpath('.//*[contains(@class, "summary-text")]')
++        content = ''
++        if summary_nodes:
++            content = html_to_text(' '.join(summary_nodes[0].itertext())).strip()
++
++        if title:
++            results.append({'title': title, 'url': url, 'content': content})
++
++    if not results:
++        raise SearxEngineAPIException("Invalid mobile HTML response")
++    return results
++
++
++def fetch_general_json(query, page_start, headers):
++    url = 'https://www.baidu.com/s'
++    params = {'wd': query, 'rn': results_per_page, 'pn': page_start, 'tn': 'json'}
++
++    for proxy in baidu_fallback_proxies:
++        try:
++            with httpx.Client(proxy=proxy, timeout=10, follow_redirects=False, http2=False) as client:
++                response = client.get(url, params=params, headers=dict(headers))
++            if response.status_code != 200:
++                continue
++            data = response.json()
++            if data.get('antiFlag') == 1:
++                continue
++            return parse_general(data)
++        except (httpx.HTTPError, ValueError, SearxEngineAPIException):
++            continue
++    return []
++
++
+ def parse_general(data):
+     results = []
+     if not data.get("feed", {}).get("entry"):

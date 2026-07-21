@@ -1,0 +1,33 @@
+diff --git a/searx/engines/quark.py b/searx/engines/quark.py
+index e51fb7a26..830197a3b 100644
+--- a/searx/engines/quark.py
++++ b/searx/engines/quark.py
+@@ -8,6 +8,7 @@ import json
+ 
+ from searx.utils import html_to_text
+ from searx.exceptions import SearxEngineAPIException, SearxEngineCaptchaException
++from searx.network import get as http_get
+ 
+ # Metadata
+ about = {
+@@ -84,6 +85,20 @@ def response(resp):
+     results = []
+     text = resp.text
+ 
++    # Quark applies a low per-IP CAPTCHA threshold.  The local engine network
++    # has several isolated proxies; retrying here advances its round-robin
++    # proxy iterator so one blocked exit does not fail the user's search.
++    retry_count = 0
++    while is_alibaba_captcha(text) and retry_count < 4:
++        retry_count += 1
++        resp = http_get(
++            str(resp.url),
++            headers=dict(resp.request.headers),
++            timeout=10,
++            allow_redirects=False,
++        )
++        text = resp.text
++
+     if is_alibaba_captcha(text):
+         raise SearxEngineCaptchaException(
+             suspended_time=900, message="Alibaba CAPTCHA detected. Please try again later."

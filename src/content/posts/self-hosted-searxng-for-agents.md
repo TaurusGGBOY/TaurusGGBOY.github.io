@@ -1,7 +1,7 @@
 ---
 title: "把 SearXNG 变成可靠的本地搜索服务"
 published: 2026-07-20T21:23:33+08:00
-updated: 2026-07-20T21:48:11+08:00
+updated: 2026-07-21T11:10:25+08:00
 description: "从一次真实部署出发，整理 SearXNG 的通用安装、JSON API、服务常驻、逐引擎验收、Agent 接入与维护方法。"
 tags: ["searxng", "self-hosted", "ai-agent", "search"]
 category: "AI / Tools"
@@ -146,6 +146,33 @@ outgoing:
 
 这里的全局代理会被没有单独声明 `proxies` 的引擎使用。某个引擎需要独立地区或多个出口时，再在它自己的配置块里覆盖。SearXNG 的 [`outgoing` 文档](https://docs.searxng.org/admin/settings/settings_outgoing.html)说明了代理列表、重试和 HTTP/2 的配置方式。
 
+为了让其他项目和 Agent 不必从文章里手工拼代码，我把脱敏配置和完整源码补丁放进了 GitHub：
+
+- [示例目录与使用说明](https://github.com/TaurusGGBOY/TaurusGGBOY.github.io/tree/master/examples/searxng)
+- [`settings-quark-baidu.yml`](https://github.com/TaurusGGBOY/TaurusGGBOY.github.io/blob/master/examples/searxng/settings-quark-baidu.yml)，以及适合脚本下载的 [Raw 文件](https://raw.githubusercontent.com/TaurusGGBOY/TaurusGGBOY.github.io/master/examples/searxng/settings-quark-baidu.yml)
+- [夸克 CAPTCHA 代理轮换补丁](https://github.com/TaurusGGBOY/TaurusGGBOY.github.io/blob/master/examples/searxng/patches/quark-captcha-proxy-rotation.patch)，以及 [Raw 补丁](https://raw.githubusercontent.com/TaurusGGBOY/TaurusGGBOY.github.io/master/examples/searxng/patches/quark-captcha-proxy-rotation.patch)
+- [百度移动 HTML、JSON 备用出口与缓存补丁](https://github.com/TaurusGGBOY/TaurusGGBOY.github.io/blob/master/examples/searxng/patches/baidu-mobile-fallback-cache.patch)，以及 [Raw 补丁](https://raw.githubusercontent.com/TaurusGGBOY/TaurusGGBOY.github.io/master/examples/searxng/patches/baidu-mobile-fallback-cache.patch)
+
+两个补丁以 SearXNG commit `277d8469c`（版本标识 `2026.7.18+277d8469c`）为基线生成。下载后必须先在自己的 SearXNG 源码目录运行检查：
+
+```bash
+curl -fL -o quark-captcha-proxy-rotation.patch \
+  https://raw.githubusercontent.com/TaurusGGBOY/TaurusGGBOY.github.io/master/examples/searxng/patches/quark-captcha-proxy-rotation.patch
+
+curl -fL -o baidu-mobile-fallback-cache.patch \
+  https://raw.githubusercontent.com/TaurusGGBOY/TaurusGGBOY.github.io/master/examples/searxng/patches/baidu-mobile-fallback-cache.patch
+
+git apply --check \
+  quark-captcha-proxy-rotation.patch \
+  baidu-mobile-fallback-cache.patch
+
+git apply \
+  quark-captcha-proxy-rotation.patch \
+  baidu-mobile-fallback-cache.patch
+```
+
+如果你的版本更新、`git apply --check` 失败，不要使用 `--reject` 或其他方式强行套用。让 Agent 阅读补丁，再把对应逻辑移植到当前版本的 `searx/engines/quark.py` 和 `searx/engines/baidu.py`；解析器代码升级后可能已经变化。
+
 ### 360 搜索：只改配置
 
 360 搜索使用上游自带的 `360search.py`，我的部署没有修改源码。配置只做了三件事：启用引擎、给它一个稳定名称和快捷名、把超时放宽到 10 秒。
@@ -225,7 +252,7 @@ engines:
 
 `retries: 3` 主要处理网络异常和符合重试条件的 HTTP 错误。夸克返回 CAPTCHA 时，HTTP 状态仍可能是 200，因此只写代理列表和 `retries` 不会自动换出口。
 
-我在 `searx/engines/quark.py` 的 `response()` 中增加了约 15 行：检测到 Alibaba X5SEC CAPTCHA 后，使用 SearXNG 的 `http_get()` 重新请求同一 URL，最多尝试 4 次。网络层每次重试会推进代理列表；四个出口都失败后，才抛出 `SearxEngineCaptchaException` 并暂停引擎 15 分钟。
+我在 `searx/engines/quark.py` 的 `response()` 中增加了约 15 行：检测到 Alibaba X5SEC CAPTCHA 后，使用 SearXNG 的 `http_get()` 重新请求同一 URL，最多尝试 4 次。网络层每次重试会推进代理列表；四个出口都失败后，才抛出 `SearxEngineCaptchaException` 并暂停引擎 15 分钟。完整实现可以直接查看或下载[夸克源码补丁](https://github.com/TaurusGGBOY/TaurusGGBOY.github.io/blob/master/examples/searxng/patches/quark-captcha-proxy-rotation.patch)。
 
 实现时不要用裸 `requests.get()` 绕开 SearXNG 网络层，否则引擎级 `proxies`、超时和连接设置不会生效。重试次数也应该与实际出口数一致，而不是无限循环。
 
@@ -248,7 +275,7 @@ engines:
     disabled: false
 ```
 
-主请求没有单独写 `proxies`，因此会继承前面的全局 `outgoing.proxies`。`baidu_fallback_proxies` 只供备用 JSON 请求使用，并且是我的本地扩展字段：**原版 `baidu.py` 不认识它，单独复制这段 YAML 不会得到相同效果。**
+主请求没有单独写 `proxies`，因此会继承前面的全局 `outgoing.proxies`。`baidu_fallback_proxies` 只供备用 JSON 请求使用，并且是我的本地扩展字段：**原版 `baidu.py` 不认识它，单独复制这段 YAML 不会得到相同效果。** 可复用的脱敏字段已经整理在 [`settings-quark-baidu.yml`](https://github.com/TaurusGGBOY/TaurusGGBOY.github.io/blob/master/examples/searxng/settings-quark-baidu.yml) 中，但它必须与下面的源码补丁一起使用。
 
 本地 `baidu.py` 相对上游基线修改了约 88 行，处理顺序如下：
 
@@ -257,7 +284,7 @@ engines:
 3. HTML 解析失败或遇到 CAPTCHA 后，`fetch_general_json()` 按顺序尝试 `baidu_fallback_proxies`，每个出口使用 10 秒超时、禁用 HTTP/2、禁止自动重定向。
 4. 成功结果按“查询词 + 分页起点”缓存 15 分钟。当前请求和备用出口都失败时，返回最近一次成功缓存；没有缓存才把引擎标记为 CAPTCHA。
 
-这要求源码中新增 `httpx`、`lxml.html`、URL 查询解析和 `EngineCache` 相关逻辑。两个备用代理也应该是不同出口，否则只是重复同一次失败。
+这要求源码中新增 `httpx`、`lxml.html`、URL 查询解析和 `EngineCache` 相关逻辑。两个备用代理也应该是不同出口，否则只是重复同一次失败。[百度源码补丁](https://github.com/TaurusGGBOY/TaurusGGBOY.github.io/blob/master/examples/searxng/patches/baidu-mobile-fallback-cache.patch)包含全部 import、解析、fallback 与缓存实现，可以交给 Agent 按上游版本审查或移植。
 
 百度的匿名接口仍可能把所有出口送进 CAPTCHA。我在更新本文时重新测试，360 搜索、Bing 兼容路由和夸克都有结果，百度依然处于 CAPTCHA 暂停状态。因此这套配置是“减少失败并提供降级”，不是保证可用。
 
@@ -270,7 +297,7 @@ engines:
 | 夸克 | 部分可用 | CAPTCHA 自动换出口需要 | 多个真正隔离的出口 |
 | 百度 | 不够 | 移动 HTML、JSON fallback 和缓存需要 | 默认出口加至少两个备用出口 |
 
-迁移到其他项目时，先复制 360 搜索和 Bing 兼容路由并单独验收，再决定是否承担夸克、百度补丁的维护成本。修改 SearXNG 源码后，要记录上游 commit、本地分支和完整 diff；升级前重新审查这两个引擎文件。
+迁移到其他项目时，先复制 360 搜索和 Bing 兼容路由并单独验收，再决定是否承担夸克、百度补丁的维护成本。修改 SearXNG 源码后，要记录上游 commit、本地分支和完整 diff；升级前重新审查这两个引擎文件。本文配套目录已经同时保留了可读的 GitHub 页面和可供 Agent 下载的 Raw 文件，避免“只有配置、没有源码级 patch”而无法复现。
 
 这类补丁还要遵守上游服务的访问策略。多出口和缓存用于降低偶发阻塞，不应该变成高频抓取或无限绕过验证码的工具。
 

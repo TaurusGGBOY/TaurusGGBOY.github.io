@@ -1,0 +1,41 @@
+# Merge these fragments into your existing SearXNG settings.yml.
+# Replace every <...> placeholder. Do not publish credentials or private nodes.
+
+outgoing:
+  request_timeout: 3.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true
+  proxies:
+    all://:
+      - "http://<DEFAULT_PROXY_HOST>:<DEFAULT_PROXY_PORT>"
+
+engines:
+  - name: quark
+    engine: quark
+    shortcut: qk
+    quark_category: general
+    categories: [general]
+    proxies:
+      all://:
+        # These ports must lead to genuinely isolated exits.
+        - "http://<QUARK_PROXY_HOST>:<EXIT_1_PORT>"
+        - "http://<QUARK_PROXY_HOST>:<EXIT_2_PORT>"
+        - "http://<QUARK_PROXY_HOST>:<EXIT_3_PORT>"
+        - "http://<QUARK_PROXY_HOST>:<EXIT_4_PORT>"
+    timeout: 15.0
+    retries: 3
+    max_keepalive_connections: 0
+    keepalive_expiry: 0
+    disabled: false
+
+  - name: baidu
+    engine: baidu
+    shortcut: bd
+    baidu_category: general
+    categories: [general]
+    # Custom field introduced by baidu-mobile-fallback-cache.patch.
+    baidu_fallback_proxies:
+      - "http://<BAIDU_PROXY_HOST>:<EXIT_1_PORT>"
+      - "http://<BAIDU_PROXY_HOST>:<EXIT_2_PORT>"
+    disabled: false
