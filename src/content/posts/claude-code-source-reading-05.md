@@ -306,14 +306,6 @@ try {
 
 因此，`ask()`、`QueryEngine` 与 `query()` 可以这样区分：`ask()` 是一次性入口包装，`QueryEngine` 是 headless conversation 的状态壳，`query()` 是一次 Agent 执行的生成器。三个名字靠得很近，生命周期却不一样。
 
-## 静态源码还能证明到哪里
-
-本篇可以从源码直接确认构造参数、默认值、状态字段、消息转换、result subtype 和调用方向，也可以确认一个 engine 设计为承载多个 turn。
-
-“QueryEngine 是 headless 宿主与 Agent loop 之间的会话边界”属于调用关系支撑的架构解释。它不代表服务端替你永久托管了会话，也不代表 SDK 自动解决并发、进程恢复和资源隔离。
-
-真实任务的耗时、费用、重试次数、消息规模、磁盘写入成功率和中断响应速度仍取决于模型、网络、工具、运行时配置与外部宿主，不能由 2.1.88 的静态代码直接推出。
-
 ## 小结
 
 `QueryEngine` 的价值不是再实现一遍 Agent，而是给 headless/SDK 提供稳定的 conversation 边界。
@@ -324,4 +316,4 @@ try {
 
 ## 留给下一篇的问题
 
-`QueryEngine.submitMessage()` 把整理好的会话状态交给 `query()` 以后，`queryLoop()` 怎样判断应该继续调用模型、执行工具，还是结束这一轮 Agent 运行？
+如果我在 Claude Code CLI 中输入了 `/new`，有什么是新的，有什么是旧的？
