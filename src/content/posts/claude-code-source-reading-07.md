@@ -9,11 +9,18 @@ image: "/images/posts/claude-code-source-reading-07/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+
 ## 回答上一篇的问题
 
-上一篇的问题是：Claude Code 内部的 user、assistant、system、progress、attachment 与 `tool_use`/`tool_result` 消息，怎样关联成一段可追踪的对话？
+上一篇的问题是：Claude Code 里的 `turn` 到底算什么？我发一句用户消息后，后续每次“工具调用 + 结果反馈”的往返都算一个新的 turn 吗？`maxTurns` 这个上限能不能手动设置？
 
-先给结论：**Claude Code 不是靠一个万能的“会话 ID”维持所有关系，而是同时使用消息顺序、消息 UUID、模型响应 ID 和工具调用 ID。**
+先给结论：在 Claude Code 的语境里，`turn` 是“一个完整回合”——一次用户输入触发的模型输出结束。这个输出里可以没有工具调用，也可以含若干 `tool_use`，然后等待工具结果再接下一次模型决策。也就是说，`tool_use` + `tool_result` 的每一条回流都会让你进入下一条 `turn`；而最终文本收束也会产生最后一个 `turn`。`maxTurns` 主要约束的是这类工具驱动回合的续航，而不是无限制地反复执行工具。
+
+能不能手动设置？可以。官方 CLI 文档明确给出了 `--max-turns`：它控制 `print` 模式下的 agentic turns 数（默认无上限）并在到达上限后退出（`No limit by default`，`Exit with error when limit is reached`）。源码链路也能对齐验证：`main.tsx` 定义了 `--max-turns <turns>`，并把 `options.maxTurns` 传给 `runHeadless`；`runHeadless` 再把它交给查询引擎；`query.ts` 在准备进入下一次工具回环前检查 `nextTurnCount > maxTurns`，命中后发出 `max_turns_reached` 附件并返回 `reason: 'max_turns'`。
+
+再说一条边界：在 `query.ts` 里 `turnCount` 从 `1` 开始，`if (maxTurns && ...)` 的实现也意味着 `0` 在该判断中不会触发上限分支（这是源码可观察结果，不代表 CLI 层一定接收 0）。所以“能不能设值”要分成两层：官方参数允许你设置，但是否能接受负值/0，需要以具体入口做参数校验为准。
+
+有了这层时序边界，本文接着回答原问题：内部 `user`、`assistant`、`system`、`progress`、`attachment` 与 `tool_use`/`tool_result` 消息，怎样关联成一段可追踪的对话？**Claude Code 不是靠一个万能的“会话 ID”维持所有关系，而是同时使用消息顺序、消息 UUID、模型响应 ID 和工具调用 ID。**
 
 这几个 ID 分工不同：
 
