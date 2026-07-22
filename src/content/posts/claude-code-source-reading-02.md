@@ -85,13 +85,24 @@ Claude Code 的核心场景则是用户坐在终端或 IDE 前，与一个持续
 
 这意味着“一次用户请求”不等于“一次模型 API 请求”。前者可以包含多次模型调用和多次工具执行，直到某个停止条件成立。
 
-下面的代码都节选自还原源码。为了让主线清楚，我省略了与当前机制无关的参数、日志和恢复分支；函数名、关键字段与调用顺序保持不变。
+02 的任务是先建立这张端到端地图，不在每一站提前展开实现。后续文章会沿着同一条链路逐层拆开：
+
+| 本文经过的节点 | 本文只保留的结论 | 后续展开章节 |
+|---|---|---|
+| Host 与运行入口 | 不同入口最终把输入和能力交给查询内核 | 03 启动与初始化、04 多种运行入口 |
+| `QueryEngine` | 保存会话状态，并把内部事件转换给宿主 | 05 会话与无头调用 |
+| `queryLoop` | 用显式状态推进模型、工具与下一轮推理 | 06 Agent 循环 |
+| 消息与 API stream | 模型返回的是结构化事件流，不只是一段文本 | 07 消息模型、08 API 流式传输 |
+| 工具执行 | `tool_use` 要经过查找、编排、校验、权限与执行 | 09 工具契约、10 串并行编排、11 执行生命周期、12 权限引擎 |
+| 文件、上下文与恢复 | 工具状态、上下文长度和错误恢复分别有独立机制 | 14 文件与回滚、17 上下文压缩、19 错误恢复、20 会话恢复 |
+
+下面只追踪各节点之间怎样交接。相关参数、分支和异常边界留到表中的专题文章再讲。
 
 ## 第一站：Host 把能力交给 QueryEngine.ask
 
 不同 Host 接收输入的方式并不相同。交互式 REPL 从终端拿 prompt，无头模式可能从标准输入或 SDK 拿消息，远程模式还有自己的连接层。但它们进入请求内核时，需要提供的并不只是一段文字。
 
-`restored-src/src/QueryEngine.ts` 中的 `ask()` 会创建 `QueryEngine`。从构造参数可以看到，一轮请求同时带着工作目录 `cwd`、工具 `tools`、命令 `commands`、MCP 客户端 `mcpClients`、Agent 定义 `agents`、权限回调 `canUseTool`、AppState 访问器、模型配置和读取文件缓存。
+`restored-src/src/QueryEngine.ts` 中的 `ask()` 会创建 `QueryEngine`。从构造参数可以看到，一轮请求同时带着工作目录、工具、命令、MCP 客户端、Agent 定义、权限回调、模型配置和读取文件状态。
 
 也就是说，prompt 只是输入；目录和消息是上下文；工具与 MCP 是能力；`canUseTool` 是行动边界；模型、轮次和预算则限定这轮请求怎样运行。
 
@@ -108,43 +119,13 @@ try {
 }
 ```
 
-**功能：** 这段代码把当前 prompt 交给 `QueryEngine.submitMessage()`，并把它产生的 SDK 消息流原样向 Host 转发。无论生成器正常结束、抛出异常，还是调用方提前停止消费，`finally` 都会把本轮更新后的读文件状态写回外层缓存。
+这段代码只需要记住两件事：`submitMessage()` 产生的是异步消息流；`finally` 会把本轮更新后的 read-file state 交还给 Host。它不是完整会话，也不会把所有读过的文件再次塞进模型上下文。
 
-**关键字段：**
-
-- `prompt`：本轮提交的用户内容。**可选形态**有两种：普通 `string`，或 `ContentBlockParam[]` 结构化内容块数组；数组中的具体块类型由 Anthropic SDK 定义，不是一个可以由这段源码穷举的字符串枚举。
-- `uuid`：本轮 prompt 的可选标识，取自 `promptUuid`。**可选值**是调用方提供的字符串或 `undefined`；提供时沿消息链保留这个标识，不提供时表示调用方没有指定外部 ID。
-- `isMeta`：标记这条输入是否属于元消息。**可选值**是 `true`、`false` 或因参数缺省得到的 `undefined`；`true` 表示元消息，`false` / `undefined` 按普通输入处理。
-- `engine`：本轮请求专属的 `QueryEngine` 实例，内部持有消息、工具上下文和 read-file state。
-- `setReadFileCache(...)`：把引擎最终持有的文件状态交还给 Host；它保存的是文件版本认知，不会自动把缓存内容重新注入模型。
-
-这里的 `finally` 很重要。无论正常完成、异常退出还是调用方提前结束消费，清理阶段都有机会把 `QueryEngine` 内部的 read-file state 交还给外层。
-
-完整过程其实是一次“复制进来，再写回去”：`ask()` 创建 `QueryEngine` 时，先通过 `cloneFileStateCache(getReadFileCache())` 复制外层缓存；本轮的 Read、Edit 和 Write 工具持续更新这份副本；请求结束后，`setReadFileCache()` 再把更新结果交还给 Host。下一次调用 `ask()` 时，新引擎就能从这份状态继续工作。
-
-这个缓存按文件路径保存 `content`、`timestamp`、`offset`、`limit` 和 `isPartialView` 等信息。它记录的不是一句简单的“这个文件读过了”，而是“模型读过这个文件的哪个版本，以及看到的是完整内容还是局部内容”。
-
-这里很容易产生一个误解：既然缓存里保存了 `content`，下一轮请求似乎会把这些文件全部注入模型上下文。实际上并不会。`setReadFileCache()` 只是把 `FileStateCache` 交还给 Host，并没有遍历缓存、拼接 prompt，也没有创建新的消息。
-
-模型第一次执行 Read 时，文件内容会作为工具结果进入消息历史，下一轮模型调用因此能看到这段内容。这是 `Read → tool_result → messages` 这条链路的作用。与它并行的 `readFileState` 是一份进程内状态，服务于读后才能改、文件版本校验和重复读取去重。缓存里虽然也有 `content`，但保存它不等于再次把它发送给模型。
-
-缓存也不是无限增长的。`restored-src/src/utils/fileStateCache.ts` 给出了两个默认上限：最多 `100` 个文件路径，所有文本内容合计最多 `25 MB`。底层使用 LRU，因此任意一个限制先达到，最近最少使用的记录就会被淘汰。多个小文件最多保留 100 个；如果单个文件较大，可能在数量达到 100 之前就先触发 25 MB 限制。同一路径重复读取仍然只占一个条目，图片不会进入这份缓存。
-
-这两个数字限制的是 Claude Code 进程里的缓存占用，不是模型上下文窗口。上下文长度由另一套机制控制：Read 支持通过 `offset` 和 `limit` 分段读取，并受单次读取的字节数和 token 数限制；同一路径、同一区间再次读取且文件未变化时，`FileReadTool.call()` 只返回一个 `file_unchanged` 占位结果，不再发送一份完整内容；消息历史继续增长到阈值后，还会通过 microcompact 或完整 compaction 清理、替换或总结旧的工具结果。
-
-因此，文件内容第一次被读出来时确实会占用上下文，而且连续读取很多文件仍然可能让上下文变长。Claude Code 并不是让这部分成本消失，而是避免相同内容反复进入上下文，并在历史过长后压缩旧内容。
-
-保留这些信息主要有三个用途。
-
-第一，Edit 和 Write 可以检查 Read-before-Write，避免模型在没有看过文件的情况下直接覆盖。第二，写入前可以比较当前文件的修改时间和上次读取内容；如果用户或其他进程已经改过文件，就拒绝用旧版本覆盖新内容。第三，后续 turn 可以识别已经读过的文件或 memory，避免把未变化的相同内容再次放进上下文。
-
-如果一条记录因为 LRU 被淘汰，Claude Code 并不会失去磁盘上的文件，只是失去“模型看过哪个版本”的证明。之后若要安全修改，通常需要重新读取。
-
-因此，`setReadFileCache(engine.getReadFileState())` 保存的是一份有容量限制的文件版本认知，而不是完整会话，也不是把所有读过的文件永久写入磁盘。会话 transcript 的持久化由另一套逻辑负责；恢复会话时，也可以再从历史消息中重建部分 read-file state。
+Host 怎样启动、不同入口怎样汇入内核，会在 03、04 中展开。`QueryEngine` 怎样保存跨 turn 状态，会在 05 中展开。read-file state 如何支持 Read-before-Write、并发修改保护和回滚，则留到 14。
 
 ## 第二站：submitMessage 装配一次可运行的会话
 
-`QueryEngine.submitMessage()` 的职责不是简单转发 prompt。它在前面准备 system prompt、用户上下文、系统上下文和 `ProcessUserInputContext`，再调用 `query()`：
+`QueryEngine.submitMessage()` 的职责不是简单转发 prompt。它会准备消息、system prompt、用户上下文、系统上下文和工具运行上下文，再调用 `query()`：
 
 ```ts
 for await (const message of query({
@@ -163,28 +144,13 @@ for await (const message of query({
 }
 ```
 
-**功能：** 这段代码完成从会话装配到查询循环的交接。`query()` 返回异步消息流，`submitMessage()` 一边消费它，一边记录并向 Host 产出模型消息、工具消息和内部事件。
+这一步完成两个转换：用户输入被装配成模型可用的上下文，外部能力被收进循环可以直接使用的依赖。`wrappedCanUseTool` 最终面对 `allow`、`ask`、`deny` 三种权限结果；`maxTurns` 和 `taskBudget` 可以是调用方提供的限制，也可以是 `undefined`，后者只表示没有设置这一项限制。
 
-**关键字段：**
-
-- `messages`：进入本轮查询的消息快照，包含此前历史和刚处理完的用户输入。
-- `systemPrompt`：本轮生效的系统提示词；`userContext` 与 `systemContext` 分别补充用户侧环境和系统侧环境。
-- `wrappedCanUseTool`：包装后的权限回调，在执行原权限判断之外，还会记录拒绝信息供 SDK 返回。它最终返回的 `PermissionDecision.behavior` 有 `allow`、`ask`、`deny` 三种：允许执行、需要询问、拒绝执行。
-- `processUserInputContext`：供工具和输入处理共享的运行上下文，包含工具、MCP、AppState、取消控制器和 read-file state 等能力。
-- `fallbackModel`：主模型不可用或满足降级条件时可选的后备模型。**可选值**是模型名字符串或 `undefined`；模型名来自运行时配置，静态源码不能穷举，`undefined` 表示没有为这次查询显式提供后备模型。
-- `querySource: 'sdk'`：标记查询来源。这个调用点没有多种取值，固定传入 `'sdk'`；`queryLoop()` 虽然还能服务 REPL、Agent 等其他来源，但它们由各自入口传值。
-- `maxTurns`：**可选值**是数字或 `undefined`。数字表示调用方设置的最大循环轮次；`undefined` 表示不启用这项调用方限制，不代表预算、上下文或取消等其他停止条件失效。
-- `taskBudget`：**可选值**是 `{ total: number }` 或 `undefined`。前者给出整个任务的预算总量，后者表示不向本轮查询传递 task budget；`total` 是开放数值，不存在固定候选列表。
-
-这一步完成了两个转换。
-
-第一个转换是从“用户输入”到“模型可用上下文”。system prompt、历史消息、项目环境和本轮输入在这里汇合。第二个转换是从“外部能力”到“循环依赖”。工具列表、权限函数、取消信号和状态访问器被收进 `toolUseContext`，后面的循环不需要再回到 Host 临时寻找这些对象。
-
-源码能够确认这些字段怎样传入 `query()`；至于某次真实运行最终拼出了怎样的完整 prompt，还会受到配置、项目内容、压缩和功能开关影响，需要运行时抓取才能回答。
+05 会专门解释 `submitMessage()`、SDK 事件转换和跨 turn 状态；system prompt 与项目上下文的具体组装留到 16。02 只确认它们在这里完成交接。
 
 ## 第三站：queryLoop 用显式状态推进每一轮
 
-`query()` 最终进入 `restored-src/src/query.ts` 的 `queryLoop()`。这里最值得先记住的不是某个分支，而是外层结构：跨轮数据放进 `state`，然后由一个显式循环不断推进。
+`query()` 最终进入 `restored-src/src/query.ts` 的 `queryLoop()`。这里最值得先记住的不是某个恢复分支，而是外层结构：跨轮数据放进 `state`，然后由显式循环不断推进。
 
 ```ts
 let state: State = {
@@ -201,23 +167,11 @@ while (true) {
 }
 ```
 
-**功能：** 这段代码建立 `queryLoop()` 的跨轮状态，并用 `while (true)` 反复推进“准备上下文、调用模型、执行工具、决定继续或结束”这条主线。每一轮结束时都会生成新的 `State`，而不是依靠一组分散的局部变量维持会话。
-
-**关键字段：**
-
-- `messages`：当前轮要交给模型的消息历史；工具结果也会在后续被追加到这里。
-- `toolUseContext`：工具执行所需的能力与状态集合，包括工具列表、权限、取消信号和 AppState 访问器。
-- `turnCount`：当前查询循环的轮次计数，初始值为 `1`，用于实施最大轮次等停止边界。
-- `transition`：记录“上一轮为什么执行了 `continue`”，而不是命令状态机下一步做什么。第一次进入循环时还没有上一轮，因此它是 `undefined`。源码中的 `reason` 有七种：`next_turn` 表示工具结果触发正常下一轮；`collapse_drain_retry` 表示清理折叠上下文后重试；`reactive_compact_retry` 表示响应式压缩后重试；`max_output_tokens_escalate` 表示提高输出 token 上限后重试；`max_output_tokens_recovery` 表示插入续写提示后恢复，并额外携带 `attempt`；`stop_hook_blocking` 表示 Stop Hook 返回阻塞错误后重试；`token_budget_continuation` 表示预算策略要求模型继续。`collapse_drain_retry` 还会携带本次提交的折叠数量 `committed`。
-- `state`：跨轮状态容器。循环开头从中取值，轮末再整体替换，从而把一次用户请求扩展成多次模型与工具交互。
-
-这里要把“原因标签”和“控制动作”分开。真正让循环进入下一轮的是某个分支先构造新的 `State`，执行 `state = next`，然后调用 `continue`；`transition.reason` 只是随新状态一起保存这次继续的原因。它主要方便测试和排查恢复路径，不需要通过检查消息内容来猜测上一轮发生了什么。
-
-不过，它也不完全是只写不读的调试字段。处理上下文溢出时，如果上一轮已经记录为 `collapse_drain_retry`，下一轮再次遇到相同的 413 错误就不会重复 drain context collapse，而会继续尝试 reactive compact 等后续恢复路径。这个判断避免系统在“清理折叠上下文 → 重试 → 再次 413 → 再清理”的路径里原地循环。因此，更准确地说，`transition` 是一份跨轮的“上次继续原因”，少数恢复分支会用它做去重和防循环保护。
-
-这就是前面说的“专用状态机”。`messages` 决定模型当前能看到什么，`toolUseContext` 保存可调用能力和运行状态，`turnCount` 支持轮次边界，其他字段负责压缩与恢复。
+`messages` 决定模型当前能看到什么，`toolUseContext` 保存可调用能力，`turnCount` 支持轮次边界，`transition` 记录上一轮为何继续。工具执行结束后，循环会构造一份新状态，再进入下一轮。
 
 一次简单问答可能只跑一轮；一次改代码任务则可能在多轮之间读文件、编辑、测试，再根据结果调整方案。循环结构能证明系统允许继续，不能预测模型实际上会继续多少次。
+
+06 会沿一次完整迭代解释继续与停止条件；17 解释上下文过长后的压缩；19 再集中处理模型错误、重试、取消和恢复。这里不提前枚举所有 `transition.reason`。
 
 ## 第四站：模型响应是一条流，不是一次性字符串
 
@@ -241,100 +195,17 @@ for await (const message of deps.callModel({
 }
 ```
 
-**功能：** 这段代码组装一轮模型调用，并以异步流的方式消费返回事件。消息、系统提示词、thinking 配置、工具定义和取消信号在这里跨过 Query Core 与模型层的边界；循环体再把流式增量整理成可继续处理的 assistant message。
-
-**关键字段：**
-
-- `messages`：真正发送给模型的消息；`prependUserContext()` 会先把本轮用户环境补到 `messagesForQuery` 前面。
-- `systemPrompt`：已经组装完成的系统提示词，决定模型在本轮遵循的全局约束。
-- `thinkingConfig`：控制本轮 thinking 模式，来自 `toolUseContext.options`。`ThinkingConfig` 有三种值：`{ type: 'adaptive' }` 让服务端自适应分配 thinking；`{ type: 'enabled', budgetTokens: number }` 显式开启并给出 token 预算；`{ type: 'disabled' }` 关闭 thinking。`submitMessage()` 未收到显式配置时，会根据默认策略选择 `adaptive` 或 `disabled`。
-- `tools`：暴露给模型的工具定义；模型据此生成结构化 `tool_use`，这里并不直接执行工具。
-- `signal`：来自 `AbortController` 的取消信号。它的关键状态是 `aborted: false` 或 `true`：前者允许请求继续，后者通知模型调用停止；`reason` 可以携带开放的运行时原因，源码没有固定枚举可穷举。
-- `model`：当前实际选择的主模型，是开放的模型名字符串；`fallbackModel` 则是模型名字符串或 `undefined`。具体名字受配置和运行环境影响，不能只靠静态源码列全。
-- `querySource`：记录查询来源。沿本文的 `submitMessage()` 路径它固定为 `'sdk'`；其他 Host 或 Agent 入口会传入自己的来源值，因此这里不把 `'sdk'` 误写成整个系统唯一选项。
-
-这里有三个直接结论。
-
-第一，用户上下文会在发请求前加到消息上。第二，工具定义和模型配置与消息一起进入调用。第三，`AbortSignal` 也穿过了这条边界，所以取消不是 UI 自己隐藏输出，而是能够影响正在进行的模型调用。
+这里先保留三个结论：用户上下文会在请求前加入消息；工具定义和模型配置与消息一起进入调用；`AbortSignal` 会传到底层，因此取消能够影响正在进行的模型请求。
 
 流里既可能出现文本增量，也可能形成包含 `tool_use` 的 assistant message。`queryLoop()` 会从 assistant message 的 `content` 中筛出 `type === 'tool_use'` 的块，收进 `toolUseBlocks`，并把 `needsFollowUp` 设为 `true`。
 
-因此，是否进入工具链，不是 Host 根据文本猜出来的，而是由模型响应中的结构化 `tool_use` 块决定。
+因此，是否进入工具链，不是 Host 根据文本猜出来的，而是由模型响应中的结构化 `tool_use` 块决定。07 会解释这些消息和内容块怎样关联，08 会继续拆流式事件怎样组装成完整 assistant message，以及重试、回退和取消怎样穿过 API 层。
 
 ## 第五站：tool_use 先被编排，再经过权限
 
-模型可以一次返回多个工具调用。`queryLoop()` 会优先消费 `streamingToolExecutor.getRemainingResults()`；没有流式执行器时，则把收集到的工具块交给 `runTools(toolUseBlocks, assistantMessages, canUseTool, toolUseContext)`。
+模型可以一次返回多个工具调用。`queryLoop()` 会把它们交给流式执行器或 `runTools()`；调度层依据每次调用的并发安全性决定串行还是并行，而不是无条件 `Promise.all`。
 
-`runTools()` 位于 `restored-src/src/services/tools/toolOrchestration.ts`。它不会无条件并行所有调用，而是先按 `isConcurrencySafe` 分组。连续的并发安全调用可以批量运行，非只读调用则串行执行。
-
-```ts
-for (const { isConcurrencySafe, blocks } of partitionToolCalls(
-  toolUseMessages,
-  currentContext,
-)) {
-  if (isConcurrencySafe) {
-    for await (const update of runToolsConcurrently(
-      blocks,
-      assistantMessages,
-      canUseTool,
-      currentContext,
-    )) {
-      // 省略延迟应用的 context modifier
-      yield {
-        message: update.message,
-        newContext: currentContext,
-      }
-    }
-  } else {
-    for await (const update of runToolsSerially(
-      blocks,
-      assistantMessages,
-      canUseTool,
-      currentContext,
-    )) {
-      // 省略 currentContext 更新
-      yield {
-        message: update.message,
-        newContext: currentContext,
-      }
-    }
-  }
-}
-```
-
-**功能：** 这段代码先把多个 `tool_use` 按并发安全性分组，再选择并发或串行执行器。两条分支都把执行过程中产生的消息持续 `yield` 给上层，同时携带本轮最新的工具上下文。
-
-**关键字段：**
-
-- `toolUseMessages`：这一批等待执行的工具调用消息，是分组算法的输入。
-- `isConcurrencySafe`：当前分组是否允许并发执行，只有 `true` 和 `false` 两种值。`true` 进入 `runToolsConcurrently()`，`false` 进入 `runToolsSerially()`；这个布尔值来自具体工具的并发安全判断，而不是简单按工具名称推断。
-- `blocks`：同一分组内的 `tool_use` 内容块，交给并发或串行执行器处理。
-- `assistantMessages`：发起这些工具调用的 assistant 消息，用于保留调用与结果之间的关联。
-- `canUseTool`：工具真正产生副作用前必须经过的权限回调。
-- `currentContext`：当前工具执行上下文；串行调用或 context modifier 可以让它随执行结果更新。
-- `update.message`：执行器产生的进度、结果或错误消息；`newContext` 则把对应时刻的上下文一起交回 `queryLoop()`。
-
-这里反映的是副作用边界。多个读操作通常可以同时推进，但写文件、执行命令或修改状态如果任意并发，结果会更难预测。源码中的判断最终由具体工具的 schema 和 `isConcurrencySafe()` 实现决定，所以“读操作一定并行”也不是可靠结论。
-
-这里的“流式执行”解决的是等待时间问题。普通路径要等模型响应流结束，收齐这一轮所有 `tool_use`，才统一调用 `runTools()`。流式执行器则在模型流仍然继续时，看到一条完整 assistant message 中的 `tool_use` 块，就立刻调用 `addTool()` 入队。模型可以继续生成后面的内容，前面已经完整到达的工具则同时等待权限或开始执行，两段时间因此可以重叠。
-
-需要注意，它不是“收到半截工具参数就开始执行”。`StreamingToolExecutor.addTool()` 接收的是完整的 `ToolUseBlock`，其中已经有 `id`、`name` 和 `input`。它先按名称查找工具，再用 `inputSchema.safeParse()` 尝试解析输入，以便计算 `isConcurrencySafe`。找不到工具时，它直接生成一条带 `is_error: true` 的 `tool_result`；输入暂时无法通过 schema 时，并不会猜测或修补参数，而是把该调用按不支持并发处理，后面的正式执行路径仍会完成输入校验并返回错误。
-
-并发安全不是 `queryLoop()` 按工具名称写死的。输入通过 schema 后，执行器会把解析后的参数交给该工具自己的 `isConcurrencySafe(input)`；工具不存在、输入校验失败或判断过程抛错时，都保守地得到 `false`。不同工具可以采用不同策略：`Read`、`Grep`、`WebSearch` 固定返回 `true`；`Bash` 则继续调用 `isReadOnly(input)` 分析具体命令，因此同一个工具也可能因参数不同得到不同结果；动态 MCP 工具读取服务端的 `readOnlyHint`，未声明时按 `false` 处理。普通路径会把连续的 `true` 调用合并并发执行，把 `false` 调用拆成单独的串行批次。
-
-每个入队调用会经历 `queued`、`executing`、`completed`、`yielded` 四种状态。`processQueue()` 只有在当前没有工具执行，或者新工具与所有执行中工具的 `isConcurrencySafe` 都为 `true` 时，才会启动它。遇到不支持并发的工具时，队列会保留顺序，等前面的调用完成再继续。因此，流式执行器缩短的是空等时间，并没有取消原来的串并行边界。
-
-执行本身仍然通过 `runToolUse()` 进入同一套工具生命周期，继续使用 `canUseTool`、`ToolUseContext` 和子 `AbortController`。也就是说，提前启动不等于绕过 schema、hook 或权限。进度消息会先放进 `pendingProgress`，`queryLoop()` 在消费模型流的间隙调用 `getCompletedResults()`，可以立即把进度和已经完成的结果向 Host 产出。
-
-等模型流结束后，`getRemainingResults()` 负责收尾。它会反复启动当前允许执行的队列项，产出已经完成的结果；如果只剩执行中的工具，就用 `Promise.race()` 等待任意工具结束或出现新进度，直到所有调用都进入 `yielded`。所以这里的“remaining”不是把同一批工具再执行一次，而是等待并排空前面已经启动的队列。
-
-错误和取消也有额外保护。用户中断时，执行器会为尚未正常返回的 `tool_use` 生成合成错误结果，避免消息历史里出现只有调用、没有对应 `tool_result` 的悬空结构。Bash 工具产生错误时会取消同批仍在运行的 sibling tools，因为连续命令常有隐式依赖；其他工具失败则不会默认取消整批。模型发生 streaming fallback 时，旧执行器会被 `discard()`，随后创建新实例，防止旧模型响应中的 `tool_use_id` 与新响应的结果串线。
-
-是否创建流式执行器由 `config.gates.streamingToolExecution` 决定：`true` 使用 `StreamingToolExecutor`，`false` 回到 `runTools()`。静态源码可以确认两条路径及其行为，但不能证明某次生产请求一定启用了这个 gate，也不能据此推断真实延迟收益。
-
-为什么不只保留流式执行器？因为它目前仍是一条提速路径，而不是与普通执行完全等价的替代品。它会在模型响应结束前启动工具；一旦发生 streaming fallback，`discard()` 可以丢弃旧结果，却未必能撤销已经产生的外部副作用。源码还注明，并发工具暂不支持 `contextModifier`。相比之下，`runTools()` 不依赖模型流，可以作为更稳定的通用执行路径；保留 feature gate，也方便在出现时序或兼容问题时退回普通执行。
-
-单个工具进入 `restored-src/src/services/tools/toolExecution.ts` 后，还要先找到工具、校验 schema 与工具自己的输入约束，然后解析 hook 和权限决策。关键顺序如下：
+单个调用随后进入 `restored-src/src/services/tools/toolExecution.ts`，依次完成工具查找、输入校验、Hook 与权限判断。最重要的副作用边界是：只有允许分支才会进入 `tool.call()`。
 
 ```ts
 const resolved = await resolveHookPermissionDecision(
@@ -368,67 +239,15 @@ const result = await tool.call(
 )
 ```
 
-**功能：** 这段代码把 hook 决策、权限规则和用户确认收敛成最终的 `permissionDecision`，并允许权限阶段修改工具输入。只有得到允许后，流程才会进入 `tool.call()`；工具执行期间产生的进度会通过回调继续上报。
+`hookPermissionResult` 可以是 `allow`、`ask`、`deny`、`passthrough` 或 `undefined`；常规权限决策最终收敛为 `allow`、`ask`、`deny`。拒绝、取消和校验失败同样会形成可处理的结果，不会被伪装成执行成功。
 
-**关键字段：**
-
-- `hookPermissionResult`：类型是 `PermissionResult | undefined`。`behavior` 有四种：`allow` 允许继续，`ask` 要求进入询问流程，`deny` 直接拒绝，`passthrough` 表示 hook 不作最终决定、交给常规权限流程；`undefined` 表示 hook 没有返回权限结果。`allow` / `ask` 还可能通过 `updatedInput` 携带修改后的输入。
-- `tool`：当前准备执行的工具实现，提供输入约束、权限特征和最终的 `call()`。
-- `processedInput`：经过 schema、工具校验及 hook 处理后的输入；权限解析返回的新输入会覆盖旧值。
-- `toolUseContext`：执行所需的 cwd、消息、AppState、取消状态和其他共享能力。
-- `canUseTool`：在规则要求确认时作出最终权限决定的回调。返回值是 `PermissionDecision`，其 `behavior` 有 `allow`、`ask`、`deny` 三种；与 `hookPermissionResult` 不同，这个类型不包含 `passthrough`。
-- `assistantMessage` 与 `toolUseID`：把执行动作关联回模型发出的那条 assistant 消息和具体 `tool_use` 块。
-- `callInput`：真正传给工具的已确认输入；它与权限解析后的 `processedInput` 对应。
-- `userModified`：记录允许执行时用户是否修改过输入。来源字段可以是 `true`、`false` 或 `undefined`，但传给 `tool.call()` 时通过 `?? false` 收敛成布尔值：只有明确为 `true` 才表示用户改过参数，其余情况都按 `false` 处理。
-- `progress`：工具执行中的增量进度，通过 `onToolProgress()` 变成上层可以消费的事件。
-
-也就是说，`tool_use` 是模型提出的行动请求，不是已经发生的副作用。真正的 `tool.call()` 位于权限决策之后。拒绝、取消和校验失败也会形成可处理的结果，而不是假装工具成功执行。
+09 会先解释工具契约与注册，10 专讲多个 `tool_use` 的串并行编排，11 追踪单次执行生命周期，12 再拆权限规则与询问流程。Hook 作为横切机制会在 18 单独展开。
 
 ## 第六站：tool_result 作为 user message 回到模型
 
 工具返回值不能直接当作最终回答。它要先被包装成模型能识别的 `tool_result`，再进入消息历史。
 
-在 `toolExecution.ts` 的 `addToolResult()` 中，工具返回值先被映射成 API 使用的结果块，再被放进一条 user message：
-
-```ts
-const toolResultBlock = preMappedBlock
-  ? await processPreMappedToolResultBlock(
-      preMappedBlock,
-      tool.name,
-      tool.maxResultSizeChars,
-    )
-  : await processToolResultBlock(tool, toolUseResult, toolUseID)
-
-const contentBlocks: ContentBlockParam[] = [toolResultBlock]
-
-resultingMessages.push({
-  message: createUserMessage({
-    content: contentBlocks,
-    imagePasteIds: allowImageIds,
-    toolUseResult:
-      toolUseContext.agentId && !toolUseContext.preserveToolUseResults
-        ? undefined
-        : toolUseResult,
-    mcpMeta: toolUseContext.agentId ? undefined : mcpMeta,
-    sourceToolAssistantUUID: assistantMessage.uuid,
-  }),
-})
-```
-
-**功能：** 这段代码把工具实现返回的内部值映射成 API 可识别的 `tool_result` 内容块，再包装成一条 user message 放入 `resultingMessages`。这一步完成了从执行层返回值到下一轮模型输入的格式转换。
-
-**关键字段：**
-
-- `preMappedBlock`：**可选值**是一个已经映射好的 `ToolResultBlockParam` 或 `undefined`。存在时只做尺寸处理；缺省时从 `toolUseResult` 和 `toolUseID` 重新映射。
-- `toolResultBlock`：最终写入消息 `content` 的 `tool_result` 块，受工具名和 `maxResultSizeChars` 限制。
-- `toolUseResult`：工具实现返回的原始结果，类型是开放的 `unknown`。写入内部消息时有两种结果：若当前是子 Agent 且 `preserveToolUseResults` 为 `false` / `undefined`，字段被设为 `undefined`；其他情况保留原始值。
-- `toolUseID`：关联这份结果与原始 `tool_use` 的标识，模型据此知道结果对应哪次调用。
-- `contentBlocks`：本条 user message 的内容块数组；片段中首先放入工具结果，完整路径还可能追加确认反馈或图片。
-- `imagePasteIds`：**可选值**是 `number[]` 或 `undefined`。有图片内容块时生成连续编号；没有图片时不写这个字段。
-- `mcpMeta`：**可选值**是 MCP 元数据对象或 `undefined`。顶层调用可以保留；`toolUseContext.agentId` 存在时说明处于子 Agent 上下文，此时不继续透传。
-- `sourceToolAssistantUUID`：指向发起工具调用的 assistant message，使内部消息链保持可追踪。
-
-它之所以是 user 方向，而不是 assistant 方向，是因为 assistant 已经发出了 `tool_use`，工具结果是外部环境对这次调用的回应。下一次模型推理需要同时看到自己的调用和环境返回的结果，才能判断任务是否完成。
+在 `toolExecution.ts` 中，工具内部返回值会被映射成带同一 `tool_use_id` 的 `tool_result`，再包装进 user message。它之所以属于 user 方向，是因为 assistant 已经提出行动，工具结果代表外部环境对这次行动的回应。
 
 `queryLoop()` 在一轮末尾把原消息、assistant 消息和工具结果接到一起，然后继续外层循环：
 
@@ -443,26 +262,19 @@ const next: State = {
 state = next
 ```
 
-**功能：** 这段代码构造工具执行后的下一轮 `State`：保留本轮查询消息，依次追加 assistant 响应和工具结果，再更新工具上下文与轮次。把 `state` 替换为 `next` 后，外层循环便会用这组新输入再次调用模型。
-
-**关键字段：**
-
-- `messagesForQuery`：本轮实际送入模型的基础消息数组，可能已经经过上下文整理或压缩；允许为空数组，但是否能形成有效 API 请求还取决于 system prompt 和上游装配。
-- `assistantMessages`：本轮模型产生的 assistant 消息数组。没有模型消息时可以为空；需要继续工具链时，其中至少包含带 `tool_use` 的消息。
-- `toolResults`：工具执行后形成的 user message / attachment 数组。没有工具结果时可以为空；进入正常工具回环时，其中包含与调用对应的 `tool_result`。
-- `toolUseContextWithQueryTracking`：带有本轮查询追踪信息的工具上下文，供下一轮继续共享能力和状态。
-- `nextTurnCount`：下一轮的正整数计数，由 `turnCount + 1` 得到。它不是枚举；达到调用方提供的 `maxTurns` 后，循环会返回 `max_turns`，否则继续增长。
-- `next`：完整的下一轮状态快照；赋给 `state` 后闭合“模型 → 工具 → 结果 → 模型”的循环。
-
 到这里，图中的回环就闭合了：`tool_result` 不是旁路日志，而是下一次推理的输入。模型可以据此输出最终答案，也可以再次请求工具。
+
+07 会完整解释 `tool_use`、`tool_result` 与内部消息如何配对，11 会解释结果映射和持久化，06 则会从循环视角说明这批消息怎样形成下一轮状态。
 
 ## 第七站：没有后续动作，循环才真正完成
 
 当流中没有新的 `tool_use` 时，`needsFollowUp` 保持为 `false`。循环随后处理 API 错误恢复、stop hook 等分支；没有分支要求继续时，才返回 `completed`。
 
-不过，`completed` 只是停止原因之一。源码还明确处理了最大轮次、模型错误、流式取消、工具取消、预算限制、上下文上限和 hook 阻止继续等边界。
+不过，`completed` 只是停止原因之一。源码还明确处理了最大轮次、模型错误、流式取消、工具取消、预算限制、上下文上限和 Hook 阻止继续等边界。
 
 因此，外部看到“没有最终文本”时，不能只检查工具有没有报错。请求可能在模型流、权限、预算、取消或 stop hook 任一层结束。反过来，源码中存在某个恢复分支，也不代表生产环境一定启用了对应功能，或它在所有错误上都会成功。
+
+这些终止条件会分散到后文解释：05 说明无头调用怎样形成最终 result，06 说明循环何时继续或结束，17 处理上下文上限，18 解释 Stop Hook，19 汇总错误、重试、取消与恢复。
 
 ## 哪些是事实，哪些只是架构解读
 
