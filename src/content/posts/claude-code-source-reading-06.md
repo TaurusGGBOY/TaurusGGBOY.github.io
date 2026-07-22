@@ -11,7 +11,7 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇最后的问题是：如果我在 Claude Code CLI 中输入了 `/new`，有什么是新的，有什么是旧的？
+上一篇最后的问题是：在 Claude Code CLI 中执行 `/new` 时，它究竟重置了哪些会话状态，又保留了哪些运行现场？
 
 答案先说：**`/new` 新建的是当前 CLI 进程里的活动会话边界，不是重新启动一个 Claude Code 进程，也不是把整个项目环境恢复出厂。**
 
@@ -28,14 +28,14 @@ const clear = {
 } satisfies Command
 ```
 
-因此，输入 `/new` 后真正执行的是 `clearConversation()`。新的部分主要有四类：
+因此，输入 `/new` 后真正执行的是 `clearConversation()`。先看会被重置的部分，主要有四类：
 
 1. 当前消息数组清空，下一次模型请求不再携带旧对话。
 2. `conversationId` 与 `sessionId` 重新生成，session file 指针和待写入项清空，后续 transcript 写进新会话。
 3. read-file state、文件历史快照、会话 metadata、plan slug、已发现 Skill、nested memory 路径以及多种 session cache 被清理。
 4. MCP 的 clients、tools、commands 和 resources 回到空状态等待重新初始化；旧会话先执行 `SessionEnd('clear')`，新会话再执行 `SessionStart('clear')`，Hook 返回的消息可能成为新消息列表的起点。
 
-但旧的部分同样不少。
+再看被保留下来的运行现场。
 
 CLI 进程没有退出，项目文件也没有被删除。`clearConversation()` 只更新 AppState 中明确列出的字段，其余进程配置、认证与权限基础设施仍由同一个宿主持有。当前工作目录会回到本次启动时的 `originalCwd`；Coordinator/normal mode 与 worktree 状态会在清理后重新写入，而不是自动切回默认模式。
 

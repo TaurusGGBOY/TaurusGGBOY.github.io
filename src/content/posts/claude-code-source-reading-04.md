@@ -9,7 +9,6 @@ image: "/images/posts/claude-code-source-reading-04/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-
 ## 回答上一篇的问题
 
 上一篇最后留下的问题来自一个很具体的命令：`claude -p`。当它无法像普通 REPL 一样停下来与用户交互时，工具权限由谁决定；而对 Claude Code 来说，带 `-p` 与不带 `-p`，究竟只是输出形式不同，还是运行模式已经变了？
@@ -37,6 +36,27 @@ imagePosition: "left"
 这点很容易读错。`QueryEngine.ts` 的注释明确说，2.1.88 里的 `QueryEngine` 用于 headless/SDK，REPL 接入仍属于 “a future phase”。所以“一套内核”应该理解成**分层复用**：宿主层可以分叉，会话包装也可能不同，但进入 Agent 查询循环以后，模型、工具和消息语义重新汇合。
 
 本篇继续只讨论 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码。下面的片段省略了与当前机制无关的参数和分支，函数名、关键取值与调用关系保持不变。
+
+## 这些入口对应 Claude 的什么功能
+
+如果只看源码名称，很容易把 CLI、SDK、Bridge 和 direct-connect 想成六个并列产品。实际上，用户能看到的是终端、自动化 SDK、Remote Control 等产品功能；Bridge 和 direct-connect 更多是藏在产品背后的运行机制。
+
+先把它们放回真实使用场景：
+
+| 本文名称 | 用户在哪里遇到 | 解决什么问题 | 在 2.1.88 源码中的位置 |
+|---|---|---|---|
+| 交互式 CLI / REPL | 在项目目录运行 `claude` | 在终端里连续对话、查看工具调用、确认权限和修改代码 | 当前进程挂载 React/Ink REPL，并在本地进入 Agent 循环 |
+| print / headless | 运行 `claude -p "..."`，或把输入输出接进 Shell、脚本和 CI | 执行一次或连续的非交互任务，以文本或 JSON 交付结果 | 当前进程使用 `StructuredIO` 与 `QueryEngine`，不创建终端 UI |
+| Agent SDK | Python、TypeScript 应用，或者自行编写的 Agent 宿主 | 把 Claude Code 的查询循环、工具和权限控制嵌入自己的程序 | 宿主通过结构化消息控制 Claude Code 子进程；CLI 的 `-p` 也是这条无头能力最直接的入口 |
+| MCP server | 运行 `claude mcp serve`，再由 Claude Desktop 或其他 MCP client 连接 | 把 Claude Code 已有的文件、搜索、编辑等工具暴露给另一个 AI 宿主调用 | 只处理 MCP `ListTools` / `CallTool`，直接进入 `tool.call()`，不会替调用方运行完整 Agent 循环 |
+| Bridge | Claude Code 的 Remote Control：从 claude.ai/code、手机或另一浏览器继续控制本机任务 | 让远端界面使用仍运行在本机的项目、工具和 Agent | 本机注册 environment、领取远端 session，再为它拉起 headless worker；“Bridge”是实现名，不是用户选择的产品名 |
+| direct-connect | 由 `cc://` 或 `cc+unix://` 地址打开的内部 server session | 让本地 REPL 直接连接某个 Claude Code session server，而不经过 Remote Control 的 environment 注册与工作轮询 | 客户端先向 server 创建 session，再连接返回的 WebSocket；本地负责 UI 和权限交互，Agent 在 server 会话中运行 |
+
+其中前三种最容易对应到日常经验：`claude` 是终端产品，`claude -p` 是它的[脚本化用法](https://code.claude.com/docs/en/headless)，Agent SDK 则把同一套能力交给 Python 或 TypeScript 程序。MCP server 的方向相反：它不是让 Claude Code 去连接 Notion、GitHub 等 MCP server，而是让 Claude Code 自己成为一个 MCP server，把内置工具提供给别的宿主。官方文档把后一种用法写成 [`claude mcp serve`](https://code.claude.com/docs/en/mcp#use-claude-code-as-an-mcp-server)。
+
+Bridge 对应的产品功能是 [Remote Control](https://code.claude.com/docs/en/remote-control)。用户看到的是浏览器或手机里的同一个本地会话；源码看到的则是 environment 注册、work 轮询、worker 子进程和结构化消息传输。这里讨论 Bridge，是为了说明 Remote Control 如何复用 headless Claude Code，不是在介绍一个名为 “Claude Bridge” 的独立产品。
+
+direct-connect 的边界还要更谨慎。2.1.88 客户端源码明确识别 `cc://` 与 `cc+unix://`，内部 `open <cc-url>` 命令也把自己描述为连接 Claude Code server；但 Anthropic 的公开产品文档没有把 “Direct Connect” 列成一个可单独使用的功能。结合 [Claude Desktop 可以运行本地 Code session](https://code.claude.com/docs/en/desktop#local-sessions)、[Dispatch 可以创建 Code session](https://claude.com/docs/cowork/guide/dispatch#how-dispatch-routes-work) 这些公开行为，更稳妥的理解是：它是一条供 Desktop、Dispatch 或其他内部宿主接入 server session 的底层通道。静态源码不能继续证明它只服务其中某一个产品，因此后文把它称为 **direct-connect client**，而不把它包装成普通用户应该掌握的第六个产品入口。
 
 ## 先把运行模式拆成两个问题
 
@@ -379,14 +399,6 @@ return {
 最里面是 `query()` / `queryLoop()`，负责模型流、工具编排、继续推理和停止。中间是消息、Tool、权限与会话契约，它们既能服务完整 Agent，也能被 MCP server 单独复用。最外面才是 REPL、stdio、SDK、Bridge 和 WebSocket，它们决定输入输出与生命周期。
 
 共享越靠里，行为越一致；分叉越靠外，宿主差异越明显。比如 REPL 和 SDK 都会产生权限决定，但一个通过本地 UI 回答，另一个通过 `control_request` / `control_response` 回答。MCP server 也执行同一个 Tool，却不会在结果返回后再次请求模型。
-
-## 静态源码还能证明到哪里
-
-本篇可以从源码直接确认入口条件、参数候选值、调用方向、消息类型和传输分支，也可以根据调用图确认 REPL 与 QueryEngine 最终都会进入 `query()`，MCP server 则旁路到 `tool.call()`。
-
-“Claude Code 通过宿主适配层复用执行内核”属于调用关系支撑的架构解释。它不意味着所有模式功能完全对齐，也不意味着每个 feature flag 在生产环境都开启。
-
-至于某种传输在真实网络中的延迟、Bridge 的线上容量、WebSocket 重连成功率、某个 SDK 版本默认传入什么环境变量，单靠 2.1.88 静态源码无法确认。运行时配置、服务端实现和生产数据没有包含在 source map 中。
 
 ## 小结
 
