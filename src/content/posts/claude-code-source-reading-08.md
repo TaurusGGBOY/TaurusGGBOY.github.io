@@ -11,11 +11,44 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：**这些内部消息在请求 Claude API 并接收流式响应时，怎样从网络事件转换而来？**
+上一篇留下的问题是：**如果用户刚发完一条消息，却马上发现有问题并打断（例如按 `Esc` / `Ctrl+C`），这条消息还会出现在后面的对话里吗？**
 
-先给结论：Claude Code 没有等服务端返回一个完整 `assistant` 对象，再一次性交给 Agent 循环。它先把内部历史、系统提示词、工具 Schema 和本轮选项整理成 API 参数，通过当前 provider 的 Anthropic SDK 客户端发起 `stream: true` 请求；随后从 `message_start` 开始，经历一组或多组 `content_block_start → content_block_delta → content_block_stop`，再由 `message_delta` 与 `message_stop` 收尾，逐步维护一份本地状态。
+先给结论：在 **transcript（持久会话日志）**里，这条用户消息通常会先被落盘；在 **当前会话视图**里，REPL 可能会把它回滚成“未发送”，所以你看到的可能是看起来没记住这条消息。
 
-其中，`content_block_delta` 只负责把碎片拼进对应内容块；到 `content_block_stop`，这个块才被包装成 Claude Code 内部的 `AssistantMessage`。而最终的 `usage` 与 `stop_reason` 来得更晚，它们在 `message_delta` 阶段回填。也就是说，上一篇看到的内部消息不是网络事件的原样转发，而是 API 层根据事件顺序组装出来的结果。
+关键点在于两层行为不同。
+
+先是持久化层：`QueryEngine.submitMessage()` 在调用模型前就持久化用户输入。源码里是先 `this.mutableMessages.push(...messagesFromUserInput)`，再在 `persistSession && messagesFromUserInput.length > 0` 分支里执行 `recordTranscript(messages)`。注释明确写了原因：如果进程在 API 返回前被中断，transcript 也能保存用户消息，`--resume` 才不会拿不到会话。
+
+```ts
+this.mutableMessages.push(...messagesFromUserInput)
+
+if (persistSession && messagesFromUserInput.length > 0) {
+  const transcriptPromise = recordTranscript(messages)
+  ...
+}
+```
+
+再看 UI 层：REPL 的 `onCancel()` 用 `abortController?.abort('user-cancel')` 通知本轮取消。随后在结束回收路径中，如果是 `user-cancel` 且当前没有进入新一轮 query、输入框也没有被改写，就会触发 `removeLastFromHistory()` + `restoreMessageSync(lastUserMsg)`，并把输入框恢复为原始内容，这样当前会话会“退回到打断前”的状态。
+
+```ts
+abortController?.abort('user-cancel')
+
+if (abortController.signal.reason === 'user-cancel' && !queryGuard.isActive && inputValueRef.current === '' && getCommandQueueLength() === 0) {
+  const lastUserMsg = msgs.findLast(selectableUserMessagesFilter)
+  removeLastFromHistory()
+  restoreMessageSyncRef.current(lastUserMsg)
+}
+```
+
+因此，你常见到的现象是：**日志里有痕迹，页面里可能被撤回**。后面如果继续发送新问题，这条旧消息通常不会作为可见上下文继续叠加；但它在 transcript 中留下了一个“已提交但未完成”的尝试记录。后续若触发工具阶段，`query.ts` 还会补一条 `createUserInterruptionMessage`（普通打断是 `[Request interrupted by user]`，工具打断是 `[Request interrupted by user for tool use]`）作为中断标记，但这是为了链路完整性，不等于把用户消息重复注入模型。
+
+```ts
+if (toolUseContext.abortController.signal.reason !== 'interrupt') {
+  yield createUserInterruptionMessage({ toolUse: false })
+}
+```
+
+这和本章原问题呼应：流式网络事件先被组装成内部消息，`content_block_stop` 和 `message_delta` 决定何时可交付；打断只是把这条组装链中止在某个阶段，并不改写“用户输入何时入库”的时机逻辑。
 
 本章沿 `restored-src/src/query.ts::queryLoop`、`restored-src/src/services/api/claude.ts::queryModel`、`restored-src/src/services/api/client.ts::getAnthropicClient` 和 `restored-src/src/services/api/withRetry.ts::withRetry` 这条调用链往下看。源码来自 source map 还原出的 2.1.88；还原目录能证明静态控制流，但不能证明生产环境里的延迟、成功率、provider 占比或重试频率。
 
