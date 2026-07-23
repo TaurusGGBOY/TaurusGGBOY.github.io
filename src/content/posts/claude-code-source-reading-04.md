@@ -56,7 +56,7 @@ imagePosition: "left"
 
 Bridge 对应的产品功能是 [Remote Control](https://code.claude.com/docs/en/remote-control)。用户看到的是浏览器或手机里的同一个本地会话；源码看到的则是 environment 注册、work 轮询、worker 子进程和结构化消息传输。这里讨论 Bridge，是为了说明 Remote Control 如何复用 headless Claude Code，不是在介绍一个名为 “Claude Bridge” 的独立产品。
 
-direct-connect 的边界还要更谨慎。2.1.88 客户端源码明确识别 `cc://` 与 `cc+unix://`，内部 `open <cc-url>` 命令也把自己描述为连接 Claude Code server；但 Anthropic 的公开产品文档没有把 “Direct Connect” 列成一个可单独使用的功能。结合 [Claude Desktop 可以运行本地 Code session](https://code.claude.com/docs/en/desktop#local-sessions)、[Dispatch 可以创建 Code session](https://claude.com/docs/cowork/guide/dispatch#how-dispatch-routes-work) 这些公开行为，更稳妥的理解是：它是一条供 Desktop、Dispatch 或其他内部宿主接入 server session 的底层通道。静态源码不能继续证明它只服务其中某一个产品，因此后文把它称为 **direct-connect client**，而不把它包装成普通用户应该掌握的第六个产品入口。
+direct-connect 的边界还要更谨慎。2.1.88 客户端源码明确识别 `cc://` 与 `cc+unix://`，内部 `open <cc-url>` 命令也把自己描述为连接 Claude Code server；但 Anthropic 的公开产品文档没有把 “Direct Connect” 列成一个可单独使用的功能。结合 [Claude Desktop 可以运行本地 Code session](https://code.claude.com/docs/en/desktop#local-sessions)、[Dispatch 可以创建 Code session](https://claude.com/docs/cowork/guide/dispatch#how-dispatch-routes-work) 这些公开行为，更稳妥的理解是：它是一条供 Desktop、Dispatch 或其他内部宿主接入 server session 的底层通道。
 
 ## 先把运行模式拆成两个问题
 
@@ -213,7 +213,7 @@ function getStructuredIO(
 }
 ```
 
-`sdkUrl` 为 `undefined` 时使用 `StructuredIO`，从 NDJSON/stdin 读取消息，并向 stdout 写出 SDK 消息和控制消息。提供 URL 时改用继承自它的 `RemoteIO`，后者根据 URL 和运行时开关选择 WebSocket，或者 SSE + HTTP POST。静态源码能够确认传输选择条件，不能证明某个远程端点一定可达。
+`sdkUrl` 为 `undefined` 时使用 `StructuredIO`，从 NDJSON/stdin 读取消息，并向 stdout 写出 SDK 消息和控制消息。提供 URL 时改用继承自它的 `RemoteIO`，后者根据 URL 和运行时开关选择 WebSocket，或者 SSE + HTTP POST。
 
 真正处理会话的是 `QueryEngine`：
 
@@ -248,11 +248,11 @@ try {
 
 ## 没有本地弹窗以后，权限必须变成协议
 
-交互式 REPL 可以暂停渲染并展示确认框，headless 进程却不能假定有人盯着终端。`runHeadless()` 因此把权限处理也适配成输入输出协议。
+。`runHeadless()` 因此把权限处理也适配成输入输出协议。
 
 当提供 `--sdk-url` 时，源码会把有效的 permission prompt tool 强制设为 `stdio`。工具需要确认时，`StructuredIO` 写出 `control_request`；宿主返回 `control_response` 后，等待中的调用才继续。输入流提前关闭时，仍未完成的请求会被拒绝，错误信息是 `Tool permission stream closed before response received`。
 
-这里也说明了为什么“非交互”不等于“自动允许”。源码支持预先配置 allowed/denied rules，也支持 `--permission-prompt-tool` 或 SDK 控制消息把决定交给外部宿主。具体调用最终是 allow、ask 还是 deny，取决于权限模式、规则、hook、工具和宿主响应，不能仅凭 `--print` 推断。
+这里也说明了为什么“非交互”不等于“自动允许”。源码支持预先配置 allowed/denied rules，也支持 `--permission-prompt-tool` 或 SDK 控制消息把决定交给外部宿主。。
 
 取消也从按键动作变成了消息。REPL 的 Ctrl+C 可以直接操作本地 abort controller；SDK 和远程宿主则发送 `interrupt` 控制请求，再由 headless 进程中止当前 turn。宿主不同，取消语义仍需要落回同一条会话状态链。
 
@@ -342,7 +342,7 @@ const args = [
 
 Bridge 的外层职责因此是注册、轮询、容量、子进程生命周期、token 刷新和重连。某个 session 真正开始工作以后，模型与工具仍在被拉起的 headless Claude Code 中运行。
 
-失败边界也分成两层。Bridge 注册失败、工作区未信任、HTTP 非本机地址或认证缺失，会让 supervisor 无法接单；子进程里的模型错误、工具错误、权限拒绝和取消，则沿 SDK 消息回到远端。静态源码可以确认这些分层，不能推导真实部署的成功率、延迟或默认容量。
+失败边界也分成两层。Bridge 注册失败、工作区未信任、HTTP 非本机地址或认证缺失，会让 supervisor 无法接单；子进程里的模型错误、工具错误、权限拒绝和取消，则沿 SDK 消息回到远端。。
 
 ## direct-connect 把“创建会话”和“连接会话”分开
 
@@ -379,7 +379,7 @@ return {
 
 连接建立后，`DirectConnectSessionManager` 通过 WebSocket 发送 SDK user message、`control_response` 和 `interrupt`，接收 assistant/result/system 以及权限请求。此时本地 REPL 仍然负责展示和人工确认，但 Agent 循环运行在 direct-connect server 管理的会话中。
 
-因此，direct-connect 复用的是 SDK 消息边界，而不是把远端工具假装成本地函数。网络断开时，本地 manager 会通知 `onDisconnected`；发送消息前若 WebSocket 不是 `OPEN`，`sendMessage()` 返回 `false`。源码没有显示这里自动补发用户消息，所以不能把“存在重连能力”进一步推断成“所有中断消息都不会丢失”。
+因此，direct-connect 复用的是 SDK 消息边界，而不是把远端工具假装成本地函数。网络断开时，本地 manager 会通知 `onDisconnected`；发送消息前若 WebSocket 不是 `OPEN`，`sendMessage()` 返回 `false`。。
 
 ## 六种入口到底共享了什么
 

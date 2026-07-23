@@ -297,7 +297,7 @@ if (permissionDecision.behavior !== 'allow') {
 
 函数说明：`checkPermissionsAndCallTool()` 把权限拒绝转换成协议完整的 user message。工具没有执行，但对应的 `tool_use` 仍得到一个 `tool_result`，并通过 `tool_use_id` 保持配对。这样下一次模型调用不会留下孤立工具请求，也能读到拒绝原因。
 
-参数说明：`permissionDecision.behavior` 的源码联合类型是 `'allow'`、`'ask'` 或 `'deny'`；只有严格等于 `'allow'` 才进入实际工具调用，另外两个值都走本分支。`errorMessage` 来自权限决定或 Hook 停止原因，属于运行时字符串；静态源码无法穷举内容。`is_error` 固定为 `true`；`tool_use_id` 必须使用原始 `toolUseID`；`sourceToolAssistantUUID` 指向发出工具调用的 assistant message。权限决定还可能附带图片等 `contentBlocks`，摘录为突出主线而省略。
+参数说明：`permissionDecision.behavior` 的源码联合类型是 `'allow'`、`'ask'` 或 `'deny'`；只有严格等于 `'allow'` 才进入实际工具调用，另外两个值都走本分支。`errorMessage` 来自权限决定或 Hook 停止原因，属于运行时字符串。`is_error` 固定为 `true`；`tool_use_id` 必须使用原始 `toolUseID`；`sourceToolAssistantUUID` 指向发出工具调用的 assistant message。权限决定还可能附带图片等 `contentBlocks`，摘录为突出主线而省略。
 
 所以，权限拒绝通常改变的是模型下一轮看到的事实，而不是把整个 Agent 一刀切断。模型可以解释无法执行，也可以换用不需要该权限的工具。只有 PreToolUse hook 同时产生 `hook_stopped_continuation` attachment 时，主循环才会在工具批次之后返回 `hook_stopped`。
 
@@ -337,7 +337,7 @@ state = {
 
 函数说明：这段是工具路径的迭代边界。只要没有超过 turn 上限，旧消息、本轮 assistant 消息和全部工具结果会按顺序拼成下一次模型请求的历史；随后 `while (true)` 自然回到顶部。超过上限时先发出 `max_turns_reached` attachment，再返回 `max_turns` terminal。
 
-参数说明：`turnCount` 首轮为 `1`，每次完成一批工具结果并准备再次请求模型时加一。`maxTurns` 是可选 `number`；为 `undefined` 时不启用限制。源码使用 `if (maxTurns && ...)`，因此 `0` 也不会在这里启用限制；正常 CLI/SDK 是否接受非正数还取决于上游参数校验，不能仅凭此处推断。比较条件是 `nextTurnCount > maxTurns`，不是大于等于。`transition.reason` 在普通工具回环中固定为 `'next_turn'`。
+参数说明：`turnCount` 首轮为 `1`，每次完成一批工具结果并准备再次请求模型时加一。`maxTurns` 是可选 `number`；为 `undefined` 时不启用限制。源码使用 `if (maxTurns && ...)`，因此 `0` 也不会在这里启用限制；。比较条件是 `nextTurnCount > maxTurns`，不是大于等于。`transition.reason` 在普通工具回环中固定为 `'next_turn'`。
 
 这一步回答了“继续推理”究竟发生在哪里：不是工具主动唤醒模型，也不是 `runTools()` 内部递归调用 API，而是 `queryLoop()` 把 `assistantMessages` 与 `toolResults` 写入 `state.messages`，回到同一个 `while` 顶部，再次调用 `deps.callModel()`。
 
@@ -368,7 +368,7 @@ if (toolUseContext.abortController.signal.aborted) {
 
 参数说明：`signal.aborted` 是布尔值，默认由 `AbortController` 维护；只有变为 `true` 才进入本分支。`streamingToolExecutor` 为实例或 `null`。`yieldMissingToolResultBlocks()` 接收本轮 assistant 消息数组和开放错误字符串；它生成的 `tool_result` 固定 `is_error: true`，并沿用对应 `tool_use.id`。取消原因若是特殊字符串 `'interrupt'`，后续源码会跳过额外的用户中断消息，因为排队的新输入已经提供上下文；其他 reason 则会追加 interruption message。
 
-工具执行期间被取消时，循环已经消费完执行器能给出的更新，随后返回 `aborted_tools`。如果下一 turn 已超过 `maxTurns`，它还会在返回前发出上限 attachment。静态源码能证明这些消息修复与返回顺序，但不能保证已经执行过的文件写入、命令或外部 API 副作用自动回滚；取消信号不是事务回滚机制。
+工具执行期间被取消时，循环已经消费完执行器能给出的更新，随后返回 `aborted_tools`。如果下一 turn 已超过 `maxTurns`，它还会在返回前发出上限 attachment。；取消信号不是事务回滚机制。
 
 ## 模型错误、上下文错误与恢复边界
 
@@ -404,7 +404,7 @@ if (toolUseContext.abortController.signal.aborted) {
 
 feature gate `TOKEN_BUDGET` 控制的是另一套本地续写判断。模型没有调用工具并准备结束时，`checkTokenBudget()` 会比较当前 turn 输出 token 与预算：低于 90% 且没有连续出现收益递减时，它注入 meta nudge 继续；连续至少三次后，若最近两次增量都小于 500 token，则按 diminishing returns 提前停止。`agentId` 存在、预算为 `null` 或小于等于 `0` 时，这套判断直接返回 stop。这里的 90%、3 次和 500 都是 2.1.88 静态常量，不代表其他版本或线上 feature 一定启用。
 
-`taskBudget?: { total: number }` 则随模型请求进入 API 的 `output_config.task_budget`。本地循环在 compact 后维护 `remaining`，避免服务端只看到摘要而低估已消耗上下文。静态客户端源码能确认字段传递与扣减位置，不能确认服务端完整策略。
+`taskBudget?: { total: number }` 则随模型请求进入 API 的 `output_config.task_budget`。本地循环在 compact 后维护 `remaining`，避免服务端只看到摘要而低估已消耗上下文。
 
 上一篇提到的 `maxBudgetUsd` 更外层：它没有作为 `QueryParams` 交给 `queryLoop()`。`QueryEngine.submitMessage()` 消费循环消息时检查累计 `getTotalCost() >= maxBudgetUsd`，达到后返回 `error_max_budget_usd`。因此，美元预算可能在一条消息已经产生后才被宿主截停；它和 `maxTurns` 不是同一个原子边界。
 

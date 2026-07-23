@@ -83,7 +83,7 @@ export class QueryEngine {
 - `maxTurns`、`maxBudgetUsd` 和 `jsonSchema` 为 `undefined` 时，不启用对应的 turn 上限、美元预算检查或结构化输出约束。
 - `verbose`、`replayUserMessages`、`includePartialMessages` 默认都是 `false`。最后一项为真时才向 SDK 暴露底层 `stream_event`。
 - `customSystemPrompt` 会替换默认 system prompt；`appendSystemPrompt` 只是在选中的 prompt 后追加内容。两者都是开放字符串，不存在可穷举候选值。
-- `userSpecifiedModel` 与 `fallbackModel` 是开放模型字符串，具体能否解析取决于运行时配置与模型注册表，静态源码不能列出所有合法名称。
+。
 - `agents` 未传时回退为空数组；`abortController`、`setSDKStatus`、`handleElicitation` 和 `orphanedPermission` 都可以为 `undefined`。
 
 这也解释了为什么不能把 `QueryEngine` 简化成 `ask(prompt)`。prompt 只是这一轮输入；工具、权限、系统提示词、消息历史、预算、取消和输出格式共同定义了一段可运行会话。
@@ -225,7 +225,7 @@ yield {
 
 每个错误 result 都带上 session、耗时、turn、usage、cost、permission denials 和错误详情。这让宿主可以按结构处理失败，而不必从 stderr 文本猜测发生了什么。
 
-`maxTurns` 与 `maxBudgetUsd` 的边界也不同。前者交给更下层的 `query()` 产生附件，后者由 `QueryEngine` 在消费每条消息后检查。静态源码能确认检查位置，不能证明一次线上调用一定会精确在某个 token 或网络请求边界停止。
+`maxTurns` 与 `maxBudgetUsd` 的边界也不同。前者交给更下层的 `query()` 产生附件，后者由 `QueryEngine` 在消费每条消息后检查。
 
 ## 哪些状态会跨 turn 保留
 
@@ -265,11 +265,11 @@ setModel(model: string): void {
 }
 ```
 
-`interrupt()` 没有参数，也没有返回状态，只是触发当前 `AbortController`。这能证明取消信号进入同一条查询链，不能证明已经发生的工具副作用会自动回滚。`setModel()` 接收任意模型字符串并写回配置，下次提交时再解析；源码没有在这个 setter 中提前校验候选模型。
+`interrupt()` 没有参数，也没有返回状态，只是触发当前 `AbortController`。`setModel()` 接收任意模型字符串并写回配置，下次提交时再解析；源码没有在这个 setter 中提前校验候选模型。
 
 `getMessages()` 返回只读视图类型，但底层仍是 engine 自己维护的数组；`getReadFileState()` 暴露文件缓存；`getSessionId()` 返回全局 bootstrap session id，而不是在类内部另行生成一个 conversation id。也就是说，QueryEngine 管理会话状态，却不是所有会话身份和持久化机制的唯一所有者。
 
-还有一个实现边界值得注意：当前 `interrupt()` 只 abort 已有 controller，类中没有在下一次 `submitMessage()` 前自动替换 controller 的代码。调用方在中断后是否复用同一实例，要结合上层 SDK 生命周期处理，不能仅凭这个方法推断“中断后直接提交下一轮一定可用”。
+还有一个实现边界值得注意：当前 `interrupt()` 只 abort 已有 controller，类中没有在下一次 `submitMessage()` 前自动替换 controller 的代码。。
 
 ## ask 是一次性便利包装，不是另一套引擎
 

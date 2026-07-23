@@ -50,7 +50,7 @@ if (toolUseContext.abortController.signal.reason !== 'interrupt') {
 
 这和本章原问题呼应：流式网络事件先被组装成内部消息，`content_block_stop` 和 `message_delta` 决定何时可交付；打断只是把这条组装链中止在某个阶段，并不改写“用户输入何时入库”的时机逻辑。
 
-本章沿 `restored-src/src/query.ts::queryLoop`、`restored-src/src/services/api/claude.ts::queryModel`、`restored-src/src/services/api/client.ts::getAnthropicClient` 和 `restored-src/src/services/api/withRetry.ts::withRetry` 这条调用链往下看。源码来自 source map 还原出的 2.1.88；还原目录能证明静态控制流，但不能证明生产环境里的延迟、成功率、provider 占比或重试频率。
+本章沿 `restored-src/src/query.ts::queryLoop`、`restored-src/src/services/api/claude.ts::queryModel`、`restored-src/src/services/api/client.ts::getAnthropicClient` 和 `restored-src/src/services/api/withRetry.ts::withRetry` 这条调用链往下看。源码来自 source map 还原出的 2.1.88。
 
 为控制篇幅，下面的源码块只摘取能证明当前结论的原始行；凡是用 `// 省略……` 标出的地方，都是本文明确删去的无关参数或分支，不是源码里原有的伪代码。
 
@@ -142,7 +142,7 @@ return {
 
 `paramsFromContext()` 生成 `BetaMessageStreamParams`。`model` 会被标准化；`messages` 会按缓存策略插入断点；`system` 和 `tools` 分别是系统提示词块与 API 工具 Schema；`tool_choice` 的本地类型是 SDK 的 `BetaToolChoiceTool | BetaToolChoiceAuto | undefined`，分别表示指定工具、自动选择或不发送该选项，而主 Query Loop 这里传的是 `undefined`；`betas` 仅在非空时出现；`max_tokens` 优先使用重试修正值，其次使用本轮覆盖值，最后回退到模型默认上限。
 
-`thinking` 的静态分支也值得讲清楚：配置为 `disabled`，或环境变量关闭 thinking 时，请求不带有效 thinking 配置；模型支持 adaptive thinking 时使用 `{ type: 'adaptive' }`；否则使用 `{ type: 'enabled', budget_tokens }`，且预算不会超过 `max_tokens - 1`。`temperature` 只在 thinking 关闭时发送，调用方未覆盖时回退为 `1`。`enablePromptCaching` 如果是 `undefined`，则由 `getPromptCachingEnabled(model)` 决定；因此不能只看一个请求片段就断言缓存始终开启。
+`thinking` 的静态分支也值得讲清楚：配置为 `disabled`，或环境变量关闭 thinking 时，请求不带有效 thinking 配置；模型支持 adaptive thinking 时使用 `{ type: 'adaptive' }`；否则使用 `{ type: 'enabled', budget_tokens }`，且预算不会超过 `max_tokens - 1`。`temperature` 只在 thinking 关闭时发送，调用方未覆盖时回退为 `1`。`enablePromptCaching` 如果是 `undefined`，则由 `getPromptCachingEnabled(model)` 决定；。
 
 这一步解释了为什么内部消息不能原封不动发给 API。恢复会话、动态工具、MCP 连接状态、提示词缓存和模型能力都会改变最终请求体。Claude Code 先把这些差异消化掉，后面的 provider 层才有一个相对稳定的 Messages API 形状。
 
@@ -402,7 +402,7 @@ export function cleanupStream(
 - 没有工具调用且通过停止检查，才可能结束当前 Agent turn；
 - 有 `tool_use` 时，工具结果会进入历史，下一次 API 请求重新开始。
 
-静态源码可以证明这些分支和字段流向，却不能告诉我们线上一次请求平均有多少 delta、某 provider 更快还是更稳定、watchdog 实际触发频率、fallback 成功率或缓存命中率。即使源码里有 30 秒 stall 记录阈值、默认 90 秒 idle timeout 等常量，它们也只是 2.1.88 这份代码的默认与可配置逻辑，不是生产性能数据。
+。即使源码里有 30 秒 stall 记录阈值、默认 90 秒 idle timeout 等常量，它们也只是 2.1.88 这份代码的默认与可配置逻辑，不是生产性能数据。
 
 ## 小结
 
