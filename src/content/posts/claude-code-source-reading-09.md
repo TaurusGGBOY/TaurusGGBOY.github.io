@@ -11,73 +11,92 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：**Claude Code 如何判断你配置的 API 是否属于 Anthropic 第一方？**
+上一篇留下的问题是：**你知道 Beta 开关打开的时候有什么新功能吗？**
 
-先给结论：它不会根据 API key 的长相判断，也不会先发一次请求试探。源码把这个问题拆成两个维度：`getAPIProvider()` 判断你选择了哪种接入模式；`isFirstPartyAnthropicBaseUrl()` 判断 `ANTHROPIC_BASE_URL` 是否指向 Anthropic 官方 host。很多第一方专属能力，只有两个条件同时满足才会开启。
+先纠正一个容易误解的地方：源码里没有一个叫 `BETA=true` 的总开关。Claude Code 把 Beta 当成一组要随请求发送的能力声明，最后组合成 `betas` 数组；具体放哪些 header，要看 provider、模型、功能开关和运行模式。
 
-### 第一层：先看 provider 配置
-
-`getAPIProvider()` 只读取已经生效的进程环境：
+最接近“Beta 总开关”的其实是一个**禁用开关**：`CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`。它没有被设置，或者值不是 truthy 时，第一方实验 Beta 才允许进入请求：
 
 ```ts
-export type APIProvider = 'firstParty' | 'bedrock' | 'vertex' | 'foundry'
-
-export function getAPIProvider(): APIProvider {
-  return isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK)
-    ? 'bedrock'
-    : isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX)
-      ? 'vertex'
-      : isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY)
-        ? 'foundry'
-        : 'firstParty'
+export function shouldIncludeFirstPartyOnlyBetas(): boolean {
+  return (
+    (getAPIProvider() === 'firstParty' || getAPIProvider() === 'foundry') &&
+    !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS)
+  )
 }
 ```
 
-三个第三方开关都不生效时，函数回退到 `firstParty`；如果多个开关同时生效，优先级是 Bedrock、Vertex、Foundry。这个函数判断的是“请求准备通过哪套云厂商 SDK 和认证路径发送”，不是“当前 base URL 一定是 Anthropic 官方地址”。
+这段函数只返回 `true` 或 `false`，但它并不负责一次性打开所有功能。它只是回答一个前置问题：当前 provider 是否允许发送第一方实验 header，以及用户有没有通过环境变量把它们关掉。Bedrock、Vertex 不会因为这个开关打开就自动获得第一方实验 Beta。
 
-### 第二层：再看 base URL 的 host
+### Beta 是怎么进入请求的
 
-真正检查官方域名的是 `restored-src/src/utils/model/providers.ts::isFirstPartyAnthropicBaseUrl`：
+`getAllModelBetas(model)` 会根据当前模型和运行环境逐步构造 header；`getModelBetas(model)` 再针对 Bedrock 做一次位置适配；到了 `queryModel`，`getMergedBetas()` 会把模型 Beta、Agent 调用所需的 Claude Code Beta，以及 SDK 允许的 Beta 合并并去重：
 
 ```ts
-export function isFirstPartyAnthropicBaseUrl(): boolean {
-  const baseUrl = process.env.ANTHROPIC_BASE_URL
-  if (!baseUrl) {
-    return true
+export function getMergedBetas(
+  model: string,
+  options?: { isAgenticQuery?: boolean },
+): string[] {
+  const baseBetas = [...getModelBetas(model)]
+  // Agentic query 必要的 header 和 SDK betas 的合并逻辑省略
+  const sdkBetas = getSdkBetas()
+  if (!sdkBetas || sdkBetas.length === 0) {
+    return baseBetas
   }
-  try {
-    const host = new URL(baseUrl).host
-    const allowedHosts = ['api.anthropic.com']
-    if (process.env.USER_TYPE === 'ant') {
-      allowedHosts.push('api-staging.anthropic.com')
-    }
-    return allowedHosts.includes(host)
-  } catch {
-    return false
-  }
+  return [...baseBetas, ...sdkBetas.filter(b => !baseBetas.includes(b))]
 }
 ```
 
-这个函数没有参数，输入来自环境变量 `ANTHROPIC_BASE_URL`：
+真正发请求时，只有 `betas` 数组非空才把它写入参数：
 
-- `undefined`、空字符串等“没有配置 base URL”的情况，直接返回 `true`，表示使用默认第一方 API 地址；
-- 配置 URL 后，源码用 `new URL(baseUrl).host` 取 host，并要求精确命中 `api.anthropic.com`；
-- 当 `USER_TYPE === 'ant'` 时，额外允许 `api-staging.anthropic.com`；其他 `USER_TYPE` 不享有这个例外；
-- URL 解析失败时返回 `false`。
+```ts
+const useBetas = betas.length > 0
 
-这里判断的是 host，不是连通性，也不是凭证有效性。一个把请求转发到 Anthropic 的自定义代理，只要 host 不是这两个允许值，静态判断仍然是 `false`；反过来，host 命中官方域名，也不能证明 API key 或 OAuth token 一定有效。
+return {
+  // 其余 messages、system、tools 和模型参数省略
+  ...(useBetas && { betas: betasParams }),
+}
+```
 
-### 两个判断为什么要同时存在
+所以 `anthropic.beta.messages.create()` 或 `anthropic.beta.messages.stream()` 只是 SDK 的 Beta 类型/调用入口，**不等于所有实验功能都打开**。真正改变服务端行为的是最终发送的 Beta header，以及和它配套的请求字段。
 
-因为“接入模式”和“目标地址”是两件事。比如：
+### 打开后可能出现哪些能力
 
-- 没有 `CLAUDE_CODE_USE_BEDROCK` 等第三方开关，但设置了自定义 `ANTHROPIC_BASE_URL`：provider 仍是 `firstParty`，官方 host 判断却是 `false`；
-- `CLAUDE_CODE_USE_BEDROCK=true`：provider 已经是 `bedrock`，即使没有设置 `ANTHROPIC_BASE_URL`，也不能把这次请求当作第一方请求；
-- 两个条件都满足，才表示“当前走第一方模式，并且目标是官方 Anthropic host”。
+下面这些是源码能够确认的请求能力。它们不是“开关一打开全部出现”，每一项都有自己的模型、provider 或实验条件。
 
-源码中的调用方会按需要组合这两个条件。`queryModel` 只有在 `getAPIProvider() === 'firstParty'` 且 `isFirstPartyAnthropicBaseUrl()` 为真时，才生成第一方请求关联 ID；模型能力缓存、远程 settings、team memory 等路径也用类似条件限制第一方专属逻辑。它们并不试图从一次请求的成功或失败倒推出 provider，而是依赖启动时已经解析好的配置。
+| 能力 | 源码中的触发条件 | 请求变化 |
+| --- | --- | --- |
+| 1M 上下文 | `has1mContext(model)` | 加入 `context-1m-2025-08-07`，让支持的模型走长上下文 Beta |
+| 交错思考 | 未设置 `DISABLE_INTERLEAVED_THINKING`，且 `modelSupportsISP(model)` | 加入 `interleaved-thinking-2025-05-14` |
+| 上下文管理 | 第一方/Foundry 且模型支持，或 Anthropic 内部显式打开工具清理 | 加入 `context-management-2025-06-27`，并可发送 `context_management` 字段 |
+| 结构化输出 | 第一方/Foundry、模型支持、`tengu_tool_pear` 实验开启 | 加入 `structured-outputs-2025-12-15`，严格工具 Schema 才能生效 |
+| Web Search | Vertex 的 Claude 4+，或 Foundry | 加入 `web-search-2025-03-05` |
+| Tool Search | 当前模型和工具规模满足 Tool Search 条件 | 1P/Foundry 使用 `advanced-tool-use-2025-11-20`；Vertex/Bedrock 使用 `tool-search-tool-2025-10-19` |
+| 全局 Prompt Cache scope | 第一方且实验 Beta 未禁用 | 加入 `prompt-caching-scope-2026-01-05`，配合全局缓存范围逻辑 |
+| 思考内容裁剪 | 第一方、支持交错思考、交互模式且未开启 `showThinkingSummaries` | 加入 `redact-thinking-2026-02-12`，响应可能返回 redacted thinking，UI 只渲染占位 |
+| Effort / Task Budget | 模型支持 effort；Task Budget 还要求第一方或 Foundry | 加入对应 Beta，并把 `effort` 或 `task_budget` 写进 `output_config` |
 
-所以，Claude Code 判断“是不是第一方”的稳定规则可以压缩成一句话：**先确认没有切到 Bedrock、Vertex、Foundry，再确认 base URL 的 host 是允许的 Anthropic 官方 host。** 这解释了上一篇为什么要把 provider 路由和第一方 URL 判断分开讲。
+其中 Tool Search 最能说明为什么不能只说“Beta 打开了”：同一个功能在不同 provider 上使用不同 header。源码明确写了：
+
+```ts
+export function getToolSearchBetaHeader(): string {
+  const provider = getAPIProvider()
+  if (provider === 'vertex' || provider === 'bedrock') {
+    return TOOL_SEARCH_BETA_HEADER_3P
+  }
+  return TOOL_SEARCH_BETA_HEADER_1P
+}
+```
+
+而且，Tool Search 只有在真正启用、并且存在需要延迟发现的工具时才会把 header 放进请求。Beta header 是服务端协议能力，工具是否实际出现在当前请求里，还要经过本地工具池和动态发现逻辑。
+
+### 为什么要做成一组条件，而不是一个总开关
+
+因为 Beta 能力会改变 API 接受的请求字段、响应块和 provider 兼容性。比如上下文管理需要额外的 `context_management`，结构化输出依赖严格 Schema，Tool Search 会让工具以 deferred/tool reference 方式出现；错误地把这些 header 发给不支持的 provider，可能直接得到 400。
+
+源码还保留了 `ANTHROPIC_BETAS` 作为显式用户输入：它会按逗号切分、去掉空白后追加到自动计算的数组。SDK 传入的 Beta 则会先经过 allowlist；当前源码只允许 API key 用户传 `context-1m-2025-08-07`，订阅用户或其他未允许值会被忽略并打印 warning。自动 Beta 和用户 Beta 不是同一个入口。
+
+因此，“Beta 开关打开有什么新功能”更准确的答案是：**它解除了一部分第一方实验能力的发送限制，随后 Claude Code 再按模型、provider 和运行模式逐项组合请求能力；它不是把所有新功能无条件打开。**
 
 本文仍以仓库中从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。为了突出主线，下面的源码片段会省略无关字段、日志和错误上报分支；省略处不改变本文讨论的控制流。
 
@@ -432,4 +451,4 @@ Claude Code 找到工具的过程并不神秘，但边界很清楚：
 
 ## 留给下一篇的问题
 
-当同一次模型响应包含多个 `tool_use` 时，Claude Code 如何判断哪些工具可以并行执行，哪些必须串行？
+你知道 Claude Code 自带哪些 tool 吗？

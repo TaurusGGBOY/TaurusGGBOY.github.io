@@ -11,7 +11,82 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：当同一次模型响应包含多个 `tool_use` 时，Claude Code 如何判断哪些工具可以并行执行，哪些必须串行？
+上一篇留下的问题是：**你知道 Claude Code 自带哪些 tool 吗？**
+
+先给结论：有一批内置工具，但“自带”不等于“每次请求都会发给模型”。源码里真正的总清单是 `restored-src/src/tools.ts::getAllBaseTools()`；当前会话能看到的工具，还要经过 `isEnabled()`、权限 deny 规则、运行模式、provider 能力和若干功能开关筛选。
+
+### `getAllBaseTools()` 里的基础清单
+
+源码把常用工具直接放进数组，把条件工具用展开表达式接入：
+
+```ts
+export function getAllBaseTools(): Tools {
+  return [
+    AgentTool,
+    TaskOutputTool,
+    BashTool,
+    ...(hasEmbeddedSearchTools() ? [] : [GlobTool, GrepTool]),
+    ExitPlanModeV2Tool,
+    FileReadTool,
+    FileEditTool,
+    FileWriteTool,
+    NotebookEditTool,
+    WebFetchTool,
+    TodoWriteTool,
+    WebSearchTool,
+    TaskStopTool,
+    AskUserQuestionTool,
+    SkillTool,
+    EnterPlanModeTool,
+    // 其余条件工具省略
+  ]
+}
+```
+
+因此，最稳定的核心工具可以按职责记：
+
+| 类别 | 工具 |
+| --- | --- |
+| 文件与命令 | `Bash`、`Read`、`Edit`、`Write`、`NotebookEdit`、`Glob`、`Grep` |
+| Agent 与计划 | `Agent`、`TaskOutput`、`EnterPlanMode`、`ExitPlanMode`、`TaskStop` |
+| 网络与交互 | `WebFetch`、`WebSearch`、`AskUserQuestion` |
+| 会话辅助 | `TodoWrite`、`Skill` |
+| MCP 与发现 | `ListMcpResources`、`ReadMcpResource`、`ToolSearch` |
+
+源码中的真实名称带有 `Tool` 后缀，例如 `FileReadTool` 的模型名称通常是 `Read`，所以文章里同时写源码名和用户可见名，避免把实现对象名误当成 API 工具名。
+
+### 条件工具才是清单里最容易漏掉的部分
+
+`getAllBaseTools()` 后面还会根据构建能力和运行时状态追加工具：
+
+- `USER_TYPE === 'ant'` 时才追加 `ConfigTool`、`TungstenTool`，并可能追加 `REPLTool`；
+- `isTodoV2Enabled()` 打开时追加 `TaskCreate`、`TaskGet`、`TaskUpdate`、`TaskList`；
+- `ENABLE_LSP_TOOL` 为 truthy 时追加 `LSPTool`；工作树模式打开时追加 `EnterWorktree`、`ExitWorktree`；
+- `isAgentSwarmsEnabled()` 打开时追加 `TeamCreate`、`TeamDelete`；已有能力模块还可能提供 `SendMessage`、`ListPeers`；
+- `WebBrowserTool`、`WorkflowTool`、`SleepTool`、cron、`MonitorTool`、通知、PowerShell 等工具，取决于构建产物是否提供对应实现；
+- `ToolSearchTool` 会先在“可能启用”的检查中进入基础池，真正是否用于本轮请求，还要看模型、工具规模和延迟发现条件。
+
+这就是为什么“Claude Code 自带多少个 tool”没有一个脱离上下文的固定数字。源码能确认的是装配规则和候选集合；具体某次运行还取决于构建 feature、环境变量、功能开关和当前连接的 MCP server。
+
+### 从候选清单到当前会话工具池
+
+普通模式下，`getTools(permissionContext)` 会从基础集合出发，排除特殊工具，再依次应用 deny 规则和 `isEnabled()`：
+
+```ts
+const tools = getAllBaseTools().filter(tool => !specialTools.has(tool.name))
+let allowedTools = filterToolsByDenyRules(tools, permissionContext)
+
+const isEnabled = allowedTools.map(_ => _.isEnabled())
+return allowedTools.filter((_, i) => isEnabled[i])
+```
+
+这里的 `permissionContext` 不是一个简单的“允许/拒绝”布尔值，而是包含权限模式和规则的上下文。`CLAUDE_CODE_SIMPLE` 还会走特殊分支：普通情况下只保留 `Bash`、`Read`、`Edit`；如果 REPL 模式同时生效，则可能只把 `REPLTool` 暴露给模型。REPL 内部仍可访问原语工具，但它们不会继续作为顶层工具直接出现。
+
+因此，后面要讨论的 `tool_use` 调度，输入不是一张静态的官方工具表，而是当前会话已经筛选完成的 `toolUseContext.options.tools`。同一个 `Read` 是否存在、同一个工具是否启用，都会影响模型能否调用它，以及调度器后面能否找到它。
+
+## 回到多个 tool_use：它们怎样串并行
+
+现在再回答本章的问题：当同一次模型响应包含多个 `tool_use` 时，Claude Code 如何判断哪些工具可以并行执行，哪些必须串行？
 
 答案不是维护一张“Read 并行、Edit 串行”的固定名单。Claude Code 会先找到每个工具，用它的输入 Schema 解析这一次调用，再执行工具自己的 `isConcurrencySafe(parsedInput)`。只有返回 `true` 的调用才属于并发安全调用；工具不存在、输入解析失败、判断函数抛错，都会保守地按 `false` 处理。
 

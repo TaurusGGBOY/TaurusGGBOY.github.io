@@ -507,4 +507,4 @@ Claude Code 的 API 层做的事情，可以概括为一句话：**把不完整�
 
 ## 留给下一篇的问题
 
-Claude Code 如何判断你配置的 API 是否属于 Anthropic 第一方？
+你知道 Beta 开关打开的时候有什么新功能吗？
