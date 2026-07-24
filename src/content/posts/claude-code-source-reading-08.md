@@ -1,6 +1,7 @@
 ---
 title: "Claude Code源码解读08：Claude 请求与响应如何传输"
 published: 2026-07-23
+updated: 2026-07-24
 description: "Claude Code 中的 API 流式请求与事件组装：从 message_start 到 message_stop，以及重试/缓存/provider 适配。"
 tags: ["claude-code", "source-code", "ai-agent", "api-streaming"]
 category: "AI / Architecture"
@@ -197,6 +198,66 @@ return result.data
 源码注释说明这里刻意使用 raw stream，而不是 SDK 的 `BetaMessageStream`。原因很具体：SDK 的高级封装会在每个 `input_json_delta` 到来时反复做 partial JSON 解析；Claude Code 已经准备自己累积工具参数，所以直接消费原始事件，避免重复工作。
 
 需要区分两个名字。导出的 `queryModelWithStreaming()` 是主循环使用的流式接口；`queryModelWithoutStreaming()` 虽然名字像另一条 HTTP 路径，实际上仍会完整消费 `queryModel()` 的生成器，只是最终只返回最后一个 `AssistantMessage`。真正的非流式 HTTP 请求位于 `executeNonStreamingRequest()`，它主要用于流式失败后的恢复，并调用 `messages.create()` 时不设置 `stream: true`。
+
+## 传输边界：data chunk、协议消息和模型事件不是一回事
+
+到这里还缺一层容易混淆的边界：`queryModel` 看到的 `part` 已经是 Anthropic SDK 解码后的事件。如果从 `claude --input-format stream-json --output-format stream-json` 或 Agent SDK 的 stdio 入口观察，外面还有一层 NDJSON 协议。这里至少存在三种不同粒度：Node 异步流收到的 data block、以换行结束的协议消息，以及模型 API 的 `RawMessageStreamEvent`。它们的边界不能互相替代。
+
+### 输入按换行恢复消息
+
+`main.tsx::getInputPrompt` 在 `inputFormat === 'stream-json'` 时直接返回 `process.stdin`。因此，Node `data` 事件给出的字符串只是暂存材料，大小取决于管道和运行时调度；它可能半条消息，也可能一次包含多条消息。真正的拆分发生在 `StructuredIO.read()`：
+
+```ts
+let content = ''
+
+for await (const block of this.input) {
+  content += block
+  while (content.indexOf('\n') !== -1) {
+    const newline = content.indexOf('\n')
+    const line = content.slice(0, newline)
+    content = content.slice(newline + 1)
+    const message = await this.processLine(line)
+    if (message) yield message
+  }
+}
+
+if (content) {
+  const message = await this.processLine(content)
+  if (message) yield message
+}
+```
+
+上面是 `restored-src/src/cli/structuredIO.ts::read` 的主干，循环里的前置 user message、诊断和关闭 pending request 分支已省略。由此可以确定：**输入的逻辑分块标准是换行符 `\n`，不是字节数、字符数或 token 数。** 一个 block 可以产出多条消息；一条 JSON 消息也可以跨越多个 block。输入结束时，最后一条没有换行的残余内容仍会被当作一条记录处理；空行则在 `processLine` 中跳过。
+
+每行解析后还要经过 `processLine` 的类型分支。`StdinMessageSchema` 接受 user message、control request、control response、keep-alive 和环境变量更新；所以 `stream-json` 的 stdin 是宿主事件协议，不能把它等同于“把用户 prompt 切成若干段”。
+
+### 输出按完整 JSON 行发送
+
+输出侧使用相反的配对操作。`StructuredIO.write()` 把一个完整的 `StdoutMessage` 序列化后追加换行：
+
+```ts
+async write(message: StdoutMessage): Promise<void> {
+  writeToStdout(ndjsonSafeStringify(message) + '\n')
+}
+```
+
+`runHeadless()` 在 `stream-json` 且 `verbose` 时，对 `runHeadlessStreaming()` 产出的每个消息调用一次 `structuredIO.write()`。因此 stdout 的协议单位是一行完整 JSON；这一行可能是 `assistant`、`result`、`system`、`stream_event` 或控制消息，并不意味着每行都是一段文本。最终的 `result` 不会在循环结束时再次重复输出。
+
+`streamJsonStdoutGuard` 还会把底层任意的 `process.stdout.write()` 调用重新缓存到换行，再用 `JSON.parse` 判断这一行是否完整。合法 JSON 继续留在 stdout；其他输出被转到 stderr。它保护的是 NDJSON 的协议边界，不能把它理解成对模型内容重新分块。
+
+### 模型事件与外层协议消息
+
+模型层的分块标准由 API 事件类型和内容块 `index` 决定。`queryModel` 调用 `messages.create({ stream: true })` 后，`for await (const part of stream)` 每次拿到一个语义事件；`content_block_delta` 里的 `text_delta`、`thinking_delta` 和 `input_json_delta` 分别追加到对应内容块。这里的 `input_json_delta.partial_json` 是模型正在生成的 `tool_use` 输入，属于模型输出的一部分，不是 stdin 的用户输入。
+
+Query Engine 只有在 `includePartialMessages` 为真时，才把这些原始 API 事件包装成外部 `stream_event`；默认值为假时，外部仍会收到完整的 assistant、system 和 result 等消息，但不会收到每个原始 delta。也就是说，外层一行 JSON 只是承载协议消息，消息内部是否携带 API 增量还受这个选项控制。
+
+### 远程 transport 还会再次聚合
+
+如果输出经过 CCR 的远程事件上传器，`stream_event` 会先进入最多 100ms 的延迟缓冲。`accumulateStreamEvents()` 会按会话作用域、API message ID 和 content block `index` 维护文本；同一个块在一个 flush 窗口内只生成一个 full-so-far 快照，非文本 delta 则原样传递。普通事件到来时会先 flush 这批流事件，以保持顺序。
+
+这一步是远程投递策略，不是 `stream-json` 的格式标准。CCR 后面的 HTTP uploader 还会按最多 100 条、累计 10MB 的规则切 POST batch；这些数量和 100ms 窗口都只约束远程 transport，不能反推 API 每次返回多少 delta。
+
+因此，本章说“chunk”时要先说明层次：Node data block 没有稳定边界；stdio `stream-json` 按 `\n` 分消息；Anthropic stream 按 API 事件和 content block index 分块；CCR 再按时间窗口、消息聚合和 HTTP batch 做一次传输层切分。
 
 ## 第五站：事件不是文本，它们是一台组装状态机
 
