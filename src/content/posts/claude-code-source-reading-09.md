@@ -11,11 +11,73 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：模型发出 `tool_use` 以后，Claude Code 如何根据工具契约与注册表找到并验证真正要执行的工具？
+上一篇留下的问题是：**Claude Code 如何判断你配置的 API 是否属于 Anthropic 第一方？**
 
-先说结论：模型返回的 `tool_use` 只是一个包含 `name`、`input` 和 `id` 的请求，它没有携带可执行函数。Claude Code 会拿 `name` 到当前会话的 `Tools` 数组里匹配主名称或别名，找到一个真正的 `Tool` 对象；然后先用这个对象的 `inputSchema` 检查数据结构，再调用可选的 `validateInput` 检查业务条件。两关都通过以后，调用才会进入权限判断和实际执行。
+先给结论：它不会根据 API key 的长相判断，也不会先发一次请求试探。源码把这个问题拆成两个维度：`getAPIProvider()` 判断你选择了哪种接入模式；`isFirstPartyAnthropicBaseUrl()` 判断 `ANTHROPIC_BASE_URL` 是否指向 Anthropic 官方 host。很多第一方专属能力，只有两个条件同时满足才会开启。
 
-这里有一个容易忽略的前提：用于查找的不是“程序里定义过的全部工具”，而是当前运行模式、权限规则和功能开关共同裁剪后的可用工具池。一个工具即使存在于源码中，只要没有进入这个数组，对本轮调用来说就和不存在一样。
+### 第一层：先看 provider 配置
+
+`getAPIProvider()` 只读取已经生效的进程环境：
+
+```ts
+export type APIProvider = 'firstParty' | 'bedrock' | 'vertex' | 'foundry'
+
+export function getAPIProvider(): APIProvider {
+  return isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK)
+    ? 'bedrock'
+    : isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX)
+      ? 'vertex'
+      : isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY)
+        ? 'foundry'
+        : 'firstParty'
+}
+```
+
+三个第三方开关都不生效时，函数回退到 `firstParty`；如果多个开关同时生效，优先级是 Bedrock、Vertex、Foundry。这个函数判断的是“请求准备通过哪套云厂商 SDK 和认证路径发送”，不是“当前 base URL 一定是 Anthropic 官方地址”。
+
+### 第二层：再看 base URL 的 host
+
+真正检查官方域名的是 `restored-src/src/utils/model/providers.ts::isFirstPartyAnthropicBaseUrl`：
+
+```ts
+export function isFirstPartyAnthropicBaseUrl(): boolean {
+  const baseUrl = process.env.ANTHROPIC_BASE_URL
+  if (!baseUrl) {
+    return true
+  }
+  try {
+    const host = new URL(baseUrl).host
+    const allowedHosts = ['api.anthropic.com']
+    if (process.env.USER_TYPE === 'ant') {
+      allowedHosts.push('api-staging.anthropic.com')
+    }
+    return allowedHosts.includes(host)
+  } catch {
+    return false
+  }
+}
+```
+
+这个函数没有参数，输入来自环境变量 `ANTHROPIC_BASE_URL`：
+
+- `undefined`、空字符串等“没有配置 base URL”的情况，直接返回 `true`，表示使用默认第一方 API 地址；
+- 配置 URL 后，源码用 `new URL(baseUrl).host` 取 host，并要求精确命中 `api.anthropic.com`；
+- 当 `USER_TYPE === 'ant'` 时，额外允许 `api-staging.anthropic.com`；其他 `USER_TYPE` 不享有这个例外；
+- URL 解析失败时返回 `false`。
+
+这里判断的是 host，不是连通性，也不是凭证有效性。一个把请求转发到 Anthropic 的自定义代理，只要 host 不是这两个允许值，静态判断仍然是 `false`；反过来，host 命中官方域名，也不能证明 API key 或 OAuth token 一定有效。
+
+### 两个判断为什么要同时存在
+
+因为“接入模式”和“目标地址”是两件事。比如：
+
+- 没有 `CLAUDE_CODE_USE_BEDROCK` 等第三方开关，但设置了自定义 `ANTHROPIC_BASE_URL`：provider 仍是 `firstParty`，官方 host 判断却是 `false`；
+- `CLAUDE_CODE_USE_BEDROCK=true`：provider 已经是 `bedrock`，即使没有设置 `ANTHROPIC_BASE_URL`，也不能把这次请求当作第一方请求；
+- 两个条件都满足，才表示“当前走第一方模式，并且目标是官方 Anthropic host”。
+
+源码中的调用方会按需要组合这两个条件。`queryModel` 只有在 `getAPIProvider() === 'firstParty'` 且 `isFirstPartyAnthropicBaseUrl()` 为真时，才生成第一方请求关联 ID；模型能力缓存、远程 settings、team memory 等路径也用类似条件限制第一方专属逻辑。它们并不试图从一次请求的成功或失败倒推出 provider，而是依赖启动时已经解析好的配置。
+
+所以，Claude Code 判断“是不是第一方”的稳定规则可以压缩成一句话：**先确认没有切到 Bedrock、Vertex、Foundry，再确认 base URL 的 host 是允许的 Anthropic 官方 host。** 这解释了上一篇为什么要把 provider 路由和第一方 URL 判断分开讲。
 
 本文仍以仓库中从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。为了突出主线，下面的源码片段会省略无关字段、日志和错误上报分支；省略处不改变本文讨论的控制流。
 
