@@ -9,11 +9,23 @@ image: "/images/posts/claude-code-source-reading-04/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **Host adapter**：把终端、SDK 或远程控制端的输入输出翻译成 Query Core 的统一事件。
+
+- **交互契约**：宿主是否能弹窗、持续渲染和接收回调，会直接改变权限与输出协议。
+
+- **传输与执行解耦**：连接负责搬运结构化消息，Agent 循环继续在选定的执行端运行。
+
+![多种宿主如何复用同一运行时](/images/posts/claude-code-source-reading-04/04-host-adapters-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 上一篇最后留下的问题来自一个很具体的命令：`claude -p`。当它无法像普通 REPL 一样停下来与用户交互时，工具权限由谁决定；而对 Claude Code 来说，带 `-p` 与不带 `-p`，究竟只是输出形式不同，还是运行模式已经变了？
 
-答案先说：**运行模式已经变了，权限没有消失，只是失去了本地弹窗这个决策入口。**
+答案先说：**运行模式改变了权限的交互入口；本地弹窗改由配置规则或外部协议承担。**
 
 `-p` 是 `--print` 的短写。最简单的用法是 `claude -p "解释这个项目"`，也可以通过 stdin 接收输入。普通单 prompt 用法会执行任务、输出结果并退出，适合 Shell 管道、脚本和 CI；SDK 还可以在 `stream-json` 输入模式下持续提供消息。`--output-format` 支持 `text`、`json` 和 `stream-json`：`text` 是默认的最终文本，`json` 输出聚合后的结果对象，`stream-json` 持续输出结构化事件，并要求同时启用 `--verbose`。
 
@@ -29,9 +41,9 @@ imagePosition: "left"
 
 因此，`-p` 与普通 Claude Code 的区别可以归纳成两层。
 
-外层 Host 不同。普通模式由 React/Ink REPL 管理键盘、消息列表、权限弹窗、取消和下一轮输入；`-p` 使用 `StructuredIO` 与 `QueryEngine` 管理输入输出和会话，得到结果后结束进程。源码甚至要在 headless 中直接订阅 settings change，因为这里根本没有 React tree 可以运行对应 hook。
+外层 Host 不同。普通模式由 React/Ink REPL 管理键盘、消息列表、权限弹窗、取消和下一轮输入；`-p` 使用 `StructuredIO` 与 `QueryEngine` 管理输入输出和会话，得到结果后结束进程。headless 路径直接订阅 settings change，以替代 React tree 中对应 hook 的职责。
 
-内层 Agent 能力仍然复用。两条路径最终都会进入 `query()` / `queryLoop()`，使用相同的模型流、工具契约、权限结果和 `tool_result` 回环。`-p` 没有把 Claude Code 变成一个更弱的“文本生成命令”，它只是把负责交互的人从本地 REPL 换成了命令行参数、stdin、配置规则或外部 SDK 宿主。
+内层 Agent 能力仍然复用。两条路径最终都会进入 `query()` / `queryLoop()`，使用相同的模型流、工具契约、权限结果和 `tool_result` 回环。`-p` 保留完整 Agent 内核，把交互职责从本地 REPL 转交给命令行参数、stdin、配置规则或外部 SDK 宿主。
 
 这点很容易读错。`QueryEngine.ts` 的注释明确说，2.1.88 里的 `QueryEngine` 用于 headless/SDK，REPL 接入仍属于 “a future phase”。所以“一套内核”应该理解成**分层复用**：宿主层可以分叉，会话包装也可能不同，但进入 Agent 查询循环以后，模型、工具和消息语义重新汇合。
 
@@ -49,14 +61,14 @@ imagePosition: "left"
 | print / headless | 运行 `claude -p "..."`，或把输入输出接进 Shell、脚本和 CI | 执行一次或连续的非交互任务，以文本或 JSON 交付结果 | 当前进程使用 `StructuredIO` 与 `QueryEngine`，不创建终端 UI |
 | Agent SDK | Python、TypeScript 应用，或者自行编写的 Agent 宿主 | 把 Claude Code 的查询循环、工具和权限控制嵌入自己的程序 | 宿主通过结构化消息控制 Claude Code 子进程；CLI 的 `-p` 也是这条无头能力最直接的入口 |
 | MCP server | 运行 `claude mcp serve`，再由 Claude Desktop 或其他 MCP client 连接 | 把 Claude Code 已有的文件、搜索、编辑等工具暴露给另一个 AI 宿主调用 | 只处理 MCP `ListTools` / `CallTool`，直接进入 `tool.call()`，不会替调用方运行完整 Agent 循环 |
-| Bridge | Claude Code 的 Remote Control：从 claude.ai/code、手机或另一浏览器继续控制本机任务 | 让远端界面使用仍运行在本机的项目、工具和 Agent | 本机注册 environment、领取远端 session，再为它拉起 headless worker；“Bridge”是实现名，不是用户选择的产品名 |
+| Bridge | Claude Code 的 Remote Control：从 claude.ai/code、手机或另一浏览器继续控制本机任务 | 让远端界面使用仍运行在本机的项目、工具和 Agent | 本机注册 environment、领取远端 session，再为它拉起 headless worker；“Bridge”是内部实现名，用户侧产品名是 Remote Control |
 | direct-connect | 由 `cc://` 或 `cc+unix://` 地址打开的内部 server session | 让本地 REPL 直接连接某个 Claude Code session server，而不经过 Remote Control 的 environment 注册与工作轮询 | 客户端先向 server 创建 session，再连接返回的 WebSocket；本地负责 UI 和权限交互，Agent 在 server 会话中运行 |
 
-其中前三种最容易对应到日常经验：`claude` 是终端产品，`claude -p` 是它的[脚本化用法](https://code.claude.com/docs/en/headless)，Agent SDK 则把同一套能力交给 Python 或 TypeScript 程序。MCP server 的方向相反：它不是让 Claude Code 去连接 Notion、GitHub 等 MCP server，而是让 Claude Code 自己成为一个 MCP server，把内置工具提供给别的宿主。官方文档把后一种用法写成 [`claude mcp serve`](https://code.claude.com/docs/en/mcp#use-claude-code-as-an-mcp-server)。
+其中前三种最容易对应到日常经验：`claude` 是终端产品，`claude -p` 是它的[脚本化用法](https://code.claude.com/docs/en/headless)，Agent SDK 则把同一套能力交给 Python 或 TypeScript 程序。MCP server 入口会让 Claude Code 自己成为服务器，把内置工具提供给其他宿主；平时连接 Notion、GitHub 等外部 MCP server 的路径则让 Claude Code 充当客户端。官方文档把服务器用法写成 [`claude mcp serve`](https://code.claude.com/docs/en/mcp#use-claude-code-as-an-mcp-server)。
 
-Bridge 对应的产品功能是 [Remote Control](https://code.claude.com/docs/en/remote-control)。用户看到的是浏览器或手机里的同一个本地会话；源码看到的则是 environment 注册、work 轮询、worker 子进程和结构化消息传输。这里讨论 Bridge，是为了说明 Remote Control 如何复用 headless Claude Code，不是在介绍一个名为 “Claude Bridge” 的独立产品。
+Bridge 对应的产品功能是 [Remote Control](https://code.claude.com/docs/en/remote-control)。用户看到的是浏览器或手机里的同一个本地会话；源码看到的则是 environment 注册、work 轮询、worker 子进程和结构化消息传输。本文用 Bridge 指代 Remote Control 复用 headless Claude Code 的内部实现层。
 
-direct-connect 的边界还要更谨慎。2.1.88 客户端源码明确识别 `cc://` 与 `cc+unix://`，内部 `open <cc-url>` 命令也把自己描述为连接 Claude Code server；但 Anthropic 的公开产品文档没有把 “Direct Connect” 列成一个可单独使用的功能。结合 [Claude Desktop 可以运行本地 Code session](https://code.claude.com/docs/en/desktop#local-sessions)、[Dispatch 可以创建 Code session](https://claude.com/docs/cowork/guide/dispatch#how-dispatch-routes-work) 这些公开行为，更稳妥的理解是：它是一条供 Desktop、Dispatch 或其他内部宿主接入 server session 的底层通道。
+direct-connect 的边界还要更谨慎。2.1.88 客户端源码明确识别 `cc://` 与 `cc+unix://`，内部 `open <cc-url>` 命令也把自己描述为连接 Claude Code server；Anthropic 的公开产品文档截至本文证据范围只展示 Desktop 本地 Code session 与 Dispatch 创建 Code session 等用户功能，并未把 “Direct Connect” 列成独立产品。结合这些公开行为，更稳妥的理解是：它是一条供 Desktop、Dispatch 或其他内部宿主接入 server session 的底层通道。
 
 ## 先把运行模式拆成两个问题
 
@@ -73,7 +85,7 @@ direct-connect 的边界还要更谨慎。2.1.88 客户端源码明确识别 `cc
 
 ## main 先识别宿主，不急着决定业务逻辑
 
-上一篇已经看到，`restored-src/src/main.tsx` 会在完整初始化前识别非交互模式。现在再看这段判断的用途：它不是简单地区分“有没有 UI”，而是在给后面的配置、遥测、权限和输入输出选择宿主语义。
+上一篇已经看到，`restored-src/src/main.tsx` 会在完整初始化前识别非交互模式。这段判断会为后面的配置、遥测、权限和输入输出选择宿主语义，UI 是否挂载只是其中一个结果。
 
 ```ts
 const cliArgs = process.argv.slice(2)
@@ -107,7 +119,7 @@ const clientType = (() => {
 
 这里有两组容易混淆的状态。
 
-`isNonInteractive` 是控制流判断。`-p`、`--print`、`--init-only`、任意 `--sdk-url...` 参数，或者 stdout 不是 TTY，都会让它变成 `true`。没有命中这些条件时才是交互模式。也就是说，即使用户没有显式传 `--print`，把输出接入管道也可能让进程走非交互路径。
+`isNonInteractive` 是控制流判断。`-p`、`--print`、`--init-only`、任意 `--sdk-url...` 参数，或者 stdout 为非 TTY，都会让它变成 `true`；其余情况进入交互模式。因此，即使用户省略 `--print`，把输出接入管道也可能让进程走非交互路径。
 
 `clientType` 则是宿主身份标签。源码能够确认的值包括 `github-action`、`sdk-typescript`、`sdk-python`、`sdk-cli`、`claude-vscode`、`local-agent`、`claude-desktop`、`remote` 和回退值 `cli`。它们主要来自环境变量和 session-ingress token，不能反过来理解成九套 Agent 实现。
 
@@ -151,7 +163,9 @@ for await (const event of query({
 }
 ```
 
-这里的“重新取得”很重要。MCP 连接可能在 REPL 首次渲染后才完成，如果一直使用 React 闭包里较早捕获的工具列表，第一轮请求就可能看不到刚刚连上的能力。源码因此让 `getToolUseContext()` 从最新 store 计算工具，再把结果交给 `query()`。
+这里的“重新取得”很重要。MCP 连接可能在 REPL 首次渲染后才完成，源码因此让 `getToolUseContext()` 从最新 store 计算工具，避免 React 闭包里的旧列表漏掉刚连接的能力。`messagesIncludingNewMessages` 是含本轮输入的完整历史，`newMessages` 是本次新增消息，`abortController` 传播取消，`mainLoopModelParam` 指定本轮模型参数。返回值的 `options.tools` 与 `options.mcpClients` 分别是最新工具池和 MCP 连接。
+
+`buildEffectiveSystemPrompt()` 用 `mainThreadAgentDefinition` 选择主 Agent 定义，以 `toolUseContext` 注入能力边界；`customSystemPrompt` 可替换默认提示，`defaultSystemPrompt` 提供回退，`appendSystemPrompt` 在最终选择后追加内容。调用 `query()` 时，`messages`、`systemPrompt`、`userContext`、`systemContext` 构成模型输入，`canUseTool` 提供权限回调，`toolUseContext` 提供工具运行环境，`querySource` 标记 REPL 来源；返回的每个 `event` 都交给 `onQueryEvent()` 更新宿主。
 
 权限也是同样的道理。REPL 传入的 `canUseTool` 可以触发本地确认界面，用户的选择再回到正在等待的工具调用。终端渲染只是宿主能力；真正的工具选择、`tool_use`、`tool_result` 和继续推理仍由下面的查询链处理。
 
@@ -169,7 +183,7 @@ export async function* query(params: QueryParams) {
 }
 ```
 
-也就是说，REPL 的特殊之处主要在 `query()` 之前如何维护状态，以及拿到事件以后如何渲染。`queryLoop()` 并不知道终端里有没有输入框。
+也就是说，REPL 的特殊之处主要在 `query()` 之前如何维护状态，以及拿到事件以后如何渲染。`queryLoop()` 只消费宿主提供的上下文和回调，与终端输入框解耦。
 
 ## print 与 Agent SDK 共用一条 headless 管道
 
@@ -180,7 +194,7 @@ export async function* query(params: QueryParams) {
 - `--input-format` 可以是 `text` 或 `stream-json`，默认是 `text`。
 - `--output-format` 可以是 `text`、`json` 或 `stream-json`，默认是 `text`。`json` 聚合单次结果，`stream-json` 持续输出实时消息。
 
-源码还限制 `stream-json` 输出必须同时启用 `--verbose`。`--include-partial-messages` 只有在 print + `stream-json` 下才有意义；`--replay-user-messages` 则要求输入和输出都采用 `stream-json`。这些值不是显示样式偏好，而是在决定宿主能看到哪一层消息。
+源码还限制 `stream-json` 输出必须同时启用 `--verbose`。`--include-partial-messages` 只有在 print + `stream-json` 下才有意义；`--replay-user-messages` 则要求输入和输出都采用 `stream-json`。这些值直接决定宿主能看到的消息层级。
 
 `runHeadless()` 会先把普通字符串规范化成 SDK user message。如果传入的是异步输入流，就保留它的流式形态。接下来由 `getStructuredIO()` 决定使用本地 stdio 还是远程传输：
 
@@ -213,7 +227,7 @@ function getStructuredIO(
 }
 ```
 
-`sdkUrl` 为 `undefined` 时使用 `StructuredIO`，从 NDJSON/stdin 读取消息，并向 stdout 写出 SDK 消息和控制消息。提供 URL 时改用继承自它的 `RemoteIO`，后者根据 URL 和运行时开关选择 WebSocket，或者 SSE + HTTP POST。
+`inputPrompt` 可以是单个字符串或异步字符串流：非空字符串会被包装成一条 SDK user message，空白字符串产生空输入流，异步流则原样透传。包装消息中的 `type: 'user'` 与 `message.role: 'user'` 固定方向，`session_id: ''` 等待会话层填充，`message.content` 保存输入文本，`parent_tool_use_id: null` 表示顶层输入。`options.sdkUrl` 省略时使用 `StructuredIO` 读写 NDJSON/stdin/stdout；提供 URL 时使用 `RemoteIO`，并由 URL 与运行时开关选择 WebSocket 或 SSE + HTTP POST。`replayUserMessages` 是可选布尔值，真值时把收到的用户消息重新发给宿主。
 
 真正处理会话的是 `QueryEngine`：
 
@@ -242,21 +256,21 @@ try {
 }
 ```
 
-`QueryEngine.ts` 的原始注释说明，一个实例对应一段 conversation，多次 `submitMessage()` 会在同一实例中保留消息、文件缓存和 usage；它最终仍然调用与 REPL 相同的 `query()`。上面的 `ask()` 摘录还展示了 read-file cache 的边界：构造时克隆进 engine，无论请求正常结束还是抛错，`finally` 都会把最新状态写回宿主。
+`QueryEngine` 构造参数中的 `cwd` 固定工作目录，`tools`、`commands`、`mcpClients` 与 `agents` 定义能力集合，`canUseTool` 提供权限回调，`getAppState`/`setAppState` 连接宿主状态；`initialMessages` 提供起始历史，`readFileCache` 克隆本轮读取凭据。`submitMessage()` 的 `prompt` 是输入，`uuid` 关联消息，`isMeta` 标记元消息。一个实例对应一段 conversation，多次提交会保留消息、文件缓存和 usage；无论正常结束还是抛错，`finally` 都把最新 read-file state 写回宿主。
 
-因此，Agent SDK 在 2.1.88 中不是另一套 Agent 内核。TypeScript、Python 或 CLI 宿主通过 `CLAUDE_CODE_ENTRYPOINT` 标记身份，再使用 headless 的结构化输入输出协议控制同一个子进程。SDK 可以发送用户消息、中断和权限响应，也可以接收 assistant、result、system、`control_request` 等事件，但模型与工具循环仍在 Claude Code 进程内部。
+因此，Agent SDK 在 2.1.88 中复用同一套 Agent 内核。TypeScript、Python 或 CLI 宿主通过 `CLAUDE_CODE_ENTRYPOINT` 标记身份，再使用 headless 的结构化输入输出协议控制 Claude Code 子进程。SDK 可以发送用户消息、中断和权限响应，也可以接收 assistant、result、system、`control_request` 等事件；模型与工具循环仍在子进程内部。
 
-## 没有本地弹窗以后，权限必须变成协议
+## Headless 权限通过配置与控制协议闭环
 
-。`runHeadless()` 因此把权限处理也适配成输入输出协议。
+`runHeadless()` 因此把权限处理也适配成输入输出协议。
 
 当提供 `--sdk-url` 时，源码会把有效的 permission prompt tool 强制设为 `stdio`。工具需要确认时，`StructuredIO` 写出 `control_request`；宿主返回 `control_response` 后，等待中的调用才继续。输入流提前关闭时，仍未完成的请求会被拒绝，错误信息是 `Tool permission stream closed before response received`。
 
-这里也说明了为什么“非交互”不等于“自动允许”。源码支持预先配置 allowed/denied rules，也支持 `--permission-prompt-tool` 或 SDK 控制消息把决定交给外部宿主。。
+非交互模式仍执行权限判断：预配置的 allowed/denied rules 可以直接决策，`--permission-prompt-tool` 或 SDK 控制消息则把待确认动作交给外部宿主。
 
 取消也从按键动作变成了消息。REPL 的 Ctrl+C 可以直接操作本地 abort controller；SDK 和远程宿主则发送 `interrupt` 控制请求，再由 headless 进程中止当前 turn。宿主不同，取消语义仍需要落回同一条会话状态链。
 
-## MCP server 复用的是工具，不是 Agent 循环
+## MCP server 只复用工具执行契约
 
 MCP server 是最容易被“多入口共享内核”这句话误导的一种模式。
 
@@ -304,13 +318,13 @@ server.setRequestHandler(CallToolRequestSchema, async ({
 })
 ```
 
-`arguments` 缺失或为 `null` 时回退为空对象；`validateInput` 本身是可选函数，不存在就跳过这一步。工具仍会经过 `isEnabled()`、自己的校验和权限回调，但这条调用链里没有 `QueryEngine`，也没有 `queryLoop()`。
+handler 从 `params` 读取 `name` 与 `arguments`：`name` 用于注册表查找，`arguments` 为 `null` 或省略时传入空对象。`toolPermissionContext` 是空权限上下文，`tools` 是据此取得的基础工具池，`tool` 是名称命中的单个工具。`isEnabled()` 必须为真；可选的 `validateInput` 存在时校验 `args`，失败结果使用 `message` 组成异常。`tool.call()` 接收最终输入、工具上下文、权限函数和空内容 assistant 消息；返回值为字符串时直接写入 `content[0].text`，否则序列化 `finalResult.data`。该路径直接服务一次工具调用，不进入 `QueryEngine` 或 `queryLoop()`。
 
-所以 MCP server 的角色发生了反转。平时 Claude Code 是 MCP client，从外部服务器取得工具；进入这个入口后，它变成 MCP server，把自己的基础工具交给另一个 Agent 或宿主调用。它复用了 Tool 接口、Schema、文件状态和权限能力，却没有复用“Claude 选择工具并继续推理”这部分内核。
+所以 MCP server 的角色发生了反转。平时 Claude Code 是 MCP client，从外部服务器取得工具；进入这个入口后，它变成 MCP server，把自己的基础工具交给另一个 Agent 或宿主调用。这个入口复用 Tool 接口、Schema、文件状态和权限能力，调用选择与后续推理由外部宿主负责。
 
-源码中还有两条明确的限制：当前 handler 尚未重新暴露外部 MCP tools；`ToolUseContext` 中的 `thinkingConfig` 固定为 `{ type: 'disabled' }`，`mcpClients` 和 Agent 定义也是空集合。这进一步证明它是一条单工具服务路径，不是隐藏的完整 Claude Code 会话。
+源码中还有两条明确的限制：当前 handler 尚未重新暴露外部 MCP tools；`ToolUseContext` 中的 `thinkingConfig` 固定为 `{ type: 'disabled' }`，`mcpClients` 和 Agent 定义也是空集合。因此这条路径只提供单次工具服务，完整会话循环留在调用方。
 
-## Bridge 不是把 REPL 搬上网，而是拉起 headless worker
+## Bridge 为远端 session 拉起 headless worker
 
 接下来把进程边界也加进来。
 
@@ -342,7 +356,7 @@ const args = [
 
 Bridge 的外层职责因此是注册、轮询、容量、子进程生命周期、token 刷新和重连。某个 session 真正开始工作以后，模型与工具仍在被拉起的 headless Claude Code 中运行。
 
-失败边界也分成两层。Bridge 注册失败、工作区未信任、HTTP 非本机地址或认证缺失，会让 supervisor 无法接单；子进程里的模型错误、工具错误、权限拒绝和取消，则沿 SDK 消息回到远端。。
+失败边界也分成两层。Bridge 注册失败、工作区未信任、HTTP 非本机地址或认证缺失，会让 supervisor 无法接单；子进程里的模型错误、工具错误、权限拒绝和取消，则沿 SDK 消息回到远端。
 
 ## direct-connect 把“创建会话”和“连接会话”分开
 
@@ -375,11 +389,11 @@ return {
 }
 ```
 
-`serverUrl` 和 `cwd` 是必填开放字符串；`authToken` 缺失时不会添加 Authorization header；`dangerouslySkipPermissions` 只有严格为真时才把 `dangerously_skip_permissions: true` 放进请求体，`false` 或 `undefined` 都会省略这个字段。响应必须通过 schema 校验，至少把 `session_id`、`ws_url` 转成客户端配置，`work_dir` 则可以不存在。
+请求使用 `serverUrl` 拼接 `/sessions`，`method: 'POST'` 固定创建语义，`headers` 承载内容类型以及可选认证，`body.cwd` 是服务端工作目录。`authToken` 省略时不添加 Authorization header；`dangerouslySkipPermissions` 只有严格为真时才写入 `dangerously_skip_permissions: true`，假值走服务端默认权限路径。响应通过 schema 校验后，`config.serverUrl` 保留入口地址，`sessionId` 与 `wsUrl` 分别来自 `session_id`、`ws_url`，`authToken` 供后续连接复用；`workDir` 来自可选的 `work_dir`。
 
 连接建立后，`DirectConnectSessionManager` 通过 WebSocket 发送 SDK user message、`control_response` 和 `interrupt`，接收 assistant/result/system 以及权限请求。此时本地 REPL 仍然负责展示和人工确认，但 Agent 循环运行在 direct-connect server 管理的会话中。
 
-因此，direct-connect 复用的是 SDK 消息边界，而不是把远端工具假装成本地函数。网络断开时，本地 manager 会通知 `onDisconnected`；发送消息前若 WebSocket 不是 `OPEN`，`sendMessage()` 返回 `false`。。
+因此，direct-connect 沿用 SDK 消息边界，通过协议发送远端调用与结果。网络断开时，本地 manager 会通知 `onDisconnected`；发送消息前若 WebSocket 处于非 `OPEN` 状态，`sendMessage()` 返回 `false`。
 
 ## 六种入口到底共享了什么
 
@@ -402,7 +416,7 @@ return {
 
 ## 小结
 
-Claude Code 支持多种入口，靠的不是复制多套 Agent，而是把宿主、会话包装、消息协议和执行循环分层。
+Claude Code 通过宿主、会话包装、消息协议和执行循环的分层支持多种入口。
 
 交互式 REPL 直接维护 UI 与 AppState，再调用 `query()`；print 和 Agent SDK 通过 `StructuredIO` 与 `QueryEngine` 把 prompt、流式事件、权限和取消变成稳定协议；Bridge 复用这条 headless 管道，为远端 session 拉起子进程；direct-connect 把本地 REPL 变成远端会话的客户端；MCP server 只复用工具契约，直接执行 `tool.call()`。
 
@@ -415,3 +429,9 @@ Claude Code 支持多种入口，靠的不是复制多套 Agent，而是把宿�
 第一个是直接启动 `claude -p` 子进程，通过命令行参数或 stdin 提交任务，再从 stdout 读取文本、JSON 或 `stream-json`。第二个是使用 Claude Agent SDK，用语言层 API 接收结构化消息、维持会话，并处理权限、中断等控制事件。从 Claude Code 内部看，它们最终都可能落到 headless、`StructuredIO` 和 `QueryEngine` 这条路径，但调用方承担的协议细节并不相同。
 
 那么，当你的代码需要结合 Claude Code 时，到底应该选择 `claude -p`，还是 Claude Agent SDK；分别在什么场景下使用它们？
+
+## 参考资料
+
+- [非交互模式](https://code.claude.com/docs/en/headless)
+
+- [Remote Control](https://code.claude.com/docs/en/remote-control)

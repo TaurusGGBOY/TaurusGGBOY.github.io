@@ -10,17 +10,29 @@ image: "/images/posts/claude-code-source-reading-26/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **认知隔离**：Plan Mode 限制可产生的副作用，让模型先形成可审查方案。
+
+- **文件系统隔离**：Git worktree 为并发实现提供独立工作目录和分支坐标。
+
+- **阶段门**：从规划进入执行需要显式批准，清理工作区也由明确所有者负责。
+
+![Plan Mode 与 Worktree 的两种隔离](/images/posts/claude-code-source-reading-26/26-two-isolations-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 上一篇留下的问题是：
 
 > 团队协作确定以后，Plan mode 与 Git worktree 如何把“先规划、再并行实现、最后安全合并”落到代码与工作区？
 
-直接说结论：这不是一个开关完成的事情，而是两道边界配合完成的。
+直接说结论：这条工程流程由行为边界和文件边界配合完成。
 
 Plan mode 管的是**行为边界**。它把当前权限模式切到 `plan`，要求 Agent 先读代码、问问题、写计划，并通过 `ExitPlanMode` 把执行权交回用户或 team lead 审批。Git worktree 管的是**文件边界**。它给每个任务准备独立的目录、分支和 cwd，让几个 Agent 可以同时改代码，而不在同一个 working tree 里互相覆盖。
 
-最后的“安全合并”也要先说清楚：这份 2.1.88 还原源码会创建、保留或删除 worktree，却没有在 worktree 生命周期里替你完成 `merge`、`rebase` 或冲突处理。也就是说，它负责把并行修改隔开，并保留可审查的分支；审查、合并和冲突解决仍然属于后续 Git 流程。
+最后的“安全合并”位于后续 Git 流程：这份 2.1.88 还原源码负责创建、保留或删除 worktree，把并行修改隔开并保留可审查分支；`merge`、`rebase`、审查和冲突处理由协调者继续执行。
 
 如果把整条链路压缩成一句话，就是：
 
@@ -41,11 +53,11 @@ Worktree 解决的是这些目录和分支层面的问题。但它不回答“�
 
 ![Plan mode 与 Git worktree 的双重隔离流程](/images/posts/claude-code-source-reading-26/26-plan-mode-worktrees-handdrawn.png)
 
-这张图要注意两条线之间没有直接箭头。Plan mode 和 worktree 可以组合使用，但源码并没有把“进入计划模式”定义成“自动创建 worktree”。它们是两套机制，在更高层工作流里协作。
+这张图用两条独立线表示 Plan mode 和 worktree。两套机制可在更高层工作流里组合使用；进入计划模式本身不会自动创建 worktree。
 
 本文仍然只讨论仓库中从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的代码。下面的源码块会省略与当前机制无关的参数、UI 分支和实验逻辑。
 
-## Plan mode 不是一份 Markdown，而是一段权限状态
+## Plan mode 用权限状态控制规划阶段
 
 很多人第一次看到 Plan mode，会把它理解成“让模型先输出一个步骤列表”。这个理解少了一层：计划文本只是产物，真正控制流程的是 `ToolPermissionContext.mode`。
 
@@ -74,7 +86,7 @@ export type ToolPermissionContext = DeepImmutable<{
 
 `mode` 是当前权限模式。外部可见的取值包括 `default`、`acceptEdits`、`bypassPermissions`、`dontAsk` 和 `plan`；`auto` 只会在对应 feature 开启后进入运行时可选集合，`bubble` 是内部类型的一部分，却不在用户可配置的 `INTERNAL_PERMISSION_MODES` 中。
 
-`prePlanMode` 是可选字段，`undefined` 表示没有待恢复的进入前模式。进入 Plan mode 时它记录原来的 `PermissionMode`，退出时用来恢复；恢复完成后又被清成 `undefined`。因此 Plan mode 不是简单的布尔值，它还要记住“从哪里进来”。
+`prePlanMode` 是可选字段。进入 Plan mode 时它记录原来的 `PermissionMode`，退出时优先恢复该值；字段缺失时退出逻辑回退到 `default`，恢复完成后再次删除该字段，避免后续退出沿用旧模式。因此 Plan mode 还要保存“从哪里进来”。
 
 ### 进入时：先保存旧模式，再切到 `plan`
 
@@ -99,9 +111,11 @@ async call(_input, context) {
 }
 ```
 
-`_input` 没有业务字段，前导下划线表示这里不使用输入。`context` 提供 `agentId`、读取 AppState 的 `getAppState()` 和更新状态的 `setAppState()`。当 `agentId` 有值时，调用直接报错，因此普通 agent context 不能靠这个工具自行进入 Plan mode。
+`_input` 是未使用的空输入。`context` 提供 `agentId`、读取 AppState 的 `getAppState()` 和更新状态的 `setAppState()`。当 `agentId` 有值时，调用直接报错，因此普通 agent context 无法靠这个工具自行进入 Plan mode。
 
-`applyPermissionUpdate` 收到的更新固定为 `type: 'setMode'`、`mode: 'plan'`、`destination: 'session'`。这里的 `session` 表示只更新本次会话状态，不是把它写成用户或项目的长期默认配置。
+**字段说明：** `appState` 是 `context.getAppState()` 的快照，`appState.toolPermissionContext.mode` 提供转场起点；状态更新保留 `prev` 的其他字段，只把 `toolPermissionContext` 替换为准备并应用模式更新后的结果。
+
+`applyPermissionUpdate` 收到的更新固定为 `type: 'setMode'`、`mode: 'plan'`、`destination: 'session'`。这里的 `session` 表示只更新本次会话状态，用户或项目的长期默认配置保持不变。
 
 真正保存旧模式的是 `prepareContextForPlanMode()`，位置在 `restored-src/src/utils/permissions/permissionSetup.ts`：
 
@@ -119,9 +133,9 @@ export function prepareContextForPlanMode(
 
 `context` 是完整的工具权限上下文；返回值仍然是 `ToolPermissionContext`，所以调用者可以继续用统一的 permission update 处理。若 `currentMode` 已经是 `plan`，函数原样返回，避免重复进入时覆盖 `prePlanMode`。
 
-省略的 `auto` 分支会根据 `TRANSCRIPT_CLASSIFIER` 和 `shouldPlanUseAutoMode()` 决定是否启停 auto mode、剥离或恢复危险规则。还有一个明确边界：如果进入前是 `bypassPermissions`，中途不会激活 auto。换句话说，`prePlanMode` 不只是为了 UI 显示，它参与退出恢复和 auto/bypass 的安全转换。
+省略的 `auto` 分支会根据 `TRANSCRIPT_CLASSIFIER` 和 `shouldPlanUseAutoMode()` 决定是否启停 auto mode、剥离或恢复危险规则。进入前为 `bypassPermissions` 时，中途不会激活 auto。`prePlanMode` 同时服务于 UI 显示、退出恢复和 auto/bypass 的安全转换。
 
-### 只读意味着什么：提示词边界加工具权限，而不是“进程被冻结”
+### 只读意味着什么：提示词边界叠加工具权限
 
 Plan mode 生效后，`getPlanModeV2Instructions()` 会向对话注入一段 system reminder。源码位于 `restored-src/src/utils/messages.ts`：
 
@@ -138,9 +152,9 @@ NOTE that this is the only file you are allowed to edit ...`
 
 这里的 `planFileInfo` 会根据 `attachment.planExists` 生成两种内容：已存在时允许用 Edit 增量修改；不存在时要求用 Write 创建。`attachment.planFilePath` 是唯一允许编辑的计划文件路径。`planExists` 是布尔值，不存在 `null` 的第三种语义。
 
-这段源码也揭示了一个容易说错的地方：Plan mode 的“只读”首先是一条高优先级模型指令，并不是把整个 Node/Bun 进程挂成只读文件系统。工具仍然有各自的 `isReadOnly()`、`validateInput()` 和 `checkPermissions()`，权限引擎也仍然计算 allow、ask、deny。计划文件还是一个刻意保留的写入例外。
+这段源码揭示了 Plan mode 的“只读”实现：高优先级模型指令约束行为，工具各自的 `isReadOnly()`、`validateInput()` 和 `checkPermissions()` 继续计算 allow、ask、deny；计划文件则是刻意保留的写入例外。
 
-因此，准确的说法应该是：Claude Code 通过**计划模式提示词、工具自身契约和权限上下文**共同限制执行，而不是依赖一个全局的文件系统锁。
+因此，Claude Code 通过**计划模式提示词、工具自身契约和权限上下文**共同限制执行。
 
 ### `/plan` 命令和模型工具走向同一状态
 
@@ -159,13 +173,15 @@ if (currentMode !== 'plan') {
 }
 ```
 
-`currentMode` 来自当前 AppState；只有它不等于 `plan` 时才执行切换。命令的 `args` 还支持 `open`：已经在 Plan mode 且计划存在时，用外部编辑器打开计划文件。其他非空描述会让 `onDone` 设置 `shouldQuery: true`，继续发起一轮查询。
+`currentMode` 来自当前 AppState；值偏离 `plan` 时才执行切换。命令的 `args` 还支持 `open`：已经在 Plan mode 且计划存在时，用外部编辑器打开计划文件。其他非空描述会让 `onDone` 设置 `shouldQuery: true`，继续发起一轮查询。
 
-这说明 `/plan` 和 `EnterPlanMode` 不是两种互不相干的实现。入口不同，最后都落到 `prepareContextForPlanMode()`、`applyPermissionUpdate()` 和 session 级 `plan` 状态。
+**字段说明：** 更新对象保留 `prev`，并把 `toolPermissionContext` 写成 `prepareContextForPlanMode(prev.toolPermissionContext)` 经 `applyPermissionUpdate()` 处理后的值；更新描述中的 `type`、`mode`、`destination` 分别固定为 `'setMode'`、`'plan'`、`'session'`。
+
+这说明 `/plan` 和 `EnterPlanMode` 共用 `prepareContextForPlanMode()`、`applyPermissionUpdate()` 和 session 级 `plan` 状态，只在入口层不同。
 
 ## 退出计划：普通会话问用户，teammate 问 leader
 
-计划写完并不等于可以执行。`ExitPlanModeV2Tool` 把“计划完成”和“获准执行”分成两个步骤。
+计划写完后还需取得执行许可。`ExitPlanModeV2Tool` 把“计划完成”和“获准执行”分成两个步骤。
 
 它先校验当前是否真的处于 Plan mode：
 
@@ -187,6 +203,8 @@ async validateInput(_input, { getAppState, options }) {
 
 `_input` 在这个校验阶段不使用。`getAppState` 用来读取最新权限模式，`options.mainLoopModel` 只进入省略的遥测字段。普通会话在 `mode !== 'plan'` 时返回 `result: false` 和 `errorCode: 1`，从而在展示审批对话框之前拒绝误调用。
 
+**字段说明：** 校验失败对象还包含 `message`，成功与 teammate 快速路径都返回 `result: true`。
+
 Teammate 是例外。注释说明 teammate 的 AppState 可能显示 leader 的模式，所以这里让它通过，后面再以 `isPlanModeRequired()` 判断是否需要 leader 批准。
 
 接下来是权限分流：
@@ -204,7 +222,9 @@ async checkPermissions(input, context) {
 }
 ```
 
-`input` 是规范化后的 ExitPlanMode 输入，原样放入 `updatedInput`；`context` 在这段实现里没有被使用。普通会话返回 `ask`，必须经过用户确认。Teammate 返回 `allow`，不是说它可以绕过团队审批，而是避免在 teammate 本地弹出权限 UI；需要强制计划审批的 teammate 会在 `call()` 中写入 `plan_approval_request` 到 team lead mailbox，并进入等待状态。
+`input` 是规范化后的 ExitPlanMode 输入，原样放入 `updatedInput`；`context` 在这段实现里未使用。普通会话返回 `ask`，必须经过用户确认。Teammate 返回 `allow` 以跳过本地权限 UI；需要强制计划审批的 teammate 会在 `call()` 中写入 `plan_approval_request` 到 team lead mailbox，并进入等待状态。
+
+**字段说明：** Teammate 分支返回 `behavior: 'allow'` 与 `updatedInput`；普通分支返回 `behavior: 'ask'`、提示 `message` 和同一份 `updatedInput`。该 allow 只跳过 teammate 本地权限弹窗，leader 审批由后续 mailbox 控制流承担。
 
 批准后，普通会话才真正恢复进入前模式：
 
@@ -221,9 +241,11 @@ return {
 }
 ```
 
+**字段说明：** 状态更新保留 `prev`，并用 `toolPermissionContext` 写入恢复后的 `baseContext`；其中 `mode` 取 `restoreMode`，`prePlanMode` 设为 `undefined`，防止下次退出复用旧入口。
+
 `restoreMode` 优先使用 `prePlanMode`；若它是 `undefined`，回退到 `default`。源码还会处理 auto gate 被关闭的情况：即使 `prePlanMode` 是 `auto`，也可能因为 circuit breaker 或设置禁用而退回 `default`。最后把 `prePlanMode` 清空，避免下一次退出错误地复用旧状态。
 
-到这里，Plan mode 只完成了一件事：让“可以开始执行”成为一个可观察、可审批的状态转换。它还没有为并行任务准备目录。
+到这里，Plan mode 让“可以开始执行”成为一个可观察、可审批的状态转换；并行任务目录由独立的 worktree 机制准备。
 
 ## Worktree 为什么比复制目录可靠
 
@@ -252,9 +274,9 @@ export function validateWorktreeSlug(slug: string): void {
 }
 ```
 
-`slug` 是调用方给出的开放字符串，但约束很明确：总长度最多 64，每个 `/` 分段不能为空，只能含字母、数字、点、下划线和短横线，而且 `.`、`..` 被单独拒绝。`undefined` 和 `null` 不是合法参数类型；无名 worktree 的随机 slug 在更上层生成后，传到这里仍然是字符串。
+`slug` 是调用方给出的开放字符串，但约束很明确：总长度最多 64，每个 `/` 分段不能为空，只能含字母、数字、点、下划线和短横线，而且 `.`、`..` 被单独拒绝。参数类型排除 `undefined` 和 `null`；无名 worktree 的随机 slug 在更上层生成后，传到这里仍然是字符串。
 
-这不是名字美化，而是路径安全。因为 slug 最终会进入 `.claude/worktrees/<slug>`，若允许绝对路径或 `..`，`path.join` 规范化后可能逃出 worktree 目录。
+这些约束直接保护路径安全。slug 最终会进入 `.claude/worktrees/<slug>`，若允许绝对路径或 `..`，`path.join` 规范化后可能逃出 worktree 目录。
 
 ### 优先使用 Hook，否则回退到 Git
 
@@ -284,9 +306,11 @@ export async function createAgentWorktree(slug: string): Promise<{
 }
 ```
 
-`slug` 的约束与上一节相同。返回值中只有 `worktreePath` 必定存在；`worktreeBranch`、`headCommit`、`gitRoot` 和 `hookBased` 都是可选字段。Hook 路径只返回目录和 `hookBased: true`，因为外部 VCS 不一定有 Git 分支或 commit 概念。没有 Hook 时才要求能找到 canonical Git root。
+`slug` 的约束与上一节相同。返回值中只有 `worktreePath` 必定存在；`worktreeBranch`、`headCommit`、`gitRoot` 和 `hookBased` 都是可选字段。Hook 路径只返回目录和 `hookBased: true`，因为外部 VCS 未必有 Git 分支或 commit 概念。Git 路径则要求找到 canonical Git root。
 
-这里用 `findCanonicalGitRoot()` 而不是就近的 `findGitRoot()`。这样，即使父 Agent 已经运行在某个 session worktree 中，新子 Agent 的目录仍然创建在主仓库的 `.claude/worktrees/`，不会形成 worktree 套 worktree，周期清理也能找到它。
+这里用 `findCanonicalGitRoot()` 定位主仓库根。即使父 Agent 已经运行在某个 session worktree 中，新子 Agent 的目录仍会创建在主仓库的 `.claude/worktrees/`，避免 worktree 嵌套并让周期清理能够定位它。
+
+**字段说明：** 创建函数以 `cwd` 为搜索起点；Hook 成功时返回其 `worktreePath` 与 `hookBased: true`，Git 路径则在结果上补入 `gitRoot`。
 
 `getOrCreateWorktree()` 的关键 Git 参数是：
 
@@ -300,9 +324,11 @@ await execFileNoThrowWithCwd(gitExe(), addArgs, { cwd: repoRoot })
 
 `repoRoot` 是主仓库根目录，`worktreeBranch` 为 `worktree-<flattened slug>`，`worktreePath` 位于 `.claude/worktrees/`，`baseBranch` 通常是本地已有的 `origin/<defaultBranch>`；若远端引用不可用，源码会尝试 fetch，失败时才回退到 `HEAD`。可选的 `options.prNumber` 路径则以 `FETCH_HEAD` 为基线。
 
+**字段说明：** `addArgs` 从 `['worktree', 'add']` 开始，稀疏模式追加 `--no-checkout`，随后加入 `-B`、`worktreeBranch`、`worktreePath`、`baseBranch`；执行选项的 `cwd` 固定为 `repoRoot`。
+
 `sparsePaths` 来自 `settings.worktree?.sparsePaths`。它是可选字符串数组：`undefined` 或空数组表示完整 checkout；非空时先加 `--no-checkout`，再配置 cone 模式 sparse-checkout。若 sparse 设置或 checkout 失败，源码会强制移除刚注册的不完整 worktree，再抛错，避免下一次把空目录误判为可恢复会话。
 
-`-B` 也值得注意。它不是“如果分支存在就报错”的 `-b`，而是允许重置遗留的孤儿临时分支，再把它指向本次基线。这适合可恢复的临时 worktree，但也解释了为什么 slug 必须被严格管理。
+`-B` 允许重置遗留的孤儿临时分支，再把它指向本次基线。这适合可恢复的临时 worktree，也解释了为什么 slug 必须被严格管理。
 
 ### 进入新 cwd 后，依赖目录的缓存必须失效
 
@@ -327,7 +353,7 @@ getPlansDirectory.cache.clear?.()
 
 ## 清理为什么要 fail-closed
 
-并行 Agent 结束以后，最危险的操作不是“保留太多临时目录”，而是“把还含有工作成果的目录删掉”。因此源码的清理判断倾向于保守。
+并行 Agent 结束以后，误删仍含工作成果的目录风险最高，因此源码的清理判断倾向于保守。
 
 `hasWorktreeChanges()` 同时检查未提交文件和新 commit：
 
@@ -356,7 +382,9 @@ export async function hasWorktreeChanges(
 }
 ```
 
-这段摘自 `restored-src/src/utils/worktree.ts`，只省略了换行，没有改动判断条件。`worktreePath` 是待检查目录，`headCommit` 是创建时记录的基线 commit，二者都为必填字符串。
+这段摘自 `restored-src/src/utils/worktree.ts`，只省略换行并保留全部判断条件。`worktreePath` 是待检查目录，`headCommit` 是创建时记录的基线 commit，二者都为必填字符串。
+
+**字段说明：** 第一次 Git 调用返回 `statusCode` 与 `statusOutput`，并在 `cwd: worktreePath` 下执行；第二次返回 `revListCode` 与 `revListOutput`，计算 `${headCommit}..HEAD` 的 commit 数。任一 `code` 非零、`stdout` 显示改动或 commit 数大于 0，都返回 `true`。
 
 返回 `true` 有三类情况：working tree 非空、有基线之后的新 commit，或者任意 Git 命令失败。
 
@@ -388,7 +416,7 @@ z.strictObject({
 3. 通过符号链接复用的依赖目录；
 4. 两个分支最终修改同一段代码时的合并语义。
 
-源码中的 `performPostCreationSetup()` 甚至会主动传播 `settings.local.json`、配置共享 Git hooks，并按设置处理符号链接或 `.worktreeinclude` 文件。这些行为提升了新工作区的可用性，也说明 worktree 从来不是容器或虚拟机级别的沙箱。
+源码中的 `performPostCreationSetup()` 还会主动传播 `settings.local.json`、配置共享 Git hooks，并按设置处理符号链接或 `.worktreeinclude` 文件。这些行为提升了新工作区的可用性；安全隔离仍由权限、沙箱或容器机制承担。
 
 更关键的是合并边界。`createWorktreeForSession()`、`keepWorktree()`、`cleanupWorktree()`、`EnterWorktreeTool` 和 `ExitWorktreeTool` 负责的是：
 
@@ -398,7 +426,7 @@ z.strictObject({
 - 在删除前检查未提交修改和新 commit；
 - 让用户选择保留还是移除。
 
-这些路径没有自动调用 `git merge`、`git rebase` 或 `git cherry-pick`。因此，“最后安全合并”的正确流程应当是：先让每个 worktree 产生边界清楚的 diff/commit，再由协调者按顺序审查并合并；一旦两个分支修改相同上下文，仍要使用 Git 的正常冲突解决流程，并重新运行测试。
+这些路径负责创建、切换和清理 worktree；合并阶段需要显式调用 `git merge`、`git rebase` 或 `git cherry-pick`。可靠流程是先让每个 worktree 产生边界清楚的 diff/commit，再由协调者按顺序审查并合并；一旦两个分支修改相同上下文，仍要使用 Git 的正常冲突解决流程，并重新运行测试。
 
 ## 把两套机制组合成一条工程流程
 
@@ -410,7 +438,7 @@ z.strictObject({
 4. 获批后，为可并行的任务创建独立 worktree，让每个 Agent 在自己的 cwd 和分支执行；
 5. Agent 结束时，无变化的临时 worktree 可以清理，有变化的分支保留；
 6. 协调者逐个检查 diff、测试和 commit，再按依赖顺序合并；
-7. 发生冲突时回到 Git 层处理，而不是让 worktree 生命周期猜测哪个改动正确。
+7. 发生冲突时回到 Git 层，由审查与测试判断哪个改动正确。
 
 这里有一个很实用的判断标准：任务如果只是“并行阅读”，通常不需要 worktree；任务如果要写文件，worktree 才提供真正的目录隔离。类似地，一个一行 typo 未必值得进入复杂 Plan mode；但跨模块改造、权限变更或多个 Agent 协作时，先计划再执行可以让审批点和失败边界更清楚。
 
@@ -420,9 +448,14 @@ Plan mode 和 worktree 的共同点，是把原本隐含的工程约束变成显
 
 Plan mode 用 `mode: 'plan'`、`prePlanMode`、只读 reminder、plan file 和 `ExitPlanMode` 审批链，回答“现在能不能行动”。Worktree 用经过验证的 slug、独立目录、临时分支、cwd 切换和保守清理，回答“行动发生在哪里”。
 
-两者组合以后，Claude Code 能把“先规划、再并行实现”落到代码与工作区；但源码没有把合并正确性包办掉。独立 worktree 减少的是执行时互相覆盖，不能消除合并时的代码冲突、共享服务冲突和错误设计。最后仍然需要审查、测试和按依赖顺序合并。
+两者组合以后，Claude Code 能把“先规划、再并行实现”落到代码与工作区。独立 worktree 减少执行时互相覆盖；合并时的代码冲突、共享服务冲突和错误设计仍需通过审查、测试与依赖顺序处理。
 
 ## 留给下一篇的问题
 
 当本地工具还不够用时，Claude Code 如何通过 MCP 发现外部服务器、加载工具与资源，并把调用接回权限和消息链？
 
+## 参考资料
+
+- [Claude Code Permission Modes](https://code.claude.com/docs/en/permission-modes)
+
+- [Claude Code Worktrees](https://code.claude.com/docs/en/worktrees)

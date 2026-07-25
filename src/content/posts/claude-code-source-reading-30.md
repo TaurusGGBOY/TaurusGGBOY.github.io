@@ -10,11 +10,23 @@ image: "/images/posts/claude-code-source-reading-30/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **Host bridge**：外部应用把选区、标签页和编辑动作翻译成 Claude Code 可消费的协议消息。
+
+- **双向 RPC**：宿主既能向 Agent 推送现场，也能接收 Agent 发起的编辑、导航与浏览器操作。
+
+- **能力协商**：握手阶段确认版本、工具和权限模式，让每条连接只暴露可支持的功能。
+
+![IDE 与浏览器的双向 RPC 能力协商](/images/posts/claude-code-source-reading-30/30-external-host-rpc-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 上一篇留下的问题是：语言服务器解决代码语义以后，Claude Code 如何与 IDE、浏览器和其他外部客户端建立连接，并同步选区、文件与操作结果？
 
-先说结论：**Claude Code 没有为每个宿主再造一套 Agent，而是把 IDE、Chrome 和普通外部工具都适配成 MCP 连接，再在 MCP 之上补各自需要的发现、通知和权限协议。**
+先说结论：**Claude Code 把 IDE、Chrome 和普通外部工具适配成 MCP 连接，再在 MCP 之上补各自需要的发现、通知和权限协议，使它们复用同一套 Agent 内核。**
 
 IDE 这一边，扩展先把 workspace、端口、传输方式和可选认证令牌写进 lockfile。Claude Code 找到与当前工作目录匹配的那一个，把它转换成动态的 `sse-ide` 或 `ws-ide` MCP 配置。连接成功后，扩展可以用 `selection_changed`、`at_mentioned` 等通知把编辑器现场推给终端；Claude Code 也能通过 `openDiff`、`close_tab` 等 RPC 把操作发回 IDE，并把保存、关闭或拒绝结果重新映射成运行时决策。
 
@@ -24,17 +36,17 @@ Chrome 走的是另一条入口。Claude Code 启动一个进程内 Chrome MCP s
 
 
 
-本文继续以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的代码只保留证明主路径所需的部分；省略的 import、日志和平台分支不会被冒充为源码全文，还原路径也不等于 Anthropic 内部仓库的原始目录。
+本文继续以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的代码只保留证明主路径所需的部分；省略的 import、日志和平台分支会明确标出，还原路径只用于定位本文引用的源码。
 
-## 外部宿主接入的核心，是把“现场”翻译成协议
+## 外部宿主把现场翻译成协议消息
 
-在看调用链之前，先补四个基础概念。
+在看调用链之前，先明确四个概念怎样划分宿主适配层。
 
 **宿主（host）**是用户正在操作的外层环境。终端、IDE 和浏览器都可以是宿主。它们拥有模型本身不知道的现场：IDE 知道当前选区和打开的文件，浏览器知道标签页、DOM、控制台和网络请求。
 
-**传输（transport）**只负责搬运字节。`stdio`、SSE、HTTP、WebSocket、Native Messaging 都属于传输。传输连通，不代表双方已经理解彼此的工具和通知。
+**传输（transport）**负责搬运字节。`stdio`、SSE、HTTP、WebSocket、Native Messaging 都属于传输；能力含义则由后续协议握手与工具 Schema 确认。
 
-**协议与握手（protocol / handshake）**负责约定消息结构。MCP client 连接后会得到 server version、capabilities 和 instructions。只有服务端声明了工具或资源，运行时才有依据继续装配。
+**协议与握手（protocol / handshake）**负责约定消息结构。MCP client 连接后会得到 server version、capabilities 和 instructions；服务端声明的工具或资源决定运行时继续装配哪些能力。
 
 **通知与 RPC**解决两个方向的问题。`selection_changed` 是宿主主动推送的通知，不要求模型先调用工具；`openDiff` 是 Claude Code 发向 IDE 的 RPC，需要等待宿主返回操作结果。一个把现场送进来，一个把动作送出去。
 
@@ -42,9 +54,9 @@ Chrome 走的是另一条入口。Claude Code 启动一个进程内 Chrome MCP s
 
 ![IDE、Chrome 与外部 MCP 客户端接入 Claude Code 的适配链路](/images/posts/claude-code-source-reading-30/30-browser-ide-external-tools-handdrawn.png)
 
-图中最值得注意的不是三条线都叫 MCP，而是三条线在进入 MCP 以前各自做了什么。IDE 要先确认 workspace；Chrome 要先完成扩展配对；普通外部 MCP 则要经过配置来源、认证与企业策略。统一协议并没有消灭宿主差异，它只是把差异压在适配层里。
+图中最值得注意的是三条线在进入 MCP 以前各自做了什么。IDE 要先确认 workspace；Chrome 要先完成扩展配对；普通外部 MCP 则要经过配置来源、认证与企业策略。统一协议把宿主差异封装在适配层里。
 
-## IDE 不是扫描进程后直接连接，而是先找 lockfile
+## IDE 先通过 lockfile 发现连接
 
 IDE 扩展把连接信息写进 Claude 配置目录下的 lockfile。`restored-src/src/utils/ide.ts` 对新格式的定义如下：
 
@@ -59,9 +71,9 @@ type LockfileJsonContent = {
 }
 ```
 
-`LockfileJsonContent` 没有函数参数，它描述扩展写入的 JSON。`transport` 只有 `'ws'` 和 `'sse'` 两个源码可确认的值；省略后读取逻辑把 `useWebSocket` 保持为 `false`，也就是走 SSE。`workspaceFolders` 省略时回退为空数组；`pid`、`ideName` 和 `authToken` 都允许 `undefined`。`runningInWindows` 只有严格等于 `true` 才生效，其他值或缺失都回退为 `false`。
+`LockfileJsonContent` 描述扩展写入的 JSON。`transport` 只有 `'ws'` 和 `'sse'` 两个源码可确认的值；省略后读取逻辑把 `useWebSocket` 保持为 `false`，也就是走 SSE。`workspaceFolders` 省略时回退为空数组，后续 workspace 匹配将得不到候选；`pid`、`ideName` 和 `authToken` 都允许省略，并分别跳过进程缩小、名称展示与认证头。`runningInWindows` 只有严格等于 `true` 才启用 Windows 路径转换，其余值走本机路径分支。
 
-`readIdeLockfile()` 还兼容旧格式：如果 JSON 解析失败，就把文件按行拆成 workspace 路径；端口则从 `<port>.lock` 的文件名提取。也就是说，lockfile 不只是一个“IDE 已启动”的标记，它同时是连接发现协议。
+`readIdeLockfile()` 还兼容旧格式：如果 JSON 解析失败，就把文件按行拆成 workspace 路径；端口则从 `<port>.lock` 的文件名提取。lockfile 同时保存 IDE 存活标记与连接发现信息。
 
 但发现端口还不够。机器上可能同时开着多个 VS Code、Cursor 或 JetBrains 窗口。Claude Code 会把 lockfile 的 workspace 与当前 cwd 比较：当前目录必须等于某个 workspace，或者位于它下面；在内置终端场景还会结合 PID 祖先关系缩小范围。`findAvailableIDE()` 的停止条件也写得很保守：
 
@@ -83,9 +95,9 @@ export async function findAvailableIDE(): Promise<DetectedIDEInfo | null> {
 }
 ```
 
-`findAvailableIDE()` 没有参数，返回 `DetectedIDEInfo | null`。它最多轮询 30 秒，每轮间隔 1 秒；只有找到**恰好一个**有效 IDE 才返回。找到零个、多个候选、超时或被新的搜索通过 `AbortController` 取消，都返回 `null`。实际源码还会在终端滚动排空期间暂停检测，片段为突出停止条件省略了该分支。
+`findAvailableIDE()` 是空参函数，返回 `DetectedIDEInfo | null`。它最多轮询 30 秒，每轮间隔 1 秒；只有找到**恰好一个**有效 IDE 才返回。零个候选、多个候选、超时或被新的搜索通过 `AbortController` 取消，都返回 `null`。实际源码还会在终端滚动排空期间暂停检测，片段为突出停止条件省略了该分支。
 
-为什么多个候选时不随便挑一个？因为“连接成功”不等于“连接对了”。如果把另一个窗口的选区或 diff 当成本项目事实，后果比暂时不连接更难发现。
+为什么多个候选时不随便挑一个？连接还必须匹配正确 workspace。把另一个窗口的选区或 diff 当成本项目事实，比暂时不连接更难发现。
 
 检测结果最后被整理成 URL：`transport === 'ws'` 生成 `ws://<host>:<port>`，否则生成 `http://<host>:<port>/sse`。在 WSL 中，如果扩展运行在 Windows 侧，源码还会转换 workspace 路径并寻找宿主 IP。这说明“本机 IDE”也不一定和 CLI 共享同一个文件系统视角。
 
@@ -110,9 +122,11 @@ setDynamicMcpConfig(prev => {
 })
 ```
 
-这段状态更新的输入 `prev` 是 `Record<string, ScopedMcpServerConfig> | undefined`；`undefined` 表示还没有动态配置，展开运算会把它当作没有旧字段。若 `prev.ide` 已存在，函数原样返回，避免后一次检测覆盖当前连接。`type` 只有 `'ws-ide'` 与 `'sse-ide'` 两个结果，由 URL 是否以 `ws:` 开头决定；`scope` 固定为 `'dynamic'`，表示它来自本次运行时发现，而不是用户、项目或企业配置。
+这段状态更新的输入 `prev` 是 `Record<string, ScopedMcpServerConfig> | undefined`；`undefined` 表示动态配置尚未建立，展开运算按空对象处理。若 `prev.ide` 已存在，函数原样返回，避免后一次检测覆盖当前连接。`type` 只有 `'ws-ide'` 与 `'sse-ide'` 两个结果，由 URL 是否以 `ws:` 开头决定；`scope` 固定为 `'dynamic'`，表示它来自本次运行时发现。
 
-自动连接本身也不是无条件的。全局 `autoConnectIde`、CLI flag、受支持的内置终端、`CLAUDE_CODE_SSE_PORT`、待安装 IDE 类型或 `CLAUDE_CODE_AUTO_CONNECT_IDE` 任一条件可以开启；但环境变量被明确设置为 falsy 时会关闭。源码还把 `autoInstallIdeExtension` 的缺省值设为 `true`，可由 `CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL` 阻止自动安装。安装、发现和连接是三件分开的事。
+**字段说明：** 动态配置的 `ide.url` 取检测结果 URL，`ideName`、`authToken`、`ideRunningInWindows` 分别取 `ide.name`、认证令牌与宿主平台标记。
+
+自动连接由多项条件共同控制。全局 `autoConnectIde`、CLI flag、受支持的内置终端、`CLAUDE_CODE_SSE_PORT`、待安装 IDE 类型或 `CLAUDE_CODE_AUTO_CONNECT_IDE` 任一条件可以开启；环境变量被明确设置为 falsy 时会关闭。源码还把 `autoInstallIdeExtension` 的缺省值设为 `true`，可由 `CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL` 阻止自动安装。安装、发现和连接分属三个步骤。
 
 ## 握手之后，能力才算真正存在
 
@@ -135,15 +149,17 @@ setDynamicMcpConfig(prev => {
 }
 ```
 
+**字段说明：** `wsHeaders` 始终包含 `'User-Agent'`，有 `serverRef.authToken` 时再加入 `'X-Claude-Code-Ide-Authorization'`。`createNodeWsClient()` 的选项中，`headers` 取 `wsHeaders`，`agent` 取当前 URL 对应的 WebSocket proxy agent。
+
 这里的 `serverRef.type` 必须是字面量 `'ws-ide'` 才进入该分支。`serverRef.url` 是开放字符串，但来自前面的 lockfile 解析与 host/port 组装；`authToken` 为 `undefined` 或空字符串时不会添加认证头，非空时才写入 `X-Claude-Code-Ide-Authorization`。
 
 SSE-IDE 分支则创建 `SSEClientTransport`。2.1.88 的源码注释明确写着该分支尚未使用 lockfile 提供的 auth token，因此不能把 WebSocket 的认证结论外推给 SSE。
 
 传输连接后，MCP client 读取 `getServerCapabilities()`、`getServerVersion()` 和 `getInstructions()`。instructions 超过内部上限会被截断；IDE 连接成功还会发送一条 `ide_connected` notification，其中包含当前 Claude Code 进程 PID。握手的意义就在这里：从这一刻开始，双方交换的是带版本和能力边界的协议消息，不再只是“某端口可以打开”。
 
-失败也有明确状态。`MCPServerConnection` 是判别联合：`'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled'`。只有 `'connected'` 分支带可调用的 client 和 capabilities。UI 因此可以区分“没有配置”“正在连接”“需要认证”和“连接失败”，而不是把它们都显示成工具不存在。
+失败也有明确状态。`MCPServerConnection` 是判别联合：`'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled'`。只有 `'connected'` 分支带可调用的 client 和 capabilities。UI 因此可以分别显示配置缺失、正在连接、需要认证和连接失败。
 
-## 选区和文件上下文是通知，不是每轮扫描 IDE
+## 选区和文件上下文通过通知更新
 
 连接建立后，IDE 扩展会主动发送 `selection_changed`。`useIdeSelection()` 注册的 Zod schema 给这条消息划定了边界：
 
@@ -163,13 +179,15 @@ const SelectionChangedSchema = lazySchema(() =>
 )
 ```
 
-`SelectionChangedSchema()` 没有参数，返回一个延迟构造的 schema。`method` 只能是 `'selection_changed'`。`selection` 有三种状态：对象表示有坐标，`null` 表示明确没有选区，`undefined` 表示字段未提供；`text` 与 `filePath` 同样可为 `undefined`。行号和字符位置是开放数字，schema 在此处没有额外限定为整数或非负数，文章不能替源码补出不存在的约束。
+`SelectionChangedSchema()` 是空参函数，返回一个延迟构造的 schema。`method` 只能是 `'selection_changed'`。`selection` 为对象时更新坐标，为 `null` 时清空当前选区，省略字段时保留“本次通知未携带坐标”的状态；省略 `text` 或 `filePath` 时，对应上下文字段也无法更新。行号和字符位置是开放数字，schema 在此处只校验数值类型。
+
+**字段说明：** `params` 包含可选 `selection`、`text`、`filePath`；`selection.start` 与 `selection.end` 都由数值 `line`、`character` 组成。
 
 处理函数会用 `end.line - start.line + 1` 算行数；如果结束位置的 `character === 0`，再减一行，因为这表示选区恰好停在下一行开头。连接切换时，它还会把 `lineCount` 重置为 0，并把 `lineStart`、`text`、`filePath` 设为 `undefined`，避免旧 IDE 的选区继续污染新连接。
 
-文件提及走另一条通知 `at_mentioned`。它要求 `filePath`，允许 `lineStart`、`lineEnd` 省略，并把 IDE 的 0-based 行号加一后交给 UI。这一点很小，却说明适配层在做什么：不是把原始宿主事件原封不动塞给模型，而是先校验、归一化，再变成内部可消费的上下文。
+文件提及走另一条通知 `at_mentioned`。它要求 `filePath`，允许 `lineStart`、`lineEnd` 省略，并把 IDE 的 0-based 行号加一后交给 UI。适配层会先校验、归一化原始宿主事件，再生成内部可消费的上下文。
 
-选区最终是否进入某一轮 prompt，还要看 REPL 的输入与附件组装；收到 notification 本身不等于模型已经读取文件。通知提供的是候选现场，不是对文件内容的真实性承诺。
+选区最终是否进入某一轮 prompt，还要看 REPL 的输入与附件组装。notification 只提供候选现场；模型读取文件与内容校验仍由后续工具链完成。
 
 ## 反向操作通过 RPC，结果必须重新解释
 
@@ -193,20 +211,22 @@ export async function callIdeRpc(
 
 `toolName` 是开放字符串，由调用点提供，例如 `'openDiff'`、`'close_tab'`、`'openFile'` 或 `'getDiagnostics'`，本函数本身不限制全部合法值。`args` 是开放键值对象，字段约束属于对应 IDE tool；`client` 必须已经是 `ConnectedMCPServer`，不能传 pending 或 failed 状态。返回值可能是字符串、MCP content block 数组或 `undefined`，调用方必须继续判别。
 
-以 `openDiff` 为例，Claude Code 发送旧路径、新路径、候选新内容和 tab 名称。IDE 返回的不是一个模糊布尔值，而是三类可识别结果：
+**字段说明：** `callMCPTool()` 的对象参数把 `client`、`toolName`、`args` 分别写入 `client`、`tool`、`args`，`signal` 取新建 `AbortController` 的 signal；局部 `result` 的 `content` 是本函数最终返回值。
+
+以 `openDiff` 为例，Claude Code 发送旧路径、新路径、候选新内容和 tab 名称。IDE 返回三类可识别结果：
 
 - `FILE_SAVED` 后跟新文本：用户在 IDE 中保存，运行时采用 IDE 返回的最终内容；
 - `TAB_CLOSED`：用户关闭 diff tab，运行时采用原先生成的候选内容；
 - `DIFF_REJECTED`：用户拒绝，运行时保留旧内容；
 - 其他结构：抛出 `Not accepted`，不能猜测用户意图。
 
-这里体现了外部宿主接入最重要的设计原则：**操作成功不等于业务决策完成。** RPC 只证明 IDE 返回了结果，调用方还要把结果转换为文件编辑权限流程可以理解的 accept / reject 与新 edits。取消信号和进程退出还会触发清理，尽量关闭残留 tab。
+这里体现了外部宿主接入最重要的设计原则：**RPC 完成后还要解释业务结果。** 调用方把 IDE 返回值转换为文件编辑权限流程可以理解的 accept / reject 与新 edits。取消信号和进程退出还会触发清理，尽量关闭残留 tab。
 
-源码也提供了更轻的外部编辑器路径：`openFileInExternalEditor()` 可以依据 `$VISUAL` / `$EDITOR` 启动 VS Code、Vim 等程序，但它只是进程拉起和终端切换，没有 MCP 握手、选区通知或结构化结果。不要把“能打开编辑器”与“IDE 已接入运行时”混为一谈。
+源码也提供了更轻的外部编辑器路径：`openFileInExternalEditor()` 可以依据 `$VISUAL` / `$EDITOR` 启动 VS Code、Vim 等程序，只负责进程拉起和终端切换。MCP 握手、选区通知与结构化结果属于 IDE 运行时集成路径。
 
 ## Chrome 复用 MCP，但连接拓扑不同
 
-Claude in Chrome 并不是让主 Agent 直接连浏览器 socket。`setupClaudeInChrome()` 先生成动态 MCP 配置和允许的浏览器工具名：
+Claude in Chrome 通过进程内 MCP 适配层连接浏览器。`setupClaudeInChrome()` 先生成动态 MCP 配置和允许的浏览器工具名：
 
 ```ts
 export function setupClaudeInChrome() {
@@ -235,17 +255,19 @@ export function setupClaudeInChrome() {
 }
 ```
 
-`setupClaudeInChrome()` 没有参数，返回 `mcpConfig`、`allowedTools` 和 `systemPrompt`。配置的 `type` 固定为 `'stdio'`，`scope` 固定为 `'dynamic'`；不同打包形态下 `args` 可能还会包含 `cli.js` 路径，片段展示的是 bundled 分支。`BROWSER_TOOLS` 来自 Chrome MCP 包，属于构建时依赖，静态文章不手工穷举包未来可能改变的全集。只有 session 已处于 bypass permissions 模式时才向子环境写入 `'skip_all_permission_checks'`。
+`setupClaudeInChrome()` 是空参函数，返回 `mcpConfig`、`allowedTools` 和 `systemPrompt`。配置的 `type` 固定为 `'stdio'`，`scope` 固定为 `'dynamic'`；不同打包形态下 `args` 可能还会包含 `cli.js` 路径，片段展示的是 bundled 分支。`BROWSER_TOOLS` 来自 Chrome MCP 包，属于构建时依赖，静态文章不手工穷举包未来可能改变的全集。只有 session 已处于 bypass permissions 模式时才向子环境写入 `'skip_all_permission_checks'`。
 
-通用 MCP client 识别到 server 名称是 `claude-in-chrome` 后，并没有真的启动那个约 325 MB 的独立 subprocess。源码会创建 `createLinkedTransportPair()`，让 MCP client 与进程内 Chrome MCP server 直接连接。这个 server 再通过安全 socket、Native Messaging host 或可选 Bridge URL 联系浏览器扩展。
+**字段说明：** `env` 是传给 Chrome MCP 的子进程环境，bypass 模式下写入 `CLAUDE_CHROME_PERMISSION_MODE`；`mcpConfig` 以 `CLAUDE_IN_CHROME_MCP_SERVER_NAME` 为 key，`command` 取 `process.execPath`，`args` 指定 Chrome MCP 启动参数。`allowedTools` 保存带 MCP 前缀的浏览器工具名，`systemPrompt` 取 `getChromeSystemPrompt()`。
+
+通用 MCP client 识别到 server 名称是 `claude-in-chrome` 后，会创建 `createLinkedTransportPair()`，让 MCP client 与进程内 Chrome MCP server 直接连接，从而跳过约 325 MB 的独立 subprocess。这个 server 再通过安全 socket、Native Messaging host 或可选 Bridge URL 联系浏览器扩展。
 
 为什么外面还保留 `stdio` 形态？因为配置层只需要声明“这是一个 MCP server”；连接层可以针对已知内置 server 优化部署方式。上层工具注册、call/result 和渲染逻辑仍然复用 MCP，不必知道底下已经改成进程内传输。
 
-Native Messaging manifest 还列出明确的 `allowed_origins`，公开构建只允许生产扩展 ID；内部构建才追加开发与内部扩展 ID。它解决的是“哪个浏览器扩展能启动本地 host”，不是网页能访问哪些站点。
+Native Messaging manifest 还列出明确的 `allowed_origins`，公开构建只允许生产扩展 ID；内部构建才追加开发与内部扩展 ID。该字段控制哪些浏览器扩展能启动本地 host；网页站点权限由扩展设置管理。
 
 ## 配对、权限模式和站点权限是三道不同的门
 
-`createChromeContext()` 会选择 Bridge URL；没有 URL 时使用 native socket。它还恢复持久化的 `pairedDeviceId`，扩展配对后保存 device ID 与名称。认证错误提示要求浏览器扩展与 Claude Code 使用同一个 claude.ai 账号。。
+`createChromeContext()` 会选择 Bridge URL；URL 缺失时使用 native socket。它还恢复持久化的 `pairedDeviceId`，扩展配对后保存 device ID 与名称。认证错误提示要求浏览器扩展与 Claude Code 使用同一个 claude.ai 账号。
 
 权限模式的解析也很谨慎：
 
@@ -266,13 +288,13 @@ if (rawPermissionMode) {
 
 `env` 是可选的 `Record<string, string>`；传入值优先于进程环境变量，只有前者为 `null` 或 `undefined` 才回退，空字符串不会触发 `if (rawPermissionMode)`。合法候选由项目的 `isPermissionMode()` / `PERMISSION_MODES` 定义验证，本函数不接受任意字符串；非法值只记录警告，`initialPermissionMode` 仍为 `undefined`。公开主路径同步到扩展的执行模式实际压缩成 `'ask'`，只有 Claude Code 的 `bypassPermissions` 映射成 `'skip_all_permission_checks'`。
 
-这还不是全部权限。Chrome 设置界面明确说明，浏览、点击和输入的站点级权限继承自浏览器扩展设置。于是一次浏览器动作至少跨过三层：
+Chrome 设置界面还会提供站点级权限，浏览、点击和输入均继承浏览器扩展设置。于是一次浏览器动作至少跨过三层：
 
 1. 本地 native host / Bridge 是否与正确扩展配对；
 2. Claude Code 与 Chrome MCP 当前采用 ask 还是跳过检查；
 3. 扩展是否允许当前站点上的具体能力。
 
-因此，MCP tool 出现在模型工具列表中，不等于它可以在任意网站无条件执行。反过来，扩展允许某站点，也不等于本次 Claude Code 会话自动启用了 Chrome。
+因此，浏览器动作要同时满足会话启用、Claude Code 工具权限与扩展站点权限；任一层拒绝都会停止调用。
 
 `shouldEnableClaudeInChrome()` 在非交互会话中默认返回 `false`，除非显式传入 `--chrome`；CLI 的 `--chrome` / `--no-chrome`、环境变量和全局默认配置按顺序决定是否启用。全局 `claudeInChromeDefaultEnabled` 为 `undefined` 时最终默认关闭。这个默认值解释了为什么浏览器能力不会仅因本机安装了扩展就悄悄进入所有 SDK 或 CI 运行。
 
@@ -282,7 +304,7 @@ Chrome MCP 暴露的浏览器动作最终仍按普通 MCP tools 注册。`callMC
 
 源码还定义了浏览器扩展向 Claude Code 推送 prompt 的 JSON-RPC schema：`method` 固定为 `'notifications/message'`，`prompt` 必须是字符串，`tabId` 可选为数字，图片可选为 base64，`media_type` 只能是 `image/jpeg`、`image/png`、`image/gif`、`image/webp`。处理器只接受已经追踪的 tab ID，避免其他标签页的广播被当成本轮输入。
 
-不过，2.1.88 还原源码中的这条主动 prompt 处理路径带有内部构建门控。。更稳妥的结论是：协议和校验结构存在，但具体构建是否启用要服从源码中的门控。
+不过，2.1.88 还原源码中的这条主动 prompt 处理路径带有内部构建门控。更稳妥的结论是：协议和校验结构存在，但具体构建是否启用要服从源码中的门控。
 
 Chrome 断连时，context 提供专门的 `onToolCallDisconnected` 错误文本；IDE 和通用 MCP 也会进入 failed / pending 等连接状态。断连信息必须回到连接管理层，而不能把上一次页面、选区或结果继续当作当前事实。
 
@@ -305,7 +327,7 @@ export const McpServerConfigSchema = lazySchema(() =>
 )
 ```
 
-`McpServerConfigSchema()` 没有参数，返回八类配置的联合。`stdio` 的 `type` 可以省略以兼容旧配置，`args` 省略时默认 `[]`；`sse`、`http`、`ws` 要求 URL，并分别支持源码定义的 headers、headers helper 或 OAuth 子字段；`sse-ide` / `ws-ide` 是内部 IDE 类型；`sdk` 只保存 name，并在 print 路径单独处理；`claudeai-proxy` 需要 URL 与 server ID。
+`McpServerConfigSchema()` 是空参函数，返回八类配置的联合。`stdio` 的 `type` 可以省略以兼容旧配置，`args` 省略时默认 `[]`；`sse`、`http`、`ws` 要求 URL，并分别支持源码定义的 headers、headers helper 或 OAuth 子字段；`sse-ide` / `ws-ide` 是内部 IDE 类型；`sdk` 只保存 name，并在 print 路径单独处理；`claudeai-proxy` 需要 URL 与 server ID。
 
 除由 `print.ts` 单独接入的 `sdk` 类型外，其余配置会在通用连接管理中建立 MCP client，握手得到 capabilities，再拉取 tools、prompts 或 resources；SDK 路径也复用 MCP client 契约，但不经过普通 `connectToServer()` 的 transport 分支。信任不会因为协议统一而统一：
 
@@ -317,7 +339,7 @@ export const McpServerConfigSchema = lazySchema(() =>
 
 
 
-## 为什么这样实现，而不是让 IDE 和浏览器直接改 Agent
+## 为什么要把 IDE 和浏览器接在协议边缘
 
 现在回头看，这套设计解决了四个工程问题。
 
@@ -341,9 +363,14 @@ Claude Code 接入外部宿主的主线，可以压缩成五步：
 4. IDE 选区与提及通过 notification 进入候选上下文，IDE diff 和浏览器操作通过 tool call / RPC 返回结构化结果；
 5. workspace 校验、认证或配对、Claude Code 权限模式、扩展站点权限与企业策略共同守住边界。
 
-这套实现的关键不是“Claude Code 支持多少 IDE 或浏览器”，而是它把宿主差异隔离在协议边缘，让执行内核继续处理同一种消息与工具生命周期。连接成功只表示通道可用；外部事件仍要经过校验、归一化、权限和状态更新，才能成为本轮执行的一部分。
+这套实现把宿主差异隔离在协议边缘，让执行内核继续处理同一种消息与工具生命周期。连接成功只表示通道可用；外部事件仍要经过校验、归一化、权限和状态更新，才能成为本轮执行的一部分。
 
 ## 留给下一篇的问题
 
 这些外部事件进入主进程以后，Claude Code 的 AppState 如何组织会话、工具、任务、权限和 UI 共享状态，并保证更新可追踪？
 
+## 参考资料
+
+- [Claude Code Chrome Integration](https://code.claude.com/docs/en/chrome)
+
+- [Claude Code IDE Integrations](https://code.claude.com/docs/en/ide-integrations)

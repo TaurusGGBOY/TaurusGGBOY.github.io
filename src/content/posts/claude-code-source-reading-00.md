@@ -5,25 +5,37 @@ description: "从 Claude Code 2.1.88 的 source map 泄露开始，沿时间线�
 tags: ["claude-code", "source-code", "ai-agent", "security"]
 category: "AI / Security"
 draft: false
-image: "/images/posts/claude-code-source-reading-00/claude-code-highres.png"
+image: "/images/posts/claude-code-source-reading-00/claude-code-source-reading-00.png"
 imagePosition: "left"
 ---
+
+## 本章先建立三个概念
+
+- **Agent harness**：围绕模型组织上下文、工具、权限、状态与恢复的运行时。系列关注的源码主体正是这一层。
+
+- **source map 的源码载荷**：`sources` 记录映射目标，`sourcesContent` 可以直接携带对应源码文本；泄露边界取决于发布物实际包含的字段。
+
+- **证据层级**：发布物、官方文档与运行结果提供不同强度的证据。后续文章会把可确认事实、源码推断和外部分析分开标注。
+
+![source map 如何暴露 Agent harness 的证据链](/images/posts/claude-code-source-reading-00/00-series-guide-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
 
 2026 年 3 月 31 日，Anthropic 发布了 Claude Code 2.1.88。不到两个小时，这个版本里的源码就被人公开了。随后发生的事情包括撤包、GitHub 大规模下架，以及攻击者借“泄露版 Claude Code”传播窃密木马。
 
 那么，一个用于调试的 `.map` 文件，为什么会产生这么长的一条影响链？
 
-我们先看发布物本身。实际上，这次事件不需要假设 Anthropic 的内部网络被攻破，也没有证据支持这种说法。问题出在正常的 npm 发布流程：本来应该留在构建环境里的源码文本，被 source map 带进了公开软件包。
+我们先看发布物本身。可确认的故障发生在正常的 npm 发布流程：本来应该留在构建环境里的源码文本，被 source map 带进了公开软件包。现有证据不支持把事件归因于 Anthropic 内网入侵。
 
 ## 2026 年 3 月 31 日 06:36：问题从一次 npm publish 开始
 
 [npm registry](https://registry.npmjs.org/@anthropic-ai%2fclaude-code) 记录的发布时间是 2026 年 3 月 30 日 22:36:48 UTC，换成北京时间就是 3 月 31 日 06:36。`@anthropic-ai/claude-code@2.1.88` 在这个时间进入公共仓库。
 
-这个包里同时出现了 `cli.js` 和 `cli.js.map`。前者是打包后的程序，后者负责把打包代码映射回源文件。source map 本身并不等于源码泄露，关键要看它有没有携带 `sourcesContent`。如果这个字段只有文件路径，外部人员仍然拿不到原文；如果里面保存了完整源码，情况就完全不同了。
+这个包里同时出现了 `cli.js` 和 `cli.js.map`。前者是打包后的程序，后者负责把打包代码映射回源文件。泄露边界由 `sourcesContent` 决定：只有文件路径时只能恢复映射关系，保存完整文本时则能按条目还原源码。
 
 我检查了原始发布物中的 `cli.js.map`。文件大小是 59,766,257 字节，里面有 4756 个 `sources` 条目，也有 4756 份非空的 `sourcesContent`。也就是说，这个 map 不只告诉调试器“源码文件叫什么”，还把对应文本一起交了出去。拿到 npm 包以后，不需要反编译 `cli.js`，按数组位置把路径和内容配对，就能恢复出可阅读的源码树。
 
-一些外部报道把泄露规模写成约 51.2 万行代码、1900 个 TypeScript 文件，本仓库恢复出的 map 条目则是 4756 个。为什么数字不一样？因为统计口径不同。1900 更接近业务源码文件数，4756 还包含第三方依赖和生成内容。这里真正需要记住的不是哪一个数字更大，而是每一项 `sources` 都有对应的非空 `sourcesContent`。这个条件成立，源码恢复就已经具备了。
+一些外部报道把泄露规模写成约 51.2 万行代码、1900 个 TypeScript 文件，本仓库恢复出的 map 条目则是 4756 个。差异来自统计口径：1900 更接近业务源码文件数，4756 还包含第三方依赖和生成内容。决定能否恢复源码的条件是每一项 `sources` 都有对应的非空 `sourcesContent`。
 
 ## 2026 年 3 月 31 日 08:23：从发布错误变成公开事件
 
@@ -31,17 +43,17 @@ imagePosition: "left"
 
 我们可以把泄露过程简化成一条链路：Anthropic 发布 npm 包，包内 map 暴露源码文本，研究者公开可直接下载的地址，其他人开始保存和镜像。前两步属于发布流程问题，后两步则让它进入不可逆的传播阶段。
 
-那么，Anthropic 关闭 R2 链接或者删除 npm 版本有没有用？有用，但只能阻止新的用户继续从原地址下载。已经保存到本地、同步到 GitHub 或重新打包的副本，不会因为上游链接失效而自动消失。这也是为什么后面的处理重点很快从“修包”转向“清理副本”。
+Anthropic 关闭 R2 链接或删除 npm 版本，只能阻止新的用户继续从原地址下载。已经保存到本地、同步到 GitHub 或重新打包的副本仍会留在其他分发节点，因此后面的处理重点很快从“修包”转向“清理副本”。
 
 ## 2026 年 3 月 31 日当天：撤回版本，再处理 GitHub 镜像
 
 Anthropic 随后撤下了 2.1.88。今天查看 npm registry，仍然可以看到这个版本的发布时间，但相邻版本都有的 tarball 地址、完整性签名和文件统计已经不存在。一个公开的 [Claude Code issue](https://github.com/anthropics/claude-code/issues/41666) 也把 2.1.88 称为 yanked release，并记录了 Skills、MCP 和自定义命令失效等用户反馈。
 
-这里要区分两个问题。源码泄露解释了版本为什么必须立即撤回，但 Skills 和 MCP 失效属于版本质量问题。它们出现在同一个版本、同一天影响用户，却不是同一个故障机制。把它们放在一起讨论，是因为用户感受到的是同一条发布链路失灵：自动更新拿到了一个功能异常的版本，随后这个版本又因为源码暴露被撤下。
+这里要区分两个故障机制：源码泄露触发立即撤回，Skills 和 MCP 失效属于版本质量问题。它们共同暴露了同一条发布链路的风险：自动更新先分发功能异常版本，随后该版本又因源码暴露被撤下。
 
 撤包之后，Anthropic 同一天向 GitHub 提交了 [DMCA 下架通知](https://github.com/github/dmca/blob/master/2026/03/2026-03-31-anthropic.md)。通知确认这批代码的版权属于 Anthropic，并要求删除主要镜像及其 fork。GitHub 在文档顶部说明，目标仓库网络超过 100 个，而且 Anthropic 认为大部分 fork 与源仓库存在相同侵权，因此平台最初对包含 8100 个仓库的整个网络执行了处理。
 
-这个动作说明了两个事实。第一，这批代码虽然已经公开可下载，但没有因此变成开源软件。第二，npm 撤包只能处理发布源，无法处理已经扩散到其他平台的副本，所以 Anthropic 还需要借助版权程序继续清理。
+这个动作说明了两个事实。第一，公开可下载只描述传播状态，代码许可仍由原版权约束。第二，npm 撤包只能处理发布源，已经扩散到其他平台的副本需要继续通过版权程序清理。
 
 ## 2026 年 4 月 1 日至 2 日：技术事故开始影响公司形象
 
@@ -51,11 +63,11 @@ Anthropic 随后撤下了 2.1.88。今天查看 npm registry，仍然可以看�
 
 4 月 2 日，[Business Insider](https://www.businessinsider.com/anthropic-copyright-infringement-claude-code-2026-4) 引述 Anthropic 发言人称，公司正在推出措施防止类似事件再次发生。报道还指出一个比较尴尬的背景：Anthropic 长期面对训练数据版权诉讼，这次却需要站在版权拥有者的位置，用 DMCA 阻止别人继续传播它的代码。于是，一个 source map 配置问题，又被放进了 AI 公司如何对待他人作品和自身知识产权的讨论里。
 
-不过，影响范围仍然需要说清楚。这次暴露的是 Claude Code 的客户端 Agent harness，包括工具调用、权限、状态和宿主逻辑，不是 Claude 模型权重。[Zscaler 的安全分析](https://www.zscaler.com/blogs/security-research/anthropic-claude-code-leak)也明确指出，没有证据显示模型权重、安全流水线或用户数据随之暴露。
+不过，影响范围仍然需要说清楚。这次暴露集中在 Claude Code 的客户端 Agent harness，包括工具调用、权限、状态和宿主逻辑。[Zscaler 的安全分析](https://www.zscaler.com/blogs/security-research/anthropic-claude-code-leak)也把模型权重、安全流水线和用户数据排除在现有证据能够确认的暴露范围之外。
 
 ## 2026 年 4 月 3 日至 7 日：真正的下游风险开始出现
 
-源码已经撤回，GitHub 镜像也在清理，那么风险是不是到这里就结束了？实际上没有。
+源码撤回和 GitHub 镜像清理之后，风险仍沿着已经下载的副本、衍生分析与重新分发继续存在。
 
 [Trend Micro 4 月 3 日的调查](https://www.trendmicro.com/en_gb/research/26/d/weaponizing-trust-claude-code-lures-and-github-release-payloads.html)发现，攻击者在公开披露后的 24 小时内建立了假冒的“Claude Code 泄露版”仓库。这些仓库声称提供无限制版本或解锁企业功能，下载内容实际包含 Vidar 信息窃取程序和 GhostSocks 代理木马。
 
@@ -65,21 +77,21 @@ Anthropic 随后撤下了 2.1.88。今天查看 npm registry，仍然可以看�
 
 因此，泄露给 Anthropic 带来的安全影响分成了两层。源码本身让外部人员更容易研究 Agent 的攻击面，泄露事件的热度又给恶意软件提供了可信的传播外壳。前一层是代码和架构风险，后一层是品牌与供应链风险。修复 npm 包只能解决前者的一部分，解决不了已经形成的搜索关键词和社会工程场景。
 
-## 2026 年 4 月 23 日：官方复盘了质量问题，没有复盘源码泄露
+## 2026 年 4 月 23 日：官方复盘聚焦质量问题
 
 4 月 23 日，Anthropic 发布了 [Claude Code 质量问题复盘](https://www.anthropic.com/engineering/april-23-postmortem)。文章承认 3 月到 4 月间有三项独立改动造成体验下降。其中，3 月 26 日上线的一项缓存优化会在会话空闲后反复清除旧 thinking，导致 Claude 遗忘上下文、重复执行，并造成更多缓存 miss。Anthropic 在 4 月 20 日前修复了这些问题，随后为所有订阅用户重置使用限额，还承诺让更多内部员工使用与用户完全相同的公共构建版本，并加强 Code Review、评测和渐进发布。
 
-这篇文章值得放进时间线，但不能把它当作源码泄露复盘。官方没有说缓存问题导致了 `cli.js.map` 被发布，也没有说后面的测试措施专门针对泄露事故。两件事的共同点在于，它们都发生在同一段发布周期，也都暴露了内部测试与公共发布之间的差距。
+这篇文章值得放进时间线，但它的证据范围只覆盖缓存问题与后续测试措施。官方文章未建立缓存问题与 `cli.js.map` 发布之间的因果关系，也未把后续措施描述为泄露事故专项修复。两件事发生在同一段发布周期，共同暴露了内部测试与公共发布之间的差距。
 
-截至今天，我没有找到 Anthropic 针对源码泄露发布的独立技术复盘。公开可确认的回应主要来自 npm 撤包、GitHub DMCA，以及媒体转述的“正在采取措施防止再次发生”。至于究竟是哪条构建规则、文件过滤配置或发布检查失效，Anthropic 还没有公开到这个粒度。
+截至今天，Anthropic 公开回应主要体现在 npm 撤包、GitHub DMCA，以及媒体转述的“正在采取措施防止再次发生”。公开材料尚未披露具体失效的构建规则、文件过滤配置或发布检查。
 
 ## 2026 年 7 月 16 日：这次泄露到底留下了什么
 
-npm registry 当前的 `latest` 是 2.1.211，`stable` 是 2.1.204，说明 Claude Code 的版本发布没有因为这次泄露停止。2.1.211 的 npm 包只有 7 个文件，解包大小约 160 KB；2.1.87 则有 19 个文件，解包后约 46.6 MB。
+npm registry 当前的 `latest` 是 2.1.211，`stable` 是 2.1.204，说明 Claude Code 在泄露后继续发布版本。2.1.211 的 npm 包只有 7 个文件，解包大小约 160 KB；2.1.87 则有 19 个文件，解包后约 46.6 MB。
 
 回到开头的问题，一个 source map 为什么会产生持续几个月的影响？因为它打通了四个原本分开的环节。构建系统把源码写进 map，npm 把 map 公开分发，社交平台和 GitHub 让源码快速复制，攻击者又利用事件热度包装恶意下载。任何一个环节单独看都不复杂，连起来以后，撤回一个 npm 版本就不可能让事情恢复原状。
 
-到今天，可以确认的直接影响是 Anthropic 撤回了正式版本，处理了大规模 GitHub 镜像，公开承诺防止重演，并承受了版权、发布质量和品牌安全方面的压力。没有公开证据表明 Claude 模型权重、用户数据或 Anthropic API 因此失守，也没有可靠数据可以计算收入损失或客户流失。
+到今天，可以确认的直接影响是 Anthropic 撤回了正式版本，处理了大规模 GitHub 镜像，公开承诺防止重演，并承受了版权、发布质量和品牌安全方面的压力。公开证据的覆盖范围止于客户端源码及其传播处置，尚不足以证明 Claude 模型权重、用户数据或 Anthropic API 失守，也不足以计算收入损失或客户流失。
 
 所以，研究这次事件时，最重要的边界是把三件事分开：公开发布事故可以确认，源码传播和恶意利用可以追踪，Anthropic 内部损失只能在有证据时讨论。
 
@@ -125,7 +137,7 @@ npm registry 当前的 `latest` 是 2.1.211，`stable` 是 2.1.204，说明 Clau
 
 **14 文件工具**分析 Read、Edit、Write 和 Notebook 怎样处理文件状态、并发修改、历史快照与回滚。
 
-**15 搜索工具**比较 Glob、Grep、ripgrep、WebSearch 和 WebFetch，重点不是命令名称，而是搜索范围、分页、截断与失败恢复。
+**15 搜索工具**比较 Glob、Grep、ripgrep、WebSearch 和 WebFetch，重点分析搜索范围、分页、截断与失败恢复。
 
 **16 系统提示词**研究 system prompt、CLAUDE.md、项目指令和环境上下文怎样分块，再在请求前组装成模型实际收到的上下文。
 
@@ -167,7 +179,7 @@ npm registry 当前的 `latest` 是 2.1.211，`stable` 是 2.1.204，说明 Clau
 
 **33 快捷键与 Vim**研究终端按键怎样解析、冲突怎样校验，以及 Vim 编辑模式如何用状态机处理不同上下文。
 
-**34 无头 SDK**解释 print 模式、SDK 消息、JSON、SSE 和 WebSocket 怎样提供结构化输入输出，并处理没有人工确认的权限场景。
+**34 无头 SDK**解释 print 模式、SDK 消息、JSON、SSE 和 WebSocket 怎样提供结构化输入输出，并处理自动化宿主中的权限决策。
 
 **35 设置与 Feature Flags**梳理用户、项目和托管配置层级，研究配置同步、缓存、实验开关与构建裁剪。
 
@@ -202,3 +214,9 @@ npm registry 当前的 `latest` 是 2.1.211，`stable` 是 2.1.204，说明 Clau
 ## 留给下一篇的问题
 
 你们知道，因为这次源码泄漏事件，网友们发现了 Claude Code 中的哪些 bug 吗？
+
+## 参考资料
+
+- [Dive into Claude Code：生产级 Agent 的设计空间](https://arxiv.org/abs/2604.14228)
+
+- [InfoQ：Claude Code 源码随 npm 包发布事件](https://www.infoq.com/news/2026/04/claude-code-source-leak/)

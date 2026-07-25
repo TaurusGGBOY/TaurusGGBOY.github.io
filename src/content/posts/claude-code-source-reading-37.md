@@ -10,11 +10,23 @@ image: "/images/posts/claude-code-source-reading-37/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **Session affinity**：远程消息先关联到具体本地会话，才能保持上下文、工具和工作目录一致。
+
+- **双工传输**：控制端与执行端各自发送事件，入站和出站可以采用不同连接策略。
+
+- **重连状态**：传输恢复与 Agent 会话恢复是两层目标，序号、去重和确认点负责衔接。
+
+![Remote Control 的会话关联与双层重连](/images/posts/claude-code-source-reading-37/37-remote-session-affinity-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 模型与认证准备好以后，Claude Code 的 Bridge、Remote Control 与 Server 模式如何连接本地运行时和远端客户端，并转发消息与控制事件？
 
-答案是：Claude Code 没有把 Agent 搬到手机或浏览器里，也没有另写一套“远程 Agent”。它把本地运行时注册成一个可领取工作的 environment，再用一个带 `sessionId` 的事件通道，把本地 query loop 产生的 `SDKMessage` 发到会话服务；远端客户端订阅这些事件，并把新 prompt、interrupt、权限结果反向送回来。
+答案是：Claude Code 把本地运行时注册成可领取工作的 environment，再用带 `sessionId` 的事件通道，把本地 query loop 产生的 `SDKMessage` 发到会话服务；远端客户端订阅这些事件，并把新 prompt、interrupt、权限结果反向送回来。工具执行和项目状态继续留在本地运行时。
 
 这里至少有三种角色，先别混在一起：
 
@@ -22,7 +34,7 @@ imagePosition: "left"
 - `RemoteSessionManager` 在远端控制客户端一侧。它订阅会话、发送用户消息、显示并回复权限请求。
 - `DirectConnectSessionManager` 面向 direct-connect server。它使用 server 返回的 `wsUrl`，把同一套结构化消息协议接到自托管入口。
 
-所以 Bridge 解决的不是“远程调用一个函数”，而是一个分布式会话问题：谁拥有执行环境，谁保存会话身份，消息怎样关联，权限由谁确认，连接断掉以后从哪里继续。
+所以 Bridge 解决的是分布式会话问题：谁拥有执行环境，谁保存会话身份，消息怎样关联，权限由谁确认，连接断掉以后从哪里继续。
 
 本文仍以仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原的源码为边界。下面的片段为突出主线省略了日志、UI 和部分错误分支；路径是还原路径，不代表 Anthropic 内部源码的原始目录结构。
 
@@ -91,15 +103,17 @@ export async function runBridgeHeadless(
 }
 ```
 
-`runBridgeHeadless(opts, signal)` 是无 UI bridge 的入口，源码位于 `restored-src/src/bridge/bridgeMain.ts`。`opts.dir` 是执行目录；`opts.getAccessToken()` 返回当前访问令牌，返回空值时这里不会继续注册；`opts.permissionMode` 传给子会话运行时，而不是在 bridge 层被偷偷改写；`opts.sandbox` 是布尔值，决定 spawner 是否启用对应沙箱配置。`signal` 是 `AbortSignal`，用于让外部 supervisor 终止长期循环。
+`runBridgeHeadless(opts, signal)` 是无 UI bridge 的入口，源码位于 `restored-src/src/bridge/bridgeMain.ts`。`opts.dir` 是执行目录；`opts.getAccessToken()` 返回当前访问令牌，空值会终止注册；`opts.permissionMode` 原样传给子会话运行时；`opts.sandbox` 是布尔值，决定 spawner 是否启用对应沙箱配置。`signal` 是 `AbortSignal`，用于让外部 supervisor 终止长期循环。
+
+注册与启动字段分成两组：`reg.environment_id` 标识后续 work loop 轮询的 environment，`reg.environment_secret` 证明 worker 所有权；spawner 的 `execPath` 指向当前可执行文件，`scriptArgs` 提供子进程参数，`env` 继承当前环境，`verbose: false` 关闭子进程详细输出，`onDebug: log` 把调试信息送回 bridge logger。`runBridgeLoop()` 再同时接收 `config`、两个注册凭据、`api`、`spawner`、`logger` 与 `signal`，分别负责容量策略、认证、服务请求、会话启动、诊断和取消。
 
 `HeadlessBridgeOpts.spawnMode` 的源码可选值是三种：`single-session` 表示一个目录承载一个会话并在结束时退出；`worktree` 表示为多个会话创建隔离 worktree；`same-dir` 表示多个会话共享目录，因此也明确存在互相覆盖的风险。`sessionTimeoutMs` 可以不传，类型文件中的默认会话超时是 24 小时。
 
-这里有一个很重要的顺序：workspace trust 在网络注册之前检查。远端可达不等于本地目录可信。即使用户已经登录，未在该目录接受 trust dialog，headless bridge 仍会以永久错误退出。
+这里有一个很重要的顺序：workspace trust 在网络注册之前检查。即使远端可达且用户已经登录，当前目录仍要单独通过 trust dialog；拒绝或缺失信任会让 headless bridge 以永久错误退出。
 
-`runBridgeLoop()` 才是 environment 的“值班室”。它持续轮询 work，领取后 ACK，启动或连接 session，并通过 heartbeat 延长租约。`BridgeConfig.maxSessions` 决定容量；`spawnMode` 决定工作目录策略；`environmentSecret` 用来证明当前 worker 对 environment 的控制权；session ingress token 则用于具体 session 的事件与心跳请求。两类凭据不是一回事。
+`runBridgeLoop()` 是 environment 的“值班室”。它持续轮询 work，领取后 ACK，启动或连接 session，并通过 heartbeat 延长租约。`BridgeConfig.maxSessions` 决定容量；`spawnMode` 决定工作目录策略；`environmentSecret` 证明当前 worker 对 environment 的控制权；session ingress token 则授权具体 session 的事件与心跳请求。
 
-## ReplBridge 为什么不是一个 WebSocket 包装器
+## ReplBridge 在 WebSocket 之上维护会话协议
 
 交互式 REPL 内部使用的是 `initBridgeCore()`。源码注释把它概括成：environment registration → session creation → poll loop → ingress transport → teardown。这个函数不自己读取 bootstrap state，所有上下文都从 `BridgeCoreParams` 注入，因此同一核心也能被 daemon 调用。
 
@@ -137,11 +151,11 @@ export async function initBridgeCore(
 }
 ```
 
-`initBridgeCore(params)` 位于 `restored-src/src/bridge/replBridge.ts`。`dir` 是本地工作目录；`title` 是会话初始标题；`getAccessToken` 是按需取 token 的函数；`createSession` 由调用方注入，返回 session id，失败时核心返回 `null`；`onInboundMessage` 接收远端输入；`onPermissionResponse` 接收远端权限结果；`onInterrupt` 处理反向中断。
+`initBridgeCore(params)` 位于 `restored-src/src/bridge/replBridge.ts`。`dir` 是本地工作目录；`title` 是会话初始标题；`getAccessToken` 是按需取 token 的函数；`createSession` 由调用方注入，返回 session id，失败时核心返回 `null`。调用它时，`environmentId` 取刚注册得到的 `reg.environment_id`，把新 session 绑定到当前 bridge environment；`signal` 固定为 15 秒超时，只约束这次建会话请求。`onInboundMessage` 接收远端输入；`onPermissionResponse` 接收远端权限结果；`onInterrupt` 处理反向中断。
 
 几个可选参数会直接改变控制流：`perpetual` 为真时会尝试读取 bridge pointer 并复用之前的 environment/session；缺省或为假时，正常 teardown 会清理 pointer。`initialSSESequenceNum` 缺省为 `0`；只有确实复用旧 session 时，源码才会沿用这个高水位，创建新 session 时仍从 `0` 开始，避免把旧 session 的序号错误套到新流上。
 
-`BridgeCoreHandle` 暴露的不只是 `writeMessages()`，还包括 `sendControlRequest()`、`sendControlResponse()`、`sendControlCancelRequest()`、`sendResult()` 和 `teardown()`。这已经说明 Bridge 的协议面比“转发聊天文本”更宽。
+`BridgeCoreHandle` 同时暴露 `writeMessages()`、`sendControlRequest()`、`sendControlResponse()`、`sendControlCancelRequest()`、`sendResult()` 和 `teardown()`，协议面覆盖聊天文本、控制请求、终态和连接生命周期。
 
 ## transport：入站和出站甚至不必使用同一种连接
 
@@ -208,7 +222,7 @@ export async function createV2ReplTransport(opts: {
 
 `heartbeatIntervalMs` 不传时 `CCRClient` 的注释默认是 20 秒；`heartbeatJitterFraction` 缺省为 `0`，即不加抖动。`outboundOnly` 为真时不开 SSE 读取流，只保留写事件和 heartbeat，适用于纯镜像附件；缺省或为假时同时接收入站事件。`getAuthToken` 返回函数若存在，就按实例读取 token，适合一个进程管理多个 session；缺省时回退到进程级环境变量路径。
 
-这里还出现了 `epoch`。它的意义是阻止旧 worker 在重连后继续写入：新 worker 注册会推进 epoch，旧实例收到不匹配响应后必须关闭。它处理的是“谁是当前 worker”，不是消息排序本身。
+这里还出现了 `epoch`。新 worker 注册会推进 epoch，旧实例收到不匹配响应时触发 `onEpochMismatch`，由回调关闭相关资源并抛出 `epoch superseded` 终止旧 transport；该字段裁决当前 worker 所有权，消息排序则由 sequence 机制负责。
 
 ## 消息如何走：先关联 session，再做去重和顺序保护
 
@@ -236,15 +250,15 @@ writeMessages(messages) {
 }
 ```
 
-`writeMessages(messages)` 是 `BridgeCoreHandle` 的方法，参数是本地消息数组。它没有返回送达确认，调用方也没有在这里等待网络完成。`initialMessageUUIDs` 防止历史消息再次发送，`recentPostedUUIDs` 同时用于发送去重和回声过滤。`flushGate.enqueue()` 返回真表示初始历史仍在写入，新消息先排队，避免历史和实时消息交错；如果 transport 不存在，源码选择记录并丢弃这批消息，而不是假装已经送达。
+`writeMessages(messages)` 是 `BridgeCoreHandle` 的方法，参数是本地消息数组。`filtered` 只保留 bridge 允许的类型，并排除 `initialMessageUUIDs` 与 `recentPostedUUIDs` 中的 UUID；`flushGate.enqueue()` 返回真时把它们留在初始历史之后，`transport` 尚未建立时则记录并丢弃。发送前 UUID 被加入 `recentPostedUUIDs`，`toSDKMessages()` 生成 `events`，映射阶段再给每项补上当前 `session_id`。方法返回 `void`，调用方把入 transport 视为本地完成点。
 
-所以顺序保证不是 WebSocket 自动赠送的。代码显式维护初始 flush gate、UUID 去重集合和 SSE sequence high-water mark。三者分别解决历史/实时交错、回声/重复写入、重连重放范围，缺一项都会出现不同种类的重复或乱序。
+顺序保证来自代码显式维护的初始 flush gate、UUID 去重集合和 SSE sequence high-water mark。三者分别处理历史/实时交错、回声/重复写入和重连重放范围。
 
 入站方向也有一个 `recentInboundUUIDs` 有界集合。sequence number 是主恢复机制，UUID 集合是防御性兜底。
 
 ## 控制事件为什么必须和普通消息分开
 
-工具需要授权时，本地运行时发出的不是 assistant 文本，而是 `control_request`。远端作出选择后返回 `control_response`；如果本地请求已不再有效，还可以发 `control_cancel_request` 让远端关闭旧弹窗。
+工具需要授权时，本地运行时发出 `control_request`。远端作出选择后返回 `control_response`；本地请求失效后再发 `control_cancel_request`，让远端关闭旧弹窗。
 
 ```ts
 sendControlRequest(request: SDKControlRequest) {
@@ -296,9 +310,9 @@ private handleMessage(
 
 `handleMessage(message)` 位于 `restored-src/src/remote/RemoteSessionManager.ts`，参数联合类型包括 `SDKMessage`、`SDKControlRequest`、`SDKControlResponse` 和 `SDKControlCancelRequest`。`control_request` 目前只明确处理 `can_use_tool`；未知 subtype 会回一条 `error` response，避免 server 永久等待。`control_cancel_request` 会删除 pending request；普通 `SDKMessage` 才进入 UI 消息回调。
 
-权限结果的可选值也很窄：`RemotePermissionResponse` 是 `allow` 或 `deny`。`allow` 必须带 `updatedInput`，意味着用户可以确认经修改的工具输入；`deny` 带拒绝消息。远端客户端没有第三个“连接后默认允许”的行为值。
+权限结果的可选值很窄：`RemotePermissionResponse` 只有 `allow` 和 `deny`。`allow` 必须带 `updatedInput`，意味着用户可以确认经修改的工具输入；`deny` 带拒绝消息。协议通过封闭联合排除了“连接后默认允许”。
 
-这就是权限边界的核心：远端控制通道可以承载权限决策，但不替代权限引擎。请求仍然有 `request_id` 和 `tool_use_id`，响应仍然必须匹配 pending request。第 12 篇介绍过的 allow/ask/deny 决策，并没有因为加入 Bridge 就消失。
+远端控制通道只承载权限决策，权限引擎仍负责生成请求和校验结果。请求带有 `request_id` 和 `tool_use_id`，响应必须匹配 pending request；第 12 篇介绍的 allow/ask/deny 决策继续位于执行端。
 
 ## Remote client 如何订阅会话并反向控制
 
@@ -333,15 +347,15 @@ connect(): void {
 }
 ```
 
-`RemoteSessionManager.connect()` 没有参数和返回值；它使用构造时传入的 `RemoteSessionConfig`。其中 `sessionId` 与 `orgUuid` 共同定位订阅，`getAccessToken()` 每次连接都可取新 token。`hasInitialPrompt` 与 `viewerOnly` 都是可选布尔值：`hasInitialPrompt` 表示 session 创建时已有正在处理的 prompt；`viewerOnly` 为真时客户端是纯观看者，不应发送 interrupt、更新标题，也不启用普通控制端的断线超时策略。两者缺省都是 `undefined`，而辅助构造函数 `createRemoteSessionConfig()` 会分别回退为 `false`。
+`RemoteSessionManager.connect()` 接受零个参数并返回 `void`；它使用构造时传入的 `RemoteSessionConfig`。`sessionId` 与 `orgUuid` 共同定位订阅，`getAccessToken()` 每次连接都可取新 token。`wsCallbacks.onMessage` 进入协议分流，`onConnected`、`onClose`、`onReconnecting` 更新宿主连接状态，`onError` 先记录再通知上层。`hasInitialPrompt` 为真时表示创建 session 时已有正在处理的 prompt；`viewerOnly` 为真时关闭 interrupt、标题更新和普通控制端断线超时策略。两者省略时由 `createRemoteSessionConfig()` 回退为 `false`。
 
 `SessionsWebSocket.connect()` 把 API 的 `https://` 基址转换为 `wss://`，路径是 `/v1/sessions/ws/{sessionId}/subscribe`，并在 query 中带 `organization_uuid`。认证通过 `Authorization: Bearer ...` header 和固定的 `anthropic-version` header 完成。Bun 与 Node `ws` 分支使用不同代理/TLS 适配，但都在连接打开后才把状态改成 `connected`。
 
-它的消息校验刻意只要求对象有字符串 `type`，没有硬编码完整 allowlist。这样服务端新增消息类型时不会在 transport 层被静默丢掉，真正的类型分派留给 `RemoteSessionManager` 和后续 adapter。代价是下游必须继续防御未知 type。
+它的消息校验只要求对象有字符串 `type`，让服务端新增类型可以穿过 transport 层；真正的类型分派留给 `RemoteSessionManager` 和后续 adapter，下游通过未知 type 分支保持兼容。
 
 ## Direct Connect：另一扇门，同一套结构化协议
 
-Direct Connect 与 claude.ai Remote Control 不是同一条建连路径。客户端先向指定 server 创建 session，校验返回值，再连接 server 提供的 `wsUrl`。
+Direct Connect 采用独立建连路径：客户端先向指定 server 创建 session、校验返回值，再连接 server 提供的 `wsUrl`。claude.ai Remote Control 则使用前面的远程 session 服务。
 
 ```ts
 export async function createDirectConnectSession({
@@ -399,13 +413,13 @@ export async function createDirectConnectSession({
 }
 ```
 
-`createDirectConnectSession()` 位于 `restored-src/src/server/createDirectConnectSession.ts`。`serverUrl` 是开放 URL 输入，源码没有列举固定候选；`authToken` 可为 `undefined`，此时不添加 Bearer header；`cwd` 是希望 server 使用的工作目录；`dangerouslySkipPermissions` 只有严格为真时才把 `dangerously_skip_permissions: true` 写入请求体，`false` 或 `undefined` 都省略该字段。
+`createDirectConnectSession()` 位于 `restored-src/src/server/createDirectConnectSession.ts`。`serverUrl` 是开放 URL 输入，静态源码未限制候选集合；`authToken` 可为 `undefined`，此时省略 Bearer header；`cwd` 是希望 server 使用的工作目录；`dangerouslySkipPermissions` 只有严格为真时才把 `dangerously_skip_permissions: true` 写入请求体，`false` 或 `undefined` 都省略该字段。
 
-实际源码在返回前还检查网络错误、非 2xx 状态和 response schema。有效响应提供 `session_id`、`ws_url`，`work_dir` 可选。；最终目录要看经过 schema 验证的 `work_dir`。
+请求对象的 `method` 固定为 `'POST'`，`headers` 固定包含 `content-type: application/json` 并在有 token 时追加 `authorization`；body 始终写 `cwd`，危险权限字段按上面的布尔分支条件展开。`resp` 是 fetch 返回的 `Response`，网络异常被包装为 `DirectConnectError`，随后还要通过 HTTP 状态与 `connectResponseSchema().safeParse()` 校验。`result.success: false` 使用 schema error 终止，成功时 `data.session_id`、`data.ws_url` 分别写入返回配置的 `sessionId`、`wsUrl`，原 `serverUrl`、`authToken` 也随 `config` 保留，`data.work_dir` 则成为 `workDir`。
 
 `DirectConnectSessionManager` 连接 `wsUrl` 后按换行拆分 JSON，每一行都是 Structured IO 消息。普通 assistant/result/system 交给 `onMessage`，`can_use_tool` 控制请求交给 `onPermissionRequest`，用户输入被编码成 `type: 'user'`，中断则编码成 subtype 为 `interrupt` 的 `control_request`。
 
-它与 `RemoteSessionManager` 有一个明显差异：当前 `DirectConnectSessionManager` 没有自动重连状态机，`close` 只调用 `onDisconnected`。；外层若需要恢复，必须重新创建 manager 或自行处理 session 生命周期。
+它与 `RemoteSessionManager` 有一个明显差异：当前 `DirectConnectSessionManager` 的 `close` 只调用 `onDisconnected`；需要恢复时，外层必须重新创建 manager 或自行处理 session 生命周期。
 
 ## 断线重连：两层状态机，两个恢复目标
 
@@ -438,13 +452,13 @@ private handleClose(closeCode: number): void {
 }
 ```
 
-`handleClose(closeCode)` 位于 `restored-src/src/remote/SessionsWebSocket.ts`。`closeCode` 是 server/transport 提供的数字，不是任意用户配置。`4003` 走永久终止；`4001` 使用独立预算；其他 code 只有在断线前状态为 `connected` 且次数未到 5 时才重连。显式 `close()` 会先把 state 设成 `closed` 并清理 timer，因此不会被 close 回调重新拉起。
+`handleClose(closeCode)` 位于 `restored-src/src/remote/SessionsWebSocket.ts`。`RECONNECT_DELAY_MS` 固定为 2000 毫秒，`MAX_RECONNECT_ATTEMPTS` 把普通重连限制为 5 次，`MAX_SESSION_NOT_FOUND_RETRIES` 给 `4001` 单独提供 3 次线性等待；`PERMANENT_CLOSE_CODES` 当前包含 `4003`。`closeCode` 由 server/transport 提供：`4003` 永久终止，`4001` 使用独立预算，其他 code 只在此前状态为 `connected` 且预算未耗尽时重连。显式 `close()` 会先把 state 设成 `closed` 并清理 timer，close 回调不会再次拉起连接。
 
 本地 Bridge 的恢复目标不同：它要证明当前 environment 仍然拥有 work。poll 返回 environment 丢失、transport epoch 被替换、heartbeat 失败时，它可能重新注册 environment，再尝试 `reconnectSession()` 保留原 `sessionId`；如果原 environment 已过期，才归档旧 session 并创建新 session。源码把 environment 重建上限设为 3 次，并使用 promise guard 合并并发重连，避免两个恢复流程同时替换 transport。
 
-因此有两层恢复：控制端恢复订阅，执行端恢复 worker 所有权。前者成功不代表本地工具还在运行；后者成功也不代表远端 UI 从未错过瞬时状态。源码提供 sequence number、UUID 去重和重连预算，但它没有证明跨任意网络故障的 exactly-once delivery。
+因此有两层恢复：控制端恢复订阅，执行端恢复 worker 所有权。两层成功只证明各自连接与租约恢复；本地工具存活和远端 UI 是否错过瞬时状态仍需额外状态确认。源码提供 sequence number、UUID 去重和重连预算，未提供跨任意网络故障的 exactly-once 证明。
 
-## 安全边界：远程化增加了入口，没有消除检查
+## 安全边界：远程入口仍需逐层检查
 
 最后把几个容易误解的安全结论收紧。
 
@@ -452,11 +466,11 @@ private handleClose(closeCode: number): void {
 
 第二，session ingress token、environment secret、OAuth access token 分别服务于不同边界。源码会在每次远端 WebSocket 连接时重新调用 `getAccessToken()`，v2 transport 也提供 per-instance `getAuthToken`，就是为了避免多 session 共用进程级 token 时互相覆盖。
 
-第三，`dangerouslySkipPermissions` 是 Direct Connect 创建 session 时明确上传的危险开关，不是连接成功后的隐含默认值。它为假或未定义时，请求体根本没有这个字段。
+第三，`dangerouslySkipPermissions` 是 Direct Connect 创建 session 时明确上传的危险开关。它为假或未定义时，请求体省略该字段，连接成功也不会改变权限模式。
 
-第四，权限请求的展示端可能没有加载远端所有工具。`createToolStub()` 会为本地未知的远端工具构造一个只用于权限 UI 的 stub，并强制 `needsPermissions()` 返回真；它的 `call()` 不是实际执行入口。真正工具仍在远端执行环境里运行。
+第四，权限请求的展示端可能缺少远端工具实现。`createToolStub()` 会为本地未知的远端工具构造一个只用于权限 UI 的 stub，并强制 `needsPermissions()` 返回真；stub 的 `call()` 会拒绝执行，真正工具仍在远端执行环境里运行。
 
-这四条共同说明：Bridge 是协议边界，不是信任捷径。它让输入、输出和控制跨机器流动，但 `cwd` 所属、workspace trust、transport 认证、session 关联和工具权限仍要逐层成立。
+这四条共同说明：Bridge 只建立协议边界。输入、输出和控制可以跨机器流动，但 `cwd` 所属、workspace trust、transport 认证、session 关联和工具权限仍要逐层成立。
 
 ## 小结
 
@@ -464,9 +478,14 @@ Claude Code 的远程能力可以理解为“本地执行，服务端协调，�
 
 `RemoteSessionManager` 负责 claude.ai session 的订阅和反向控制，`DirectConnectSessionManager` 则接入 server 返回的 `wsUrl`。它们复用结构化消息思想，却有不同的认证、建连和重连边界。WebSocket、SSE 和 HTTP POST 只是 transport；真正让远程会话可靠的是 session id、worker epoch、sequence high-water mark、UUID 去重、flush gate、明确的权限响应与有限重试。
 
-更准确地说，远程模式没有制造第二套 Agent 内核。它只是把原本发生在一台机器上的输入、输出和控制，拆成了一套需要身份、顺序、恢复与安全边界的分布式协议。
+更准确地说，远程模式复用 Agent 内核，并把原本发生在一台机器上的输入、输出和控制拆成一套需要身份、顺序、恢复与安全边界的分布式协议。
 
 ## 留给下一篇的问题
 
 远端与本地运行时能够协作以后，Claude Code 如何记录日志、指标、token 与成本，并把运行状态暴露给诊断和观测系统？
 
+## 参考资料
+
+- [Claude Code Remote Control](https://code.claude.com/docs/en/remote-control)
+
+- [Claude Code Sessions](https://code.claude.com/docs/en/sessions)

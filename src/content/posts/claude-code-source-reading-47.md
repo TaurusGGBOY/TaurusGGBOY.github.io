@@ -10,11 +10,23 @@ image: "/images/posts/claude-code-source-reading-47/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **反馈通道**：生成前样式、运行中通知和跨 Agent 消息分别作用于表达、注意力与协作。
+
+- **Mailbox 投递**：地址解析、队列和空闲唤醒把消息送到目标会话的下一次可执行时刻。
+
+- **呈现策略**：Output Style 修改系统提示词中的表达约束，宿主再决定终端、SDK 或系统通知的载体。
+
+![Output Style、Notification 与 Mailbox 三条反馈通道](/images/posts/claude-code-source-reading-47/47-feedback-channels-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 文档与建议生成以后，Claude Code 如何通过通知、mailbox 与 output style 把结果送到正确的人、Agent 和界面，并完成整个运行闭环？
 
-先说结论：**Claude Code 没有用一条万能“消息总线”同时解决表达、投递和提醒，而是把它们拆成了三个正交问题。**
+先说结论：**Claude Code 把表达、投递和提醒拆成三个正交问题，并为每一层保留独立的确认语义。**
 
 `output style` 在模型推理前进入 system prompt，决定 Claude 应该怎样组织回答；mailbox 保存“谁发给谁”的内容或控制消息，并在目标 Agent 可以接收时进入下一轮；notification 面向人，负责把“该回来看看了”送到 TUI、终端或 Hook。真正的回答仍由当前运行宿主承接：交互式会话交给 REPL 渲染，`-p` 与 SDK 则写成 text、JSON 或 `stream-json`。
 
@@ -28,12 +40,12 @@ imagePosition: "left"
 
 ![Claude Code 的 Output Style、Mailbox、Notification 与宿主输出闭环](/images/posts/claude-code-source-reading-47/47-notifications-mailbox-output-styles-handdrawn.png)
 
-图里最重要的不是箭头数量，而是三条路径没有被画成串行流水线：
+图里的三条路径彼此并行，各自在不同阶段解决一种反馈问题：
 
 - **Output Style 是生成约束。** 它在调用模型以前改变 system prompt。
 - **Mailbox 是内容与控制消息的投递机制。** 它关心目标 Agent、忙闲状态、持久化与消费时机。
 - **Notification 是注意力机制。** 它告诉人“有事发生”，但不承担完整结果的可靠传输。
-- **TUI / SDK 是结果宿主。** 它们决定消息怎样呈现或序列化，和模型的写作风格不是一回事。
+- **TUI / SDK 是结果宿主。** 它们决定消息怎样呈现或序列化；模型写作风格由 Output Style 在生成前约束。
 
 ### 先补四个基础概念
 
@@ -41,9 +53,9 @@ imagePosition: "left"
 
 第二个概念是 **mailbox**。这个词在源码里并不只指一种东西。`utils/mailbox.ts` 是进程内、可按谓词消费的队列；Agent Teams 主要使用 `utils/teammateMailbox.ts` 的文件 inbox，并在 AppState 里保留忙时待交付消息。讨论 mailbox 时必须先说明是哪一层。
 
-第三个概念是 **output style**。它是写给模型的行为提示，例如默认、`Explanatory`、`Learning`，以及用户、项目或插件提供的 Markdown style。它不负责 ANSI 颜色、Ink 布局，也不等于 CLI 的 `--output-format`。
+第三个概念是 **output style**。它是写给模型的行为提示，例如默认、`Explanatory`、`Learning`，以及用户、项目或插件提供的 Markdown style。ANSI 颜色和 Ink 布局由 renderer 负责，CLI 的 `--output-format` 则由输出宿主处理。
 
-第四个概念是 **delivery 与 attention 的区别**。一条 teammate 消息被可靠写入 inbox，解决的是 delivery；终端响铃或桌面弹窗解决的是 attention。Claude Code 会把二者组合，但没有把“响过铃”当成“内容已消费”的确认。
+第四个概念是 **delivery 与 attention 的区别**。一条 teammate 消息被可靠写入 inbox，解决的是 delivery；终端响铃或桌面弹窗解决的是 attention。二者各自保留确认点：inbox 记录读取消费，通知通道只记录发起动作。
 
 ## Output Style：在生成之前决定“怎么说”
 
@@ -70,11 +82,11 @@ export async function getOutputStyleConfig(): Promise<OutputStyleConfig | null> 
 }
 ```
 
-**函数说明：** `getOutputStyleConfig()` 位于 `restored-src/src/constants/outputStyles.ts`。`getAllOutputStyles()` 先放入内置 style，再按 plugin、user、project、managed 的实际数组顺序覆盖同名项；因此同名时后写入的 managed 优先级最高。随后它先找 `forceForPlugin === true` 的插件 style，找不到才读取 settings。
+**函数说明：** `getOutputStyleConfig()` 位于 `restored-src/src/constants/outputStyles.ts`。`getAllOutputStyles()` 先放入内置 style，再按 plugin、user、project、managed 的实际数组顺序覆盖同名项；因此同名时后写入的 managed 优先级最高。随后它从 `allStyles` 中收集 `forcedStyles`，取第一个 `firstForcedStyle`；该数组为空时才读取 settings。
 
-**参数说明：** 函数没有参数，返回 `OutputStyleConfig | null`。；没有配置时回退 `'default'`。settings 指向不存在的名字时，`allStyles[outputStyle] ?? null` 回退 `null`。`forceForPlugin` 可为 `true`、`false` 或 `undefined`，只有严格等于 `true` 才强制。
+**参数说明：** 函数接受零个参数，返回 `OutputStyleConfig | null`。settings 未选择 style 时，`outputStyle` 回退 `'default'`；该名字或显式配置的名字在 `allStyles` 中零匹配时，返回 `null`，后续 system prompt 会保留通用任务说明并跳过专门的 style section。`forceForPlugin` 可为 `true`、`false` 或 `undefined`，只有严格等于 `true` 才进入 `forcedStyles`。
 
-style 真正生效的位置不是 renderer，而是 system prompt：
+style 在 system prompt 装配阶段生效：
 
 ```ts
 const [skillToolCommands, outputStyleConfig, envInfo] = await Promise.all([
@@ -105,15 +117,15 @@ return [
 ].filter(s => s !== null)
 ```
 
-**函数说明：** 这段来自 `restored-src/src/constants/prompts.ts` 的 `getSystemPrompt()`，展示普通主循环怎样读取 style、决定是否保留通用 coding instructions，并把 `# Output Style: ...` 段落加入动态 system prompt。style 因而影响模型随后生成的自然语言与行动方式，而不是事后改写已经生成的消息。
+**函数说明：** 这段来自 `restored-src/src/constants/prompts.ts` 的 `getSystemPrompt()`，展示普通主循环怎样读取 style、决定是否保留通用 coding instructions，并把 `# Output Style: ...` 段落加入动态 system prompt。style 因而在模型生成前影响自然语言与行动方式。
 
-**参数说明：** `getSystemPrompt(tools, model, additionalWorkingDirectories?, mcpClients?)` 的 `tools` 是当前工具数组，`model` 是开放模型标识；两个后置参数都可为 `undefined`。`outputStyleConfig` 只有具体配置或 `null`：为 `null` 时保留通用任务说明但不生成 style section；`keepCodingInstructions === true` 时也保留，`false` 或 `undefined` 时只要存在自定义 style 就移除该通用段。若 `CLAUDE_CODE_SIMPLE` 为真，函数会提前返回极简 prompt；proactive/KAIROS 激活也走另一条提前返回路径，这两条静态可见路径没有拼接 output style，不能假定每种运行模式都应用它。
+**参数说明：** `getSystemPrompt(tools, model, additionalWorkingDirectories?, mcpClients?)` 的 `tools` 是当前工具数组，`model` 是开放模型标识；两个后置参数都可为 `undefined`。`outputStyleConfig` 只有具体配置或 `null`：为 `null` 时保留通用任务说明并跳过 style section；`keepCodingInstructions === true` 时也保留，`false` 或 `undefined` 时只要存在自定义 style 就移除该通用段。若 `CLAUDE_CODE_SIMPLE` 为真，函数会提前返回极简 prompt；proactive/KAIROS 激活也走另一条提前返回路径。这两条静态路径在拼接 output style 前结束，因此适用范围只覆盖普通主循环。
 
-自定义 Markdown 的 `keep-coding-instructions` 接受布尔 `true` / `false`，也接受字符串 `'true'` / `'false'`；其他值落到 `undefined`。插件还可以提供 `force-for-plugin`，但非插件 style 设置这个字段只会记录警告并忽略。这些细节说明 output style 是一段有来源和优先级的配置，不是随手附加在用户 prompt 后面的文本。
+自定义 Markdown 的 `keep-coding-instructions` 接受布尔 `true` / `false`，也接受字符串 `'true'` / `'false'`；其他值落到 `undefined`。插件还可以提供 `force-for-plugin`，其他来源设置该字段会记录警告并忽略。output style 因此是一段带来源、优先级和解析规则的 system-prompt 配置。
 
 ## UI Notification：短暂状态不应污染对话
 
-TUI 内部通知适合展示升级、IDE 状态、MCP 连接、rate limit、插件安装等短暂反馈。它们被放在 AppState 的 `notifications.current` 与 `notifications.queue` 中，而不是追加为 user/assistant message。
+TUI 内部通知适合展示升级、IDE 状态、MCP 连接、rate limit、插件安装等短暂反馈。它们进入 AppState 的 `notifications.current` 与 `notifications.queue`，对话事实则继续使用 user/assistant message。
 
 队列提供优先级、去重、折叠和失效关系：
 
@@ -138,11 +150,11 @@ export function getNext(queue: Notification[]): Notification | undefined {
 
 **函数说明：** `getNext()` 位于 `restored-src/src/context/notifications.tsx`，由 `useNotifications()` 的 `processQueue()` 调用。普通通知等待当前项结束后按优先级选择；同优先级保留 reduce 首次遇到的项。`immediate` 会走单独分支，立即替换当前通知，并只把原来非 immediate、且未被失效的通知放回队列。
 
-**参数说明：** `queue` 是 `Notification[]`，通知内容只能是 `text` 或 `jsx` 两种联合类型；`priority` 必须是四个字符串之一。`timeoutMs` 可为数字或 `undefined`，缺失时回退 8000 毫秒；源码没有在类型层限制负数或上限。`invalidates` 可为 key 数组或 `undefined`，用于清掉已经过时的通知。`fold` 可为合并函数或 `undefined`；存在时相同 key 可以更新当前项或队列项，否则相同 key 被去重。空队列返回 `undefined`。
+**参数说明：** `queue` 是 `Notification[]`，通知内容只能是 `text` 或 `jsx` 两种联合类型；`priority` 必须是 `'immediate'`、`'high'`、`'medium'`、`'low'` 之一，数值映射依次为 0、1、2、3，数值越小越先出队。`timeoutMs` 可为数字或 `undefined`，缺失时回退 8000 毫秒；负数和超大值也会沿数字路径进入定时器。`invalidates` 可为 key 数组或 `undefined`，用于清掉已经过时的通知。`fold` 可为合并函数或 `undefined`；存在时相同 key 可以更新当前项或队列项，否则相同 key 被去重。空队列返回 `undefined`。
 
 这层通知的关键价值，是**状态反馈不进入 transcript**。如果“插件已安装”被当作普通 assistant message，resume、compact、SDK 消费者和模型下一轮都会把一条纯 UI 状态当成对话事实。AppState notification 用完即过期，正好表达了它的短暂性。
 
-## OS Notification 与 Hook：唤回人，而不是搬运完整答案
+## OS Notification 与 Hook 负责唤回用户
 
 当 Claude 完成工作、等待输入、请求审批或完成 MCP elicitation 时，运行时还可以走操作系统/终端通知。入口先执行用户配置的 Notification hooks，再选择本地 channel：
 
@@ -196,9 +208,9 @@ async function sendToChannel(
 
 **函数说明：** `sendNotification()` 与 `sendToChannel()` 位于 `restored-src/src/services/notifier.ts`。Hook 和本地 channel 是两段连续动作：即使 channel 是 `notifications_disabled`，`executeNotificationHooks()` 仍已执行。终端实现位于 `ink/useTerminalNotification.ts`，通过 OSC 序列适配 iTerm2、Kitty、Ghostty，或写原始 BEL。
 
-**参数说明：** `notif.message` 与 `notificationType` 是必填开放字符串，`title` 可为字符串或 `undefined`，缺失时本地 channel 使用 `'Claude Code'`。`preferredNotifChannel` 的源码可选值是 `'auto'`、`'iterm2'`、`'iterm2_with_bell'`、`'terminal_bell'`、`'kitty'`、`'ghostty'`、`'notifications_disabled'`，新配置默认 `'auto'`。未知字符串落到 `'none'`，channel 内异常被捕获为 `'error'`。`auto` 依据检测到的终端选择能力。
+**参数说明：** `notif` 是 Hook 与 channel 共享的原始 `NotificationOptions`；`sendToChannel()` 内的 `opts` 是同一对象的参数名，各 channel 从中读取消息和可选标题，并在 Kitty/Ghostty 分支补入回退标题。`notif.message` 与 `notificationType` 是必填开放字符串，`title` 可为字符串或 `undefined`，缺失时本地 channel 使用 `'Claude Code'`。`preferredNotifChannel` 的源码可选值是 `'auto'`、`'iterm2'`、`'iterm2_with_bell'`、`'terminal_bell'`、`'kitty'`、`'ghostty'`、`'notifications_disabled'`，新配置默认 `'auto'`。未知字符串落到 `'none'`，channel 内异常被捕获为 `'error'`。`auto` 依据检测到的终端选择能力。
 
-REPL 的“Claude is waiting for your input”还会检查完成时间、最近交互、弹窗和工具 UI，避免用户刚看完答案就立刻收到提醒。这里传出去的是一句注意力摘要和 `notificationType`，完整回答仍留在 TUI 或 SDK 输出里。Notification hook 可以接企业通知系统，但 Hook 成功同样不等于收件人已经阅读。
+REPL 的“Claude is waiting for your input”还会检查完成时间、最近交互、弹窗和工具 UI，避免用户刚看完答案就立刻收到提醒。这里传出去的是一句注意力摘要和 `notificationType`，完整回答仍留在 TUI 或 SDK 输出里。Notification hook 可以接企业通知系统；阅读回执需要由目标系统另行提供。
 
 ## Mailbox 有两层：进程内队列与团队 inbox
 
@@ -229,15 +241,15 @@ poll(fn: (msg: Message) => boolean = () => true): Message | undefined {
 }
 ```
 
-**函数说明：** 这段来自 `restored-src/src/utils/mailbox.ts` 的 `Mailbox.send()` 与 `poll()`。`MailboxProvider` 为 React 树创建实例，`useMailboxBridge()` 在 REPL 不忙时 poll 一条并交给 `onSubmitMessage()`。`revision` 配合 `useSyncExternalStore` 触发消费检查。
+**函数说明：** 这段来自 `restored-src/src/utils/mailbox.ts` 的 `Mailbox.send()` 与 `poll()`。`send()` 先递增 `_revision`，再用 `idx` 找到 `waiters` 中第一个谓词匹配项；找到的 `waiter` 会从数组移除并立即 resolve，否则消息进入 `queue`。`poll()` 则在 `queue` 中查找并移除第一条匹配消息。`MailboxProvider` 为 React 树创建实例，`useMailboxBridge()` 在 REPL 不忙时 poll 一条并交给 `onSubmitMessage()`；递增的 `_revision` 配合 `useSyncExternalStore` 触发消费检查。
 
-**参数说明：** `Message.source` 只能是 `'user' | 'teammate' | 'system' | 'tick' | 'task'`；`from` 与 `color` 可为字符串或 `undefined`。`send()` 没有返回值；一个消息最多唤醒一个匹配 waiter。`poll()` 的谓词可省略，默认接受任意消息；没有匹配项返回 `undefined`。`receive()` 采用相同默认谓词，但没有 timeout 或 AbortSignal 参数，若一直没有消息，Promise 会保持 pending。还原源码中能看到 provider、consumer 和数据结构，却没有找到调用这个实例 `send()` 的静态生产者，因此不能把它描述成所有远程事件已经实际使用的总线。
+**参数说明：** `Message.source` 只能是 `'user' | 'teammate' | 'system' | 'tick' | 'task'`；`from` 与 `color` 可为字符串或 `undefined`。`send()` 返回 `void`；一个消息最多唤醒一个匹配 waiter。`poll()` 的谓词可省略，默认接受任意消息；零匹配时返回 `undefined`。`receive()` 采用相同默认谓词，等待时长由消息到达决定，Promise 会持续 pending。还原源码中能看到 provider、consumer 和数据结构；静态调用图里未找到该实例 `send()` 的生产者，所以已证明的使用范围只到 REPL consumer。
 
 Agent Teams 的 mailbox 则是另一套系统：每个 Agent 有一个 JSON inbox，路径位于 `~/.claude/teams/<team>/inboxes/<agent>.json`。写入时加文件锁，读不到文件时返回空数组。它用磁盘换来了跨进程 teammate 的可见性，但也引入了轮询、去重和已读标记。
 
 ## 地址先决定受众，再决定传输
 
-`SendMessage` 不是简单地把所有内容 append 到同一个文件。它先解释收件地址，再选择 bridge、UDS、进程内 Agent、广播或文件 inbox：
+`SendMessage` 先解释收件地址，再选择 bridge、UDS、进程内 Agent、广播或文件 inbox：
 
 ```ts
 const inputSchema = lazySchema(() =>
@@ -294,7 +306,7 @@ async call(input, context, canUseTool, assistantMessage) {
 
 **参数说明：** `input.to` 是必填字符串；基础模式允许 teammate 名字或 `'*'`，`UDS_INBOX` 构建还允许 `uds:` 与 `bridge:` 地址。`input.message` 可以是普通字符串，也可以是 `shutdown_request`、`shutdown_response`、`plan_approval_response` 三类结构化消息；结构化消息禁止广播和跨 session。`summary` 可为字符串或 `undefined`：发给 teammate/团队的普通字符串要求非空 summary，schema 描述建议 5–10 词；bridge 与 UDS 字符串路径在校验中提前返回，不要求 summary。`approve` 使用 semantic boolean，接受布尔值以及字符串 `'true'` / `'false'`，其他值仍交给内部 boolean schema 拒绝。拒绝 shutdown 时 `reason` 必须非空；拒绝 plan 时缺少 `feedback` 回退 `'Plan needs revision'`。bridge 发送前会重新检查连接；进程内 Agent 已停止时恢复可能失败，`success: true` 表示该路由动作已触发，是否对方成功执行需看后续状态。
 
-普通文件写入也不是“读、push、写”这么随意：
+普通文件写入通过锁内重读保证并发更新：
 
 ```ts
 export async function writeToMailbox(
@@ -326,7 +338,7 @@ export async function writeToMailbox(
 
 **函数说明：** `writeToMailbox()` 位于 `restored-src/src/utils/teammateMailbox.ts`。它先确保目录和空 inbox 存在，再用 `proper-lockfile` 的异步锁串行化并发写者；拿锁以后重新读取，避免基于旧快照覆盖别人的消息，最后把新消息标为 `read: false`。
 
-**参数说明：** `recipientName` 是 Agent 名字，不是 UUID，路径会经过 `sanitizePathComponent()`；`message` 必须提供 `from`、`text`、ISO timestamp，`color` 与 `summary` 可为 `undefined`；调用者不能传 `read`。`teamName` 可省略，依次回退当前 team 环境和 `'default'`。锁重试配置为 10 次，退避 5–100 毫秒；。
+**参数说明：** `recipientName` 是经过 `sanitizePathComponent()` 处理的 Agent 名字；`message` 必须提供 `from`、`text`、ISO timestamp，`color` 与 `summary` 可为 `undefined`，缺失时省略对应展示元数据，投递目标保持不变；`read` 由函数固定写成 `false`。`teamName` 可省略，依次回退当前 team 环境和 `'default'`。锁重试配置为 10 次，退避 5–100 毫秒；`release` 在拿锁前为 `undefined`，因此成功获得锁后 `finally` 才调用释放函数。
 
 ## 目标 Agent 忙时，消息先排队；空闲时，才成为下一轮
 
@@ -359,9 +371,9 @@ if (submitted) {
 }
 ```
 
-**函数说明：** 这段来自 `restored-src/src/hooks/useInboxPoller.ts`。目标会话空闲且没有聚焦弹窗时，普通消息立即包装为 `<teammate-message>` 并提交新 turn；忙时进入 `AppState.inbox.messages`，状态为 `'pending'`，等空闲 effect 再试。只有“已提交”或“已可靠排入 AppState”后才把文件消息标为 read，降低崩溃窗口里的永久丢失风险。
+**函数说明：** 这段来自 `restored-src/src/hooks/useInboxPoller.ts`。目标会话空闲且 `focusedInputDialog` 为空时，普通消息立即包装为 `<teammate-message>` 并提交新 turn；忙时进入 `AppState.inbox.messages`，状态为 `'pending'`，等空闲 effect 再试。消息成功提交或可靠排入 AppState 后才把文件消息标为 read，降低崩溃窗口里的永久丢失风险。
 
-**参数说明：** `enabled`、`isLoading` 是布尔值；`focusedInputDialog` 可以是当前 dialog 标识或 `undefined`。`onSubmitMessage(content)` 接收开放字符串并返回布尔值，`false` 表示本次没有接收，不等于消息无效。AppState inbox 状态在此处可见 `'pending'` 与 `'processed'`；文件消息还有独立 `read: boolean`，二者不能混用。轮询间隔由 `INBOX_POLL_INTERVAL_MS` 常量控制；静态源码能说明尝试时机，不能承诺跨进程调度延迟。
+**参数说明：** `enabled`、`isLoading` 是布尔值；`focusedInputDialog` 可以是当前 dialog 标识或 `undefined`。`onSubmitMessage(content)` 接收开放字符串并返回布尔值，`false` 表示本次提交未被接收，消息随后留在待处理路径。AppState inbox 状态在此处可见 `'pending'` 与 `'processed'`；文件消息另有独立 `read: boolean`，两组状态各自服务内存重试和磁盘消费。轮询间隔由 `INBOX_POLL_INTERVAL_MS` 常量控制；跨进程调度延迟还取决于进程负载与文件系统。
 
 如果消息在一个长工具回合中到达，attachment 链还会读取 unread mailbox 与 AppState pending 项，做 `from + timestamp + text prefix` 去重，再构造 `teammate_mailbox` attachment。结构化协议消息明确被过滤，留给 InboxPoller 的专门 handler。Attachment 构建成功后才标已读/processed，这使 teammate 反馈既能在空闲时开启新 turn，也能在合适的工具边界进入正在延续的上下文。
 
@@ -400,9 +412,9 @@ switch (options.outputFormat) {
 
 **函数说明：** 这段来自 `restored-src/src/cli/print.ts` 的 `runHeadless()` 尾部。它说明 output host 的职责是序列化已有 SDK messages：默认写最终文本，`json` 写最终 result 或 verbose 全量数组，`stream-json` 在迭代期间逐条写 NDJSON。SDK/control 消息、task notification 与 stream event 还有各自过滤和写出规则。
 
-**参数说明：** `options.outputFormat` 在这里识别 `'json'`、`'stream-json'` 或其他/`undefined`，后者走默认文本；CLI 上游还负责拒绝不支持的值。`verbose` 可为 `true`、`false` 或 `undefined`：`json + true` 才积累全量消息，`stream-json` 在 print 模式要求 verbose。`lastMessage` 可为 `undefined`，缺少 `result` 会抛错；result 的 `subtype` 包含 `success` 及 max turns、budget、execution、structured output retries 等错误分支。。
+**参数说明：** `options.outputFormat` 在这里识别 `'json'`、`'stream-json'` 或其他/`undefined`，后者进入默认文本分支；CLI 上游还负责拒绝不支持的值。`verbose` 可为 `true`、`false` 或 `undefined`：只有 `json + true` 写出累积的 `messages`，否则 JSON 模式只写 `lastMessage`；`stream-json` 在 print 模式要求 verbose，并已在迭代过程中逐条写出，因此尾部不再重复输出。`lastMessage` 可为 `undefined`，JSON 和默认文本分支缺少 `result` 都会抛错；result 的 `subtype` 包含 `success` 及 max turns、budget、execution、structured output retries 等错误分支。
 
-SDK 宿主还可能接收 `control_request`、权限响应、task notification 和 session state。它们是机器可消费事件；TUI notification 则是 React 状态。两边共享的是底层 Agent 与消息模型，不是同一个显示组件。
+SDK 宿主还可能接收 `control_request`、权限响应、task notification 和 session state。它们是机器可消费事件；TUI notification 则是 React 状态。两边共享底层 Agent 与消息模型，各自由协议 serializer 和 React 组件呈现。
 
 ## 一次完整闭环，按时间顺序看
 
@@ -416,7 +428,7 @@ SDK 宿主还可能接收 `control_request`、权限响应、task notification �
 6. 完成、等待、审批等需要人注意的事件，另行加入 TUI notification 或调用 OS/terminal notification；Notification hooks 可把摘要转交外部系统。
 7. 人看到提醒后返回并输入，或 teammate 消费 inbox 后回复。新输入再次进入 Query Loop，闭环成立。
 
-这条闭环里没有“exactly once”的端到端承诺。文件锁减少并发覆盖，read/pending/processed 降低丢失概率，dedup 降低重复注入，地址校验降低错投，优先级减少提示轰炸；但进程崩溃、Hook 失败、终端静音、网络断开、模型误解和工具副作用仍分别属于不同失败域。
+这条闭环提供的是分层确认语义：文件锁减少并发覆盖，read/pending/processed 降低丢失概率，dedup 降低重复注入，地址校验降低错投，优先级减少提示轰炸。进程崩溃、Hook 失败、终端静音、网络断开、模型误解和工具副作用仍分别属于不同失败域，源码未建立跨越全部层级的 exactly-once 协议。
 
 ## 小结
 
@@ -424,7 +436,14 @@ Claude Code 的最后一段运行闭环，本质上是一次“受众分离”�
 
 Output Style 面向即将推理的模型，规定回答的表达方式；Mailbox 面向另一个 Agent 或会话，保存内容、协议和消费时机；Notification 面向暂时离开终端的人，用短摘要争取注意力；TUI 与 SDK/print 则面向宿主，决定完整结果怎样显示或序列化。
 
-这套设计没有追求一条总线包办所有事情，而是让每层保留自己的确认语义：system prompt 是否装配、消息是否入箱、Agent 是否消费、结果是否写出、提醒是否发起，分别可观察、可失败、可恢复。也正因为这些边界被拆开，Claude Code 才能从一次用户输入出发，经过模型、工具、权限、任务、团队、远程宿主和产品体验层，最后把结果送到正确的对象，再等待下一次输入。
+这套设计让每层保留自己的确认语义：system prompt 是否装配、消息是否入箱、Agent 是否消费、结果是否写出、提醒是否发起，分别可观察、可失败、可恢复。也正因为这些边界被拆开，Claude Code 才能从一次用户输入出发，经过模型、工具、权限、任务、团队、远程宿主和产品体验层，最后把结果送到正确的对象，再等待下一次输入。
 
 到这里，整个源码解读系列也形成了自己的闭环：从一次请求怎样进入 Agent 开始，最终回到结果怎样离开 Agent、抵达人或另一个 Agent。
 
+## 参考资料
+
+- [Claude Code Output Styles](https://code.claude.com/docs/en/output-styles)
+
+- [Claude Code Hooks：Notification](https://code.claude.com/docs/en/hooks)
+
+- [Claude Code Agent Teams：Mailbox](https://code.claude.com/docs/en/agent-teams)

@@ -10,11 +10,23 @@ image: "/images/posts/claude-code-source-reading-16/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **上下文平面**：system prompt、项目指令与消息历史通过不同通道进入同一次模型请求。
+
+- **提示词分层**：稳定规则、动态环境和任务消息按更新频率分层，便于复用与定位来源。
+
+- **缓存边界**：前缀顺序和内容变化决定 prompt cache 的命中范围，分块结构直接影响成本。
+
+![系统提示词、项目上下文与消息历史三条通道](/images/posts/claude-code-source-reading-16/16-context-planes-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 上一篇最后留下的问题是：搜索结果和项目文件找齐以后，Claude Code 如何把 CLAUDE.md、cwd、git 状态、工具与用户配置组装成 system prompt 和本轮上下文？
 
-先说结论：它没有把所有内容拼成一段巨大的字符串，而是分成三条通道。
+先说结论：它把上下文分成 system prompt、user context 和 system context 三条通道。
 
 第一条是 **system prompt**。固定行为规范、当前模型、cwd、平台、Shell、已启用工具带来的使用指引，以及语言、output style 等设置，会被组装成一个字符串数组。第二条是 **user context**。CLAUDE.md、rules 和当前日期会被包装成一条 `isMeta: true` 的 user message，放到本轮历史最前面。第三条是 **system context**。会话开始时的 git 分支、工作区状态和最近提交，会被追加到 system prompt 尾部。
 
@@ -28,9 +40,9 @@ messages = CLAUDE.md/currentDate 元消息 + 对话历史 + 本轮输入
 tools = 当前工具集合对应的 API Schema
 ```
 
-这段最小模型不是源码函数，而是本文对三条真实组装路径的概括。`system`、`messages`、`tools` 是最终模型调用中彼此独立的字段；后文会逐条回到还原源码验证它们。
+这段最小模型是本文对三条真实组装路径的概括。`system`、`messages`、`tools` 是最终模型调用中彼此独立的字段；后文会逐条回到还原源码验证它们。
 
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块都是短摘录，省略了与当前结论无关的日志、埋点和实验分支；还原路径不等于 Anthropic 内部仓库的原始目录。
+本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块都是短摘录，省略了与当前结论无关的日志、埋点和实验分支；还原路径只用于定位本文引用的源码。
 
 ## 一次模型请求，其实有三条上下文通道
 
@@ -38,13 +50,13 @@ tools = 当前工具集合对应的 API Schema
 
 ![Claude Code system prompt 与项目上下文组装流程](/images/posts/claude-code-source-reading-16/16-system-prompt-context-handdrawn.png)
 
-这里需要先区分三个基础概念。
+这里先明确三条通道各自承担的协议职责。
 
-**System prompt** 是模型请求里的高优先级指令，适合放稳定的身份、行为边界和环境说明。源码用 `SystemPrompt` 这个品牌类型表示 `readonly string[]`，保留分块，而不是过早合并成一段文本。
+**System prompt** 承载稳定的身份、行为边界和环境说明。源码用 `SystemPrompt` 这个品牌类型表示 `readonly string[]`，使稳定前缀、动态区块与缓存边界保持可追踪。
 
-**Message context** 是对话历史。CLAUDE.md 虽然也包含指令，但在这条实现中会被包装成 meta user message。它仍位于用户消息通道，只是通过 `<system-reminder>` 明确告诉模型这是可按需使用的上下文。
+**Message context** 承载对话历史。CLAUDE.md 在这条实现中被包装成 meta user message，通过 `<system-reminder>` 标明其按需使用的上下文属性。
 
-**Tool schema** 是模型能够调用什么工具的机器可读契约，包括名称、描述和输入 JSON Schema。它与“应该怎样使用工具”的自然语言说明有关联，但不是同一份数据。
+**Tool schema** 是模型能够调用什么工具的机器可读契约，包括名称、描述和输入 JSON Schema。自然语言 prompt 负责使用策略，Schema 负责输入结构，两者分别进入请求。
 
 为什么要分开？最直接的原因是职责不同：稳定 prompt 可以命中缓存，CLAUDE.md 可以作为会话上下文独立注入，工具 Schema 则必须满足 API 的结构化协议。若全部揉成一个字符串，任何 git 状态或工具变化都可能让稳定前缀失去缓存价值，模型也无法得到可靠的输入约束。
 
@@ -86,11 +98,11 @@ export async function fetchSystemPromptParts({
 }
 ```
 
-`fetchSystemPromptParts` 同时准备默认 prompt、user context 和 system context。`tools` 是本轮可用工具数组；`mainLoopModel` 是主循环模型 ID；`additionalWorkingDirectories` 是额外工作目录，允许空数组；`mcpClients` 是当前 MCP 连接数组，也允许为空。`customSystemPrompt` 只有 `string` 和 `undefined` 两种静态类型：`undefined` 表示构造默认 prompt；只要不是 `undefined`，哪怕是空字符串，也会跳过默认 prompt 和 `getSystemContext()`。user context 始终读取。
+`fetchSystemPromptParts` 同时准备默认 prompt、user context 和 system context。`tools` 是本轮可用工具数组；`mainLoopModel` 是主循环模型 ID；`additionalWorkingDirectories` 是额外工作目录，允许空数组；`mcpClients` 是当前 MCP 连接数组，也允许为空。`customSystemPrompt` 只有 `string` 和 `undefined` 两种静态类型：`undefined` 构造 `defaultSystemPrompt` 与 `systemContext`；任意字符串（包括空字符串）都让这两个字段分别返回空数组与空对象。`userContext` 始终读取。
 
-三项使用 `Promise.all` 并行获取，因为它们在这一步没有数据依赖。这样做不是为了改变顺序，返回对象仍保留三个命名字段；它只让文件读取、环境探测和 git 查询可以重叠。
+三项使用 `Promise.all` 并行获取，因为它们在这一步彼此独立。返回对象仍按 `defaultSystemPrompt`、`userContext`、`systemContext` 三个命名字段组装，并行只让文件读取、环境探测和 git 查询重叠执行。
 
-这里已经出现第一个重要边界：自定义 system prompt 是“替换默认值”，不是“在默认值前加一段”。而且这条 QueryEngine 路径连默认 system context 也会一起跳过。调用方若只想补充指令，应该走后面介绍的 `appendSystemPrompt`，不能把 `customSystemPrompt` 当普通追加项。
+这里已经出现第一个重要边界：`customSystemPrompt` 采用替换语义，并让这条 QueryEngine 路径同时跳过默认 system context。调用方若只想补充指令，应该走后面介绍的 `appendSystemPrompt`。
 
 ## 第二步：默认 system prompt 先稳定、后动态
 
@@ -121,7 +133,7 @@ export async function getSystemPrompt(
 
 `getSystemPrompt` 返回 `Promise<string[]>`，每个元素是一块 prompt。`tools` 和 `model` 必填；`additionalWorkingDirectories`、`mcpClients` 都可为 `undefined`，调用方也常传空数组。环境变量 `CLAUDE_CODE_SIMPLE` 经 `isEnvTruthy` 判断为真时，函数直接返回只含身份、cwd 和会话日期的一块简化 prompt，不再执行后续完整组装。
 
-普通路径会并行读取 Skill 命令、output style 和环境信息。`getInitialSettings()` 提供语言等初始设置；`enabledTools` 只保存当前工具名称，用来决定 prompt 里是否出现某些工具使用指引。也就是说，用户配置在这里影响的是 prompt 分块选择，不是把整个 settings 对象序列化给模型。
+普通路径会并行读取 Skill 命令、output style 和环境信息。`getInitialSettings()` 提供语言等初始设置；`enabledTools` 只保存当前工具名称，用来决定 prompt 里是否出现某些工具使用指引。运行时只读取组装函数需要的配置字段，并据此选择 prompt 分块。
 
 `computeSimpleEnvInfo` 会生成 `# Environment` 区块。它明确写入 primary working directory、是否是 git 仓库、额外工作目录、平台、Shell、OS 版本、模型与知识截止时间等信息。`additionalWorkingDirectories` 为 `undefined` 或空数组时，对应段落不会出现；无法识别知识截止时间时，返回值是 `null`，也会被过滤。
 
@@ -144,13 +156,13 @@ return [
 ].filter(s => s !== null)
 ```
 
-这段 `getSystemPrompt` 返回逻辑中，`outputStyleConfig` 可以是对象或 `null`。配置为 `null`，或者 `keepCodingInstructions === true` 时，保留默认 coding instructions；明确为 `false` 时跳过。`shouldUseGlobalCacheScope()` 为真才插入动态边界标记。数组最后只过滤严格等于 `null` 的元素，因此各 section 应返回字符串或 `null`，而不是依赖其他假值。
+这段 `getSystemPrompt` 返回逻辑中，`outputStyleConfig` 可以是对象或 `null`。`null` 走默认 coding instructions，`keepCodingInstructions === true` 同样保留该区块，明确为 `false` 时跳过。`shouldUseGlobalCacheScope()` 为真才插入动态边界标记。数组最后只过滤严格等于 `null` 的元素，因此空字符串仍会保留并参与后续数组顺序。
 
 工具在这一层只影响 `getUsingYourToolsSection(enabledTools)` 等自然语言区块。例如 Read、Edit、Task 是否可用，会改变给模型的操作建议。实际工具 Schema 仍会在 `callModel` 时通过 `tools` 参数单独传入。这个分工很重要：prompt 解释策略，Schema 约束结构。
 
 ## 为什么 prompt 要保留为“分块数组”
 
-动态区块不是每轮全部重算。`restored-src/src/constants/systemPromptSections.ts` 定义了两种 section：
+动态区块按 section 的缓存属性选择复用或重算。`restored-src/src/constants/systemPromptSections.ts` 定义了两种 section：
 
 ```ts
 export function systemPromptSection(
@@ -169,7 +181,7 @@ export function DANGEROUS_uncachedSystemPromptSection(
 }
 ```
 
-`systemPromptSection` 的 `name` 是缓存键，`compute` 返回 `string | null | Promise<string | null>`，`cacheBreak` 固定为 `false`。`DANGEROUS_uncachedSystemPromptSection` 把 `cacheBreak` 固定为 `true`，第三个 `_reason` 是必须提供的说明字符串，但函数运行时不使用它；它用于迫使调用者解释为什么值得破坏缓存。两个函数都没有 `undefined` 返回类型。
+`systemPromptSection` 的 `name` 是缓存键，`compute` 返回 `string | null | Promise<string | null>`，`cacheBreak` 固定为 `false`。`DANGEROUS_uncachedSystemPromptSection` 把 `cacheBreak` 固定为 `true`，第三个 `_reason` 是必须提供的说明字符串，但函数运行时不使用它；它用于迫使调用者解释为什么值得破坏缓存。两个函数的返回联合只包含 `string | null`。
 
 解析时，普通区块优先复用缓存，易变区块重新计算：
 
@@ -192,13 +204,13 @@ export async function resolveSystemPromptSections(
 }
 ```
 
-`resolveSystemPromptSections` 的唯一参数是有序的 `SystemPromptSection[]`，返回同顺序的 `string | null` 数组。`cacheBreak: false` 且缓存已有名字时，直接复用；缓存值为 `undefined` 时通过 `?? null` 回退。`cacheBreak: true` 会每次执行 `compute()`，随后仍把结果写入缓存，但下一次不会读取这份缓存。
+`resolveSystemPromptSections` 的唯一参数 `sections` 是有序的 `SystemPromptSection[]`，返回同顺序的 `string | null` 数组。`cacheBreak: false` 且缓存已有名字时，直接复用；缓存值为 `undefined` 时通过 `?? null` 回退。`cacheBreak: true` 会每次执行 `compute()`，随后仍把结果写入缓存，但下一次不会读取这份缓存。
 
-这解释了为什么实现没有在最后一刻才拼出一条字符串。分块既能表达稳定前缀与动态尾部的边界，也能让 `/clear`、`/compact` 等动作集中清理 section 状态。。
+分块既能表达稳定前缀与动态尾部的边界，也能让 `/clear`、`/compact` 等动作集中清理 section 状态。
 
 ## 第三步：CLAUDE.md 按层级发现，但走 user context
 
-CLAUDE.md 的发现逻辑在 `restored-src/src/utils/claudemd.ts`。初始加载顺序不是“离 cwd 最近的文件覆盖前面的文件”，而是把多层文件依次收集：Managed、User，然后从文件系统根方向走到 cwd，加载 Project 和 Local。
+CLAUDE.md 的发现逻辑在 `restored-src/src/utils/claudemd.ts`。初始加载采用累积语义：先收集 Managed、User，再从文件系统根方向走到 cwd，加载 Project 和 Local。
 
 `getMemoryFiles(forceIncludeExternal = false)` 的参数是布尔值，省略时默认 `false`。`true` 会允许外部 include；默认路径还会查看项目配置中的 `hasClaudeMdExternalIncludesApproved`，未批准时回退为 `false`。User 文件允许外部 include，Project/Local 则受上述批准状态与 `claudeMdExcludes` 等规则约束。
 
@@ -221,9 +233,9 @@ const claudeMd = shouldDisableClaudeMd
 setCachedClaudeMdContent(claudeMd || null)
 ```
 
-这段代码位于无参数的 `getUserContext` 内，外层由 `memoize` 在会话期间复用结果。`CLAUDE_CODE_DISABLE_CLAUDE_MDS` 为真时硬关闭自动加载；bare mode 只有在没有显式额外目录时才跳过发现，显式 `--add-dir` 仍会保留。`claudeMd` 可以是字符串或 `null`，随后函数只在它非空时加入返回对象；`currentDate` 则始终存在。
+这段代码位于无参数的 `getUserContext` 内，外层由 `memoize` 在会话期间复用结果。`CLAUDE_CODE_DISABLE_CLAUDE_MDS` 为真时硬关闭自动加载；bare mode 在省略显式额外目录时跳过发现，显式 `--add-dir` 仍会保留。`claudeMd` 可以是字符串或 `null`，随后函数只在它非空时加入返回对象；`currentDate` 则始终存在。
 
-`getClaudeMds` 不会丢掉文件来源。它把每份内容写成 `Contents of <path>...`，并标明 Project 是提交进代码库的项目指令、Local 是未提交的私有项目指令、User 是全局私有指令。这里没有“后文件覆盖前文件”的赋值动作；多份指令共同进入上下文。若内容互相冲突，这段源码没有提供一个确定性的文本合并器，最终行为还取决于来源说明、排列顺序和模型判断。
+`getClaudeMds` 会保留文件来源。它把每份内容写成 `Contents of <path>...`，并标明 Project 是提交进代码库的项目指令、Local 是未提交的私有项目指令、User 是全局私有指令。多份指令共同进入上下文；发生冲突时，静态源码只确认来源说明与排列顺序，最终行为还取决于模型判断。
 
 接下来，`prependUserContext` 把这个对象变成真正的消息：
 
@@ -254,9 +266,9 @@ export function prependUserContext(
 }
 ```
 
-`prependUserContext` 的 `messages` 是压缩处理后的本轮消息数组，`context` 是任意字符串键值对象。测试环境直接返回原数组；空对象也不增加消息。普通路径创建一条 `isMeta: true` 的 user message，每个字段用 `# key` 标题展开，然后放到历史最前面。函数返回新数组，不修改原数组；这里没有 `null` 参数分支。
+`prependUserContext` 的 `messages` 是压缩处理后的本轮消息数组，`context` 是任意字符串键值对象。测试环境直接返回原数组；空对象也跳过消息注入。普通路径创建一条 `isMeta: true` 的 user message，`content` 保存 `<system-reminder>` 与按 `# key` 展开的字段，随后把这条消息放到历史最前面。函数返回新数组并保持原数组不变；参数类型排除 `null`。
 
-所以“CLAUDE.md 在 system prompt 里”只是宽泛说法。按这个版本的实际请求结构，它属于模型上下文，但位于 `messages`，不是 API 的 `system` 字段。
+所以“CLAUDE.md 在 system prompt 里”只是宽泛说法。按这个版本的实际请求结构，它属于模型上下文，具体位于 `messages`；API 的 `system` 字段只接收 `systemPrompt`。
 
 ## 第四步：git 状态是一次会话快照
 
@@ -279,7 +291,7 @@ const injection = feature('BREAK_CACHE_COMMAND')
   : null
 ```
 
-这段代码位于无参数的 `getSystemContext` 内，外层也使用 `memoize`。`startTime` 只用于诊断耗时。远程模式 `CLAUDE_CODE_REMOTE` 为真，或 `shouldIncludeGitInstructions()` 为假时，`gitStatus` 为 `null`；非 git 目录、命令失败也会让 `getGitStatus()` 返回 `null`。`injection` 只在编译期 feature `BREAK_CACHE_COMMAND` 存在时读取，后续还要是非空字符串才加入返回对象。。
+这段代码位于无参数的 `getSystemContext` 内，外层也使用 `memoize`。`startTime` 只用于诊断耗时。远程模式 `CLAUDE_CODE_REMOTE` 为真，或 `shouldIncludeGitInstructions()` 为假时，`gitStatus` 为 `null`；非 git 目录、命令失败也会让 `getGitStatus()` 返回 `null`。`injection` 只在编译期 feature `BREAK_CACHE_COMMAND` 存在时读取，后续还要是非空字符串才加入返回对象。
 
 `getGitStatus` 并行读取当前分支、主分支、`git status --short`、最近 5 条提交和 `git config user.name`。status 最多保留 2,000 个字符，超过时加截断说明。生成文本第一句就明确指出：这是会话开始时的 snapshot，不会随对话更新。
 
@@ -333,9 +345,9 @@ tools: toolUseContext.options.tools,
 signal: toolUseContext.abortController.signal,
 ```
 
-这五行是 `queryLoop` 传给 `deps.callModel` 的连续字段。`messages` 由压缩后的 `messagesForQuery` 加 user context 得到；`systemPrompt` 是前一步通过 `appendSystemContext` 得到的 `fullSystemPrompt`；`tools` 直接取当前 `toolUseContext.options.tools`。`thinkingConfig` 的源码联合类型只有三种：`{ type: 'adaptive' }`、`{ type: 'enabled'; budgetTokens: number }` 和 `{ type: 'disabled' }`；`enabled` 才要求数字预算。`signal` 是取消信号。紧随其后的 `options` 中，`toolChoice` 明确为 `undefined`，表示这条路径没有强制指定某个工具；`isNonInteractiveSession` 是布尔值，用于区分无头和交互宿主的行为。
+这五行是 `queryLoop` 传给 `deps.callModel` 的连续字段。`messages` 由压缩后的 `messagesForQuery` 加 user context 得到；`systemPrompt` 是前一步通过 `appendSystemContext` 得到的 `fullSystemPrompt`；`tools` 直接取当前 `toolUseContext.options.tools`。`thinkingConfig` 的源码联合类型只有三种：`{ type: 'adaptive' }`、`{ type: 'enabled'; budgetTokens: number }` 和 `{ type: 'disabled' }`；`enabled` 才要求数字预算。`signal` 是取消信号。紧随其后的 `options` 中，`toolChoice: undefined` 让模型自由选择工具；`isNonInteractiveSession` 是布尔值，用于区分无头和交互宿主的行为。
 
-这段调用也回答了“本轮上下文”究竟是什么：不是某个单独的 `context` 对象，而是 `systemPrompt`、经过处理的消息历史、工具集合和模型选项的组合。前面第 15 篇得到的搜索结果，如果已经作为 `tool_result` 进入历史，就位于 `messagesForQuery`；它不会重新被搬进 CLAUDE.md 或 system prompt。
+这段调用也回答了“本轮上下文”究竟是什么：它由 `systemPrompt`、经过处理的消息历史、工具集合和模型选项共同组成。前面第 15 篇得到的搜索结果，如果已经作为 `tool_result` 进入历史，就位于 `messagesForQuery`；其他通道保持原有归属。
 
 ## 项目指令还会在深入子目录时动态补充
 
@@ -373,15 +385,15 @@ async function getNestedMemoryAttachments(
 
 下层会先确认目标在允许的 working path 内，再依次处理 Managed/User 条件规则、从 cwd 到目标目录的 CLAUDE.md 与 rules，以及 cwd 层级的条件规则。`loadedNestedMemoryPaths` 是不淘汰的 Set，用于阻止同一文件因 Read 缓存 LRU 淘汰而反复注入。
 
-这就是“动态注入”的准确含义：不是每轮重扫整个项目，也不是修改初始 system prompt，而是由实际访问路径触发新的 attachment。它让深层目录规则只在相关文件进入工作集后出现，同时避免无关项目指令提前占用窗口。
+这就是“动态注入”的准确含义：实际访问路径触发新的 attachment，同时保持初始 system prompt 稳定。深层目录规则只在相关文件进入工作集后出现，从而避免无关项目指令提前占用窗口。
 
 ## 三个容易误判的边界
 
-第一，**读到配置不等于逐字段注入**。settings 中只有被组装函数读取的字段会改变 prompt，例如 language、output style、setting sources。。
+第一，**配置字段只有被组装函数读取时才会注入。** 例如 language、output style、setting sources 会改变 prompt。
 
 第二，**cwd 信息和 git 状态的时效不同**。环境区块在默认 prompt 中说明当前工作目录，git status 则明确是会话开始快照。两者都被 memoize 或 section cache 约束，运行中切目录、切 worktree、修改设置后是否立刻反映，必须继续追调用方何时清缓存或重建会话。
 
-。feature flag、构建裁剪、provider 缓存作用域、MCP 连接、Agent 定义、custom/append prompt 和压缩结果都会改变最终请求。本文能够证明的是默认控制流、优先级和回退值，不是任意用户机器上的运行快照。
+第三，**最终请求受运行时装配影响**。feature flag、构建裁剪、provider 缓存作用域、MCP 连接、Agent 定义、custom/append prompt 和压缩结果都会改变最终请求。本文能够证明的是默认控制流、优先级和回退值；具体机器上的请求仍需结合运行时配置验证。
 
 ## 小结
 
@@ -399,3 +411,8 @@ Claude Code 的项目上下文组装可以归纳成四步。
 
 当对话历史、工具结果和项目上下文不断增长并逼近模型窗口时，Claude Code 如何判断何时压缩、保留什么、又怎样继续会话？
 
+## 参考资料
+
+- [Claude Code 项目记忆](https://code.claude.com/docs/en/memory)
+
+- [Claude Code Prompt Caching](https://code.claude.com/docs/en/prompt-caching)

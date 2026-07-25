@@ -25,12 +25,12 @@ describe("Fuwari post frontmatter", () => {
 		);
 
 		expect(source).toContain(
-			'image: "/images/posts/claude-code-source-reading-00/claude-code-highres.png"',
+			'image: "/images/posts/claude-code-source-reading-00/claude-code-source-reading-00.png"',
 		);
 		expect(source).toContain('imagePosition: "left"');
 
 		const body = source.replace(/^---[\s\S]*?---\s*/, "");
-		expect(body).not.toContain("claude-code-highres.png");
+		expect(body).not.toContain("claude-code-source-reading-00.png");
 	});
 
 	it("uses the Fuwari schema for every post", async () => {

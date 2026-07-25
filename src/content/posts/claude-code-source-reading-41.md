@@ -10,13 +10,25 @@ image: "/images/posts/claude-code-source-reading-41/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **记忆索引**：入口文件保存主题摘要和位置，详细内容按需读取，控制启动上下文。
+
+- **同步语义**：pull、watch 与 push 分别处理初始对齐、持续变化和本地成果上传。
+
+- **共享信任边界**：路径校验、密钥扫描和作用域区分限制团队记忆可传播的内容。
+
+![Memdir 索引与 Team Memory 同步](/images/posts/claude-code-source-reading-41/41-memory-sync-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 Session Memory 保存单会话长期信息以后，memdir 与 Team Memory 如何把记忆扩展到目录和团队范围，并控制共享与注入？
 
 先说答案：**memdir 把“记住了什么”落实为项目范围内可检查的 Markdown 目录，Team Memory 再从这个目录里划出一块共享子目录，并只同步这块子目录。**
 
-它们不是把整段 Session Memory 原样广播给所有人，也不是给模型接上一座每轮都全量查询的向量数据库。Claude Code 2.1.88 使用的是一套文件系统协议：私有记忆放在项目对应的 auto-memory 目录，团队记忆放在其 `team/` 子目录；两个作用域各自维护 `MEMORY.md` 索引和主题文件。系统提示词告诉模型怎样选择作用域、怎样写文件，真正进入上下文的内容则由索引加载或相关性选择器控制。
+Claude Code 2.1.88 使用一套文件系统协议：私有记忆放在项目对应的 auto-memory 目录，团队记忆放在其 `team/` 子目录；两个作用域各自维护 `MEMORY.md` 索引和主题文件。系统提示词告诉模型怎样选择作用域、怎样写文件，真正进入上下文的内容由索引加载或相关性选择器控制；Session Memory 原文和未选中的主题不会被全量广播。
 
 共享也有明确边界。只有 `team/` 会走远端同步；同步还要同时通过 auto memory、Team Memory 功能开关、第一方 OAuth 和 GitHub remote 等门槛。上传前逐文件扫描密钥，远端文件落盘前检查路径穿越和符号链接逃逸。也就是说，“模型决定这是团队知识”只是第一步，后面还有本地目录边界、认证边界和同步边界。
 
@@ -24,7 +36,7 @@ Session Memory 保存单会话长期信息以后，memdir 与 Team Memory 如何
 
 ![Claude Code memdir 与 Team Memory 的检索、注入和同步边界](/images/posts/claude-code-source-reading-41/41-memdir-team-memory-handdrawn.png)
 
-图里的 `private/` 是为了和 `team/` 对照的**逻辑作用域标签**；磁盘上没有名为 `private` 的子目录，私有索引和主题文件直接位于 memdir 根目录。
+图里的 `private/` 是为了和 `team/` 对照的**逻辑作用域标签**；磁盘布局把私有索引和主题文件直接放在 memdir 根目录。
 
 ## 先建立一个简单模型：目录、索引和主题文件
 
@@ -32,7 +44,7 @@ Session Memory 保存单会话长期信息以后，memdir 与 Team Memory 如何
 
 **Session Memory** 关心的是从会话里提炼哪些信息。**memdir** 关心的是这些信息以什么可持久化、可审查的形态保存。**Team Memory** 关心的是其中哪些内容可以跨用户共享，以及共享文件怎样在本地和服务端之间同步。
 
-因此，memdir 里的“目录”不是说当前项目每个子目录都拥有一份记忆。它是一个以项目根为 key 的持久化目录。默认形态可以简化成：
+因此，memdir 以项目根为 key 建立一份持久化目录。默认形态可以简化成：
 
 ```text
 ~/.claude/projects/<sanitized-project-root>/memory/
@@ -43,7 +55,7 @@ Session Memory 保存单会话长期信息以后，memdir 与 Team Memory 如何
     └── release_policy.md  # 团队主题文件
 ```
 
-这段结构不是某个源码常量的逐字输出，而是根据 `getAutoMemPath()` 与 `getTeamMemPath()` 的路径组合画出的直观模型。`MEMORY.md` 是短索引，不应该塞入完整记忆；主题文件才保存带 frontmatter 的具体内容。默认路径跟随规范化后的 Git 根，因此同一个仓库的多个 worktree 可以复用同一份项目记忆。
+这段结构是根据 `getAutoMemPath()` 与 `getTeamMemPath()` 路径组合画出的直观模型。`MEMORY.md` 保持为短索引，带 frontmatter 的具体内容进入主题文件。默认路径跟随规范化后的 Git 根，因此同一个仓库的多个 worktree 可以复用同一份项目记忆。
 
 为什么不用一份越来越长的 `MEMORY.md`？因为索引和正文解决的是两个不同问题：索引提供低成本方向感，主题文件提供按需细节。这样既能让用户直接用普通文件工具审计，也能避免每轮都把所有历史内容塞进模型窗口。
 
@@ -71,15 +83,15 @@ export function getTeamMemPath(): string {
 }
 ```
 
-`getAutoMemPath()` 位于 `restored-src/src/memdir/paths.ts`，没有业务参数，返回带尾部分隔符的绝对路径。路径优先使用 `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE`，其次使用受信任设置源里的 `autoMemoryDirectory`，最后回退到 `<memoryBase>/projects/<sanitized-git-root>/memory/`。函数以 `getProjectRoot()` 作为 memoize key；源码注释说明环境变量和设置在生产会话中被视为稳定值。
+`getAutoMemPath()` 位于 `restored-src/src/memdir/paths.ts`，接受零个业务参数，返回带尾部分隔符的绝对路径。路径优先使用 `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE`，其次使用受信任设置源里的 `autoMemoryDirectory`，最后回退到 `<memoryBase>/projects/<sanitized-git-root>/memory/`。函数以 `getProjectRoot()` 作为 memoize key；源码注释说明环境变量和设置在生产会话中被视为稳定值。
 
-`getTeamMemPath()` 位于 `restored-src/src/memdir/teamMemPaths.ts`，同样没有参数。它始终在 auto-memory 目录下追加 `team`，所以团队目录是私有项目记忆目录的子树，而不是任意网络挂载点。
+`getTeamMemPath()` 位于 `restored-src/src/memdir/teamMemPaths.ts`，同样接受零个参数。它始终在 auto-memory 目录下追加 `team`，把团队目录固定为私有项目记忆目录的子树。
 
 这里有一道容易忽略的权限防线：`autoMemoryDirectory` 不读取仓库可提交的 `projectSettings`，只读取 `policySettings`、`flagSettings`、`localSettings`、`userSettings`。否则，一个刚 clone 的仓库就可以把记忆目录指向 `~/.ssh`，再借记忆写入的权限豁口改动敏感文件。
 
 自定义路径还会经过 `validateMemoryPath(raw, expandTilde)`。`raw` 是 `string | undefined`；空值返回 `undefined`。`expandTilde` 为 `true` 时允许设置中的 `~/...`，为 `false` 时环境覆盖必须直接给绝对路径。相对路径、根目录、Windows 盘符根、UNC 路径、空字节和会退回 home 或其父目录的 `~` 形式都会被拒绝。非法覆盖不会变成一个“尽量使用”的危险路径，而是回到下一层解析逻辑。
 
-## 两个开关不是同一件事
+## 两个开关形成总能力与共享能力的依赖
 
 目录存在不代表功能一定启用。auto memory 先决定整套文件记忆是否工作，Team Memory 再决定是否增加共享作用域：
 
@@ -110,9 +122,9 @@ export function isTeamMemoryEnabled(): boolean {
 }
 ```
 
-`isAutoMemoryEnabled()` 位于 `restored-src/src/memdir/paths.ts`。它没有参数，返回布尔值。`CLAUDE_CODE_DISABLE_AUTO_MEMORY` 的真值表示关闭，显式假值表示开启；未定义时继续检查 `CLAUDE_CODE_SIMPLE`、没有持久化目录的 remote 场景和 `settings.autoMemoryEnabled`。设置值只要不是 `undefined` 就原样采用，所以显式 `false` 不会被默认值覆盖；所有条件都未指定时才默认 `true`。
+`isAutoMemoryEnabled()` 位于 `restored-src/src/memdir/paths.ts`。它接受零个参数并返回布尔值。`CLAUDE_CODE_DISABLE_AUTO_MEMORY` 的真值表示关闭，显式假值表示开启；未定义时继续检查 `CLAUDE_CODE_SIMPLE`、缺少持久化目录的 remote 场景和 `settings.autoMemoryEnabled`。设置字段已定义时原样采用，所以显式 `false` 会覆盖默认值；所有条件都未指定时才默认 `true`。
 
-`isTeamMemoryEnabled()` 位于 `restored-src/src/memdir/teamMemPaths.ts`。它先要求 auto memory 为 `true`，再读取 `tengu_herring_clock`，后者静态回退值是 `false`。此外相关模块还受构建期 `feature('TEAMMEM')` 控制。。
+`isTeamMemoryEnabled()` 位于 `restored-src/src/memdir/teamMemPaths.ts`。它先要求 auto memory 为 `true`，再读取 `tengu_herring_clock`，后者静态回退值是 `false`。此外相关模块还受构建期 `feature('TEAMMEM')` 控制。
 
 这套依赖关系避免了“私有记忆关闭，但团队同步仍在后台运行”的分裂状态。auto memory 是总开关，Team Memory 是附加能力，不存在 team-only 分支。
 
@@ -147,15 +159,15 @@ if (autoEnabled) {
 return null
 ```
 
-`loadMemoryPrompt()` 位于 `restored-src/src/memdir/memdir.ts`，没有参数，返回 `Promise<string | null>`。Team Memory 开启时返回同时描述 private 与 team 的提示；只开启 auto memory 时返回单目录提示；auto memory 关闭时返回 `null`。`extraGuidelines` 是 `string[] | undefined`，来源是非空的 `CLAUDE_COWORK_MEMORY_EXTRA_GUIDELINES`；`skipIndex` 是布尔功能开关，静态默认 `false`。
+`loadMemoryPrompt()` 位于 `restored-src/src/memdir/memdir.ts`，接受零个参数，返回 `Promise<string | null>`。Team Memory 开启时返回同时描述 private 与 team 的提示；只开启 auto memory 时返回单目录提示；auto memory 关闭时返回 `null`，调用方据此跳过整段 memory system-prompt section。`extraGuidelines` 有值时追加宿主规则，省略时跳过该段；`skipIndex` 静态默认 `false`，为 `true` 时切换成只维护主题文件的提示。
 
 `ensureMemoryDirExists(teamDir)` 会递归创建目录。由于 `team/` 位于 auto-memory 目录内，创建它也会创建父目录；权限或只读文件系统导致的失败会记日志，但 prompt 构建仍继续，真正写入时由文件工具暴露错误。这是一种刻意的失败边界：目录准备失败不伪装成“记忆功能已经成功写入”。
 
 combined prompt 把记忆限制为四类：`user`、`feedback`、`project`、`reference`。其中 `user` 始终 private；`feedback` 默认 private，只有明确的项目级约定才进入 team；`project` 可以二选一但强烈倾向 team；`reference` 通常 team。`parseMemoryType(raw)` 对非字符串、缺失值和未知字符串都返回 `undefined`，因此旧文件不会因为少一个 `type` 字段而完全失效。
 
-`buildCombinedMemoryPrompt(extraGuidelines?, skipIndex = false)` 位于 `restored-src/src/memdir/teamMemPrompts.ts`。`extraGuidelines` 省略时不追加宿主策略；`skipIndex` 为 `false` 时要求“写主题文件，再更新同目录 `MEMORY.md`”两步保存，为 `true` 时只写独立主题文件。。
+`buildCombinedMemoryPrompt(extraGuidelines?, skipIndex = false)` 位于 `restored-src/src/memdir/teamMemPrompts.ts`。`extraGuidelines` 省略时不追加宿主策略；`skipIndex` 为 `false` 时要求“写主题文件，再更新同目录 `MEMORY.md`”两步保存，为 `true` 时只写独立主题文件。
 
-## 注入不是全量读取，而是索引与相关记忆两条路径
+## 注入通过索引与相关记忆两条路径限流
 
 在传统路径里，`getMemoryFiles()` 把私有和团队的两个 `MEMORY.md` 作为 `AutoMem` 与 `TeamMem` 加载。团队索引进入 prompt 时还会包上一层来源标签：
 
@@ -172,7 +184,7 @@ if (feature('TEAMMEM') && file.type === 'TeamMem') {
 }
 ```
 
-这段来自 `restored-src/src/utils/claudemd.ts` 的 `getClaudeMds(memoryFiles, filter?)`。`memoryFiles` 是已发现的记忆/指令文件数组；`filter` 是可选的类型筛选函数，省略时不过滤。Team Memory 使用 `source="shared"` 包裹，给模型一个明确的共享来源信号；这不是可信签名，不能把团队文件内容当成已经验证的事实。
+这段来自 `restored-src/src/utils/claudemd.ts` 的 `getClaudeMds(memoryFiles, filter?)`。`memoryFiles` 是已发现的记忆/指令文件数组；`filter` 是可选的类型筛选函数，省略时接受全部类型。Team Memory 使用 `source="shared"` 包裹，给模型一个明确的共享来源信号；该标签只标记来源，团队文件内容仍需按外部上下文验证。
 
 两个索引还受相同上限保护：`MEMORY.md` 最多加载 200 行、25,000 字符。超出后先按行截断，再按最后一个换行位置截断字节，并附加警告。这样长索引不会无限占用上下文，代价是排在后面的条目可能不可见，所以 prompt 才反复要求索引保持简短。
 
@@ -206,15 +218,15 @@ export async function findRelevantMemories(
 
 `scanMemoryFiles()` 只读取 `.md` 文件 frontmatter 的前若干行，排除 `MEMORY.md`，按 `mtimeMs` 从新到旧排序并截取静态上限。选择器再让默认 Sonnet 根据 query、文件名、描述和最近工具选择最多 5 个文件。返回文件名还要和候选集合交叉验证，模型无法借返回 `../../...` 读取候选目录外的任意文件。
 
-选择失败、解析失败或取消都会返回空数组，不会阻塞主请求。prefetch 也只在准备好时消费；单词 prompt、会话累计记忆字节达到上限、功能关闭等情况会直接跳过。这意味着相关记忆是“有界的辅助上下文”，不是每轮回答必然存在的数据库查询结果。
+选择失败、解析失败或取消都会返回空数组，主请求继续运行。prefetch 也只在准备好时消费；单词 prompt、会话累计记忆字节达到上限、功能关闭等情况会直接跳过。因此相关记忆是一份按条件注入的有界辅助上下文。
 
-## 年龄为什么只是警告，不是自动淘汰
+## 年龄只触发复核提示
 
 主题文件的 `mtimeMs` 会一路带到注入附件。`memoryAgeDays()` 用整天向下取整，未来时间会钳制为 0；今天显示 `today`，昨天显示 `yesterday`，更早显示 `N days ago`。
 
 超过一天的内容不会被自动删除，而是附加一条 freshness 提醒：记忆是某个时点的观察，代码行为和 `file:line` 引用可能已经过期，回答前应重新核对当前代码。
 
-这比“越旧越不相关”更准确。用户的沟通偏好可能半年不变，发布截止日期可能明天就失效。源码只用年龄提示模型重新验证，没有提供一个可以替代事实判断的统一衰减分数。
+年龄只触发重新验证提示。用户的沟通偏好可能半年不变，发布截止日期可能明天就失效；最终相关性仍由模型结合内容判断。
 
 ## Team Memory 的启动顺序：先 pull，再 watch
 
@@ -241,11 +253,11 @@ export async function startTeamMemoryWatcher(): Promise<void> {
 
 `startTeamMemoryWatcher()` 位于 `restored-src/src/services/teamMemorySync/watcher.ts`，无参数，返回 `Promise<void>`。第一方 OAuth 还要求 inference 与 profile scope；repo slug 来自 `github.com` remote。任何门槛不满足都提前返回，不创建同步状态。
 
-顺序很关键：初始 pull 发生在 watcher 之前，因此远端文件写入本地不会立刻被当成一次本地编辑再 push 回去。即使初始 pull 失败或服务端还没有内容，代码仍会创建目录并启动 watcher，保证第一次团队记忆写入可以被观察到。
+顺序很关键：初始 pull 发生在 watcher 之前，因此远端文件写入本地会跳过本地编辑回推。即使初始 pull 失败或服务端内容为空，代码仍会创建目录并启动 watcher，保证第一次团队记忆写入可以被观察到。
 
 watcher 使用递归 `fs.watch`。文件变化后等待 2 秒 debounce，再调用 `pushTeamMemory()`；如果 push 正在进行，就重新安排。文件工具的 PostToolUse 路径还会显式调用 `notifyTeamMemoryWrite()`，用来补偿平台可能合并或漏掉文件事件的情况。进程退出时会关闭 watcher，并在关闭预算内尽力 flush 尚未提交的变化，但源码明确把它定义为 best-effort。
 
-## 同步不是 Git merge：pull 与 push 有不同冲突语义
+## Pull 与 Push 使用不同冲突语义
 
 完整同步入口非常短：
 
@@ -276,17 +288,17 @@ export async function syncTeamMemory(state: SyncState): Promise<{
 }
 ```
 
-`syncTeamMemory(state)` 位于 `restored-src/src/services/teamMemorySync/index.ts`。`state` 是本会话可变同步状态，包含 `lastKnownChecksum: string | null`、每个 key 的 `serverChecksums: Map<string, string>` 和从服务端 413 学到的 `serverMaxEntries: number | null`。函数返回成功标记、实际落盘数、上传数和可选错误字符串。
+`syncTeamMemory(state)` 位于 `restored-src/src/services/teamMemorySync/index.ts`。`state` 是本会话可变同步状态，包含 `lastKnownChecksum: string | null`、每个 key 的 `serverChecksums: Map<string, string>` 和从服务端 413 学到的 `serverMaxEntries: number | null`。返回对象的 `success` 标记整次同步是否完成；`filesPulled` 与 `filesPushed` 分别记录实际落盘数和上传数；`error` 只在失败路径携带 pull 或 push 的错误字符串。
 
 `skipEtagCache: true` 表示完整同步的 pull 不使用已有 ETag 快速返回；普通 watcher pull 默认值是 `false`。pull 先完成，服务端同 key 内容会覆盖本地，因此 `syncTeamMemory()` 的总语义是 server-first。pull 失败时不继续 push，避免拿过期本地状态覆盖未知远端状态。
 
-但由本地编辑触发的单独 `pushTeamMemory()` 采用 local-wins。它计算本地 SHA-256 与 `serverChecksums` 的差集，只上传发生变化的 key。遇到 `412` 时最多进行 2 次冲突重试：先请求 `view=hashes` 刷新远端哈希，再重新计算 delta。它不做内容级合并；如果双方同时修改同一个 key，本地版本最终可能覆盖远端版本。服务端新增但本地没有的文件要等下一次 pull 才落盘。
+由本地编辑触发的单独 `pushTeamMemory()` 采用 local-wins。它计算本地 SHA-256 与 `serverChecksums` 的差集，只上传发生变化的 key。遇到 `412` 时最多进行 2 次冲突重试：先请求 `view=hashes` 刷新远端哈希，再重新计算 delta。同一 key 被双方修改时，本地版本最终可能覆盖远端版本；服务端新增且本地缺失的文件要等下一次 pull 才落盘。
 
-还有一个常被误读的限制：删除本地文件不会删除服务端条目。上传接口是 upsert，未出现在 PUT 中的 key 被保留，所以下一次 pull 还会把文件恢复回来。源码注释提到需要 `soft_delete_keys` 才能真正解决这类删除，但当前同步主线没有传播本地删除。
+还有一个常被误读的限制：上传接口采用 upsert，删除本地文件不会删除服务端条目；未出现在 PUT 中的 key 会被保留，下一次 pull 还会把文件恢复回来。源码注释提到需要 `soft_delete_keys` 才能传播删除，而当前同步主线只上传现存文件。
 
 ## 密钥扫描与路径校验守住共享边界
 
-写进 `team/` 不等于一定能上传。`readLocalTeamMemory()` 在构造 payload 前逐文件执行密钥扫描：
+写进 `team/` 后还要通过 `readLocalTeamMemory()` 的逐文件密钥扫描：
 
 ```ts
 const content = await readFile(fullPath, 'utf8')
@@ -306,29 +318,29 @@ if (secretMatches.length > 0) {
 entries[relPath] = content
 ```
 
-这段位于 `restored-src/src/services/teamMemorySync/index.ts`。`content` 是 UTF-8 文件内容；`relPath` 是相对 `team/` 的跨平台 key。`scanForSecrets(content)` 位于 `secretScanner.ts`，返回按 rule ID 去重的 `SecretMatch[]`，只包含 `ruleId` 和人类可读 `label`，故意不返回命中的真实秘密值。
+这段位于 `restored-src/src/services/teamMemorySync/index.ts`。`content` 是 UTF-8 文件内容；`relPath` 是相对 `team/` 的跨平台 key。命中密钥规则时，`path` 保存这个 `relPath`，让诊断能指出被跳过的团队记忆文件。`scanForSecrets(content)` 位于 `secretScanner.ts`，返回按 rule ID 去重的 `SecretMatch[]`，只包含 `ruleId` 和人类可读 `label`，故意不返回命中的真实秘密值。
 
-只要命中一个规则，整个文件就从上传集合排除；其他安全文件仍可继续同步。单文件超过 250,000 bytes 也会跳过。服务端 entry 数上限不是客户端臆定常量：只有收到结构化 `413 team_memory_too_many_entries` 后，客户端才缓存 `max_entries`，下一次按稳定的文件名字母顺序截取。
+只要命中一个规则，整个文件就从上传集合排除；其他安全文件仍可继续同步。单文件超过 250,000 bytes 也会跳过。服务端 entry 数上限来自结构化 `413 team_memory_too_many_entries` 响应；客户端缓存其中的 `max_entries`，下一次按稳定的文件名字母顺序截取。
 
 远端到本地的方向则经过 `validateTeamMemKey(relativeKey)`。它拒绝空字节、绝对路径、反斜杠、URL 编码穿越和 Unicode 规范化穿越，再解析最深已存在祖先的真实路径，防止 `team/` 内的符号链接指向目录外。验证失败的单个条目被跳过，不会让整个批次越过目录边界。
 
-普通文件权限还有一层区别。默认 auto-memory 路径位于 `~/.claude` 这类危险目录下，因此源码给受控记忆目录提供内部读写 allow；但 `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` 是调用方指定的任意目录，不自动获得静默写入，需要 SDK 调用方提供正常 allow rule。共享能力没有把任意路径变成“记忆目录”的通行证。
+普通文件权限还有一层区别。默认 auto-memory 路径位于 `~/.claude` 这类危险目录下，因此源码给受控记忆目录提供内部读写 allow；`CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` 指向调用方选择的任意目录时，需要 SDK 调用方提供正常 allow rule。共享能力只放行受控默认路径。
 
 ## 失败时会发生什么
 
 这套设计的失败方式比“同步成功/失败”更细。
 
-没有 auto memory 或 Team Memory 开关时，prompt 与 watcher 都不启用。没有第一方 OAuth 或 GitHub remote 时，本地 combined prompt 可能仍可描述团队目录，但远端同步不会启动。网络超时、解析失败和服务端错误会让本轮 pull/push 返回失败。
+auto memory 或 Team Memory 开关关闭时，prompt 与 watcher 跳过初始化。第一方 OAuth 或 GitHub remote 不满足时，本地 combined prompt 仍可能描述团队目录，远端同步则停在启动门槛；网络超时、解析失败和服务端错误会让本轮 pull/push 返回失败。
 
 watcher 会把 `no_oauth`、`no_repo` 和除 `409`、`429` 外的大多数 4xx 视为不会自行恢复的失败，暂停后续 push，避免文件事件形成无限重试。删除文件会清除 suppression，支持“条目过多”场景恢复；认证问题通常要重启新会话后重新建立同步状态。
 
-读取与注入也采用降级而非阻塞。目录扫描失败返回空列表，某个 frontmatter 读取失败只丢掉那个候选，相关性 side query 失败返回空选择，主题文件过大会截断并提示使用 Read 查看全文。结果是：没有记忆时 Claude Code 仍能工作，只是失去这层跨会话或跨团队上下文。
+读取与注入采用降级策略。目录扫描失败返回空列表，某个 frontmatter 读取失败只丢掉那个候选，相关性 side query 失败返回空选择，主题文件过大会截断并提示使用 Read 查看全文。主循环因此可以在空记忆结果下继续工作。
 
-最后要保留一个证据边界。源码能确认目录结构、提示词规则、选择器上限、同步 API、冲突路径和安全检查。Team Memory 是受控共享通道，不是事实验证器，更不是数据防泄漏系统的替代品。
+最后要保留一个证据边界。源码能确认目录结构、提示词规则、选择器上限、同步 API、冲突路径和安全检查。Team Memory 只提供受控共享通道；事实验证与数据防泄漏仍需独立机制。
 
 ## 小结
 
-memdir 的关键不是“多存一些文本”，而是把长期记忆拆成项目作用域的目录、短索引和可按需读取的主题文件。它用路径解析和功能开关决定存在哪里，用 prompt 约束记什么、怎样更新，用索引或相关性选择器控制进入上下文的内容，并用年龄提醒把旧记忆降回“待验证线索”。
+memdir 把长期记忆拆成项目作用域的目录、短索引和可按需读取的主题文件。它用路径解析和功能开关决定存储位置，用 prompt 约束内容与更新方式，用索引或相关性选择器控制上下文注入，并用年龄提醒把旧记忆降回“待验证线索”。
 
 Team Memory 在这套文件协议上增加 `team/` 共享作用域。它只同步团队子目录，启动时先 pull 再 watch，本地变化经 debounce、密钥扫描和 delta push 送往服务端；远端内容落盘前还要经过路径与符号链接校验。私有内容不进入同步 payload，共享内容也不因为“来自团队”就自动可信。
 
@@ -338,3 +350,8 @@ Team Memory 在这套文件协议上增加 `team/` 共享作用域。它只同�
 
 团队记忆能够积累以后，AutoDream 如何在后台挑选素材、生成 Dream，并把结果重新纳入未来会话？
 
+## 参考资料
+
+- [Claude Code Memory](https://code.claude.com/docs/en/memory)
+
+- [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams)

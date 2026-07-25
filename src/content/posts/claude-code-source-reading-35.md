@@ -10,19 +10,31 @@ image: "/images/posts/claude-code-source-reading-35/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **优先级格**：policy、命令行、环境变量、项目与用户设置按字段类型执行覆盖或合并。
+
+- **来源证明**：有效值需要连同来源层一起观察，才能解释配置为何生效。
+
+- **Runtime gate**：feature flag 在运行时裁剪路径，settings 则提供相对稳定的用户与组织意图。
+
+![Settings 来源优先级与 Feature Flag 裁剪](/images/posts/claude-code-source-reading-35/35-config-precedence-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 上一篇留下的问题是：同一套运行时支持多种入口以后，Claude Code 如何合并用户、项目、本地、策略、CLI 设置与功能开关，并决定最终行为？
 
-先给结论：Claude Code 没有一张“万能配置表”，而是连续做三次裁决。
+先给结论：Claude Code 通过构建能力、settings cascade 和运行时功能开关连续完成三次裁决。
 
-第一次发生在构建时。`bun:bundle` 的 `feature('VOICE_MODE')`、`feature('BRIDGE_MODE')` 等开关决定一段代码是否进入当前产物。没有进入产物的能力，改 JSON、环境变量或远端实验都无法补回来。
+第一次发生在构建时。`bun:bundle` 的 `feature('VOICE_MODE')`、`feature('BRIDGE_MODE')` 等开关决定一段代码是否进入当前产物。被构建裁掉的模块无法通过 JSON、环境变量或远端实验恢复。
 
-第二次是 settings cascade。默认情况下，插件设置先做最低优先级底座，然后依次合并 `userSettings → projectSettings → localSettings → flagSettings → policySettings`；越靠后的来源覆盖越靠前的普通字段，数组则拼接并去重。`--setting-sources` 不仅可以关掉 user、project、local，它提供的顺序也会成为这三者的遍历顺序；flag 与 policy 总是在其后补入。托管策略内部又不是继续 merge，而是从 Remote、MDM、managed file、HKCU 中选择第一个非空来源。
+第二次是 settings cascade。默认情况下，插件设置先做最低优先级底座，然后依次合并 `userSettings → projectSettings → localSettings → flagSettings → policySettings`；越靠后的来源覆盖越靠前的普通字段，数组则拼接并去重。`--setting-sources` 既能关闭 user、project、local，也用参数顺序决定这三者的遍历顺序；flag 与 policy 总是在其后补入。托管策略内部采用首个有效来源：Remote、MDM、managed file、HKCU 依次检查，命中后停止。
 
 第三次才是运行时功能开关。GrowthBook getter 按“环境覆盖、内部配置覆盖、进程内远端值、磁盘缓存、调用方默认值”取值。它可以打开或关闭已经存在于构建产物里的路径，却不能改变 settings 的来源优先级。
 
-也就是说，最终行为不是某个文件单独决定的，而是：
+最终行为由三层条件共同决定：
 
 `build capability ∩ effective settings ∩ runtime gate ∩ 当前宿主与权限上下文`。
 
@@ -40,7 +52,7 @@ imagePosition: "left"
 
 GrowthBook feature 是远端或缓存的运行时值。调用方必须自己提供 `defaultValue`，远端不可用时不会凭空推导一个默认行为。
 
-`feature()` 来自 `bun:bundle`，属于构建能力开关。源码里常用正向三元表达式配合动态 `require()`，让非目标构建连相关模块和实验 key 字符串都能被裁掉。它不是 GrowthBook 的别名。
+`feature()` 来自 `bun:bundle`，属于构建能力开关。源码里常用正向三元表达式配合动态 `require()`，让非目标构建连相关模块和实验 key 字符串都能被裁掉；GrowthBook 则在已进入产物的代码中选择运行时分支。
 
 `restored-src/src/bridge/bridgeEnabled.ts` 把两层 gate 放在了一起：
 
@@ -53,9 +65,9 @@ export function isBridgeEnabled(): boolean {
 }
 ```
 
-`isBridgeEnabled()` 没有参数，返回布尔值。构建开关 `BRIDGE_MODE` 为假时直接返回 `false`，运行时不再读取订阅身份和 GrowthBook。只有构建中包含 Bridge，才继续要求 `isClaudeAISubscriber()` 为真，并读取 `tengu_ccr_bridge`；这个运行时 gate 的明确回退值是 `false`。
+`isBridgeEnabled()` 接受零个参数并返回布尔值。构建开关 `BRIDGE_MODE` 为假时直接返回 `false`，跳过订阅身份和 GrowthBook 读取。构建中包含 Bridge 时，才继续要求 `isClaudeAISubscriber()` 为真并读取 `tengu_ccr_bridge`；这个运行时 gate 的明确回退值是 `false`。
 
-这段代码说明了“源码里存在”为什么不等于“当前二进制可用”，也不等于“当前账号已启用”。
+这段代码给出三级可用性：源码包含实现、构建产物包含模块、当前账号通过运行时 gate。
 
 ## CLI 必须在完整初始化前先划定来源
 
@@ -75,9 +87,9 @@ function eagerLoadSettings(): void {
 }
 ```
 
-`eagerLoadSettings()` 没有参数，也没有返回值。`--settings` 缺失或值为空时不创建 flag source；`--setting-sources` 则故意用 `!== undefined` 判断，因此显式传空字符串与完全不传是两种状态：前者表示 user、project、local 一个都不要，后者保留启动状态中的默认来源。
+`eagerLoadSettings()` 接受零个参数并返回 `void`。`--settings` 缺失或值为空时跳过 flag source；`--setting-sources` 则故意用 `!== undefined` 判断，因此显式空字符串会禁用 user、project、local，省略参数则保留启动状态中的默认来源。
 
-`loadSettingsFromFlag(settingsFile)` 接受开放字符串。首尾去空白后，如果同时以 `{` 开头、以 `}` 结尾，就按内联 JSON 处理；否则按文件路径处理。非法 JSON、文件不存在或读取失败都会打印错误并退出，而不是悄悄退回其他来源。内联 JSON 会写入按内容 hash 命名的临时文件；相同内容保持稳定路径，避免路径进入 Bash tool 描述后反复破坏 API prompt cache。
+`loadSettingsFromFlag(settingsFile)` 接受开放字符串。首尾去空白后，如果同时以 `{` 开头、以 `}` 结尾，就按内联 JSON 处理；否则按文件路径处理。非法 JSON、文件不存在或读取失败都会打印错误并退出，防止显式 CLI 配置被静默忽略。内联 JSON 会写入按内容 hash 命名的临时文件；相同内容保持稳定路径，避免路径进入 Bash tool 描述后反复破坏 API prompt cache。
 
 另一个参数只接受封闭集合。`restored-src/src/utils/settings/constants.ts` 的解析如下：
 
@@ -105,7 +117,7 @@ export function parseSettingSourcesFlag(flag: string): SettingSource[] {
 }
 ```
 
-`flag` 是逗号分隔字符串，源码能够确认的合法值只有 `user`、`project`、`local`；空字符串返回空数组，未知值直接抛错。结果中的内部枚举分别是 `userSettings`、`projectSettings`、`localSettings`。重复项在这里不会主动去重，但后续 `getEnabledSettingSources()` 使用 `Set`，并无条件补入 `flagSettings` 与 `policySettings`。
+`flag` 是逗号分隔字符串，源码能够确认的合法值只有 `user`、`project`、`local`；空字符串返回空数组，未知值直接抛错。`result` 按输入顺序收集内部枚举 `userSettings`、`projectSettings`、`localSettings`；这里保留重复项，后续 `getEnabledSettingSources()` 再用 `Set` 去重，并补入 `flagSettings` 与 `policySettings`。
 
 这就是 Agent SDK 的隔离能力为什么只能裁掉三类普通来源。`settingSources: []` 可以阻止 `~/.claude/settings.json` 与当前项目文件污染一次 SDK 调用，却不能绕过显式传入的 `--settings`，也不能绕过管理员策略。
 
@@ -152,7 +164,7 @@ for (const source of getEnabledSettingSources()) {
 }
 ```
 
-`loadSettingsFromDisk()` 没有参数，返回 `{ settings, errors }`。plugin base 是可选值，缺失时从空对象开始；`getEnabledSettingSources()` 返回允许的普通来源以及必选的 flag/policy。每个文件先经 `SettingsSchema()` 校验，合法部分才进入合并；错误会按 `file:path:message` 去重后随结果返回。源码没有把坏文件解释成高优先级的“空配置”，因此它不会替你抹掉前面已经合并成功的来源。
+`loadSettingsFromDisk()` 接受零个参数，返回 `{ settings, errors }`。`pluginSettings` 存在时先作为最低层合入，省略时 `mergedSettings` 从空对象开始；循环变量 `source` 按 `getEnabledSettingSources()` 的顺序读取普通来源和必选的 flag/policy。每个文件先经 `SettingsSchema()` 校验，合法值才写回 `mergedSettings`；错误按 `file:path:message` 去重后进入 `errors`，失败来源跳过合并，保留已经生效的低优先级值。
 
 普通标量和对象遵循 Lodash `mergeWith` 的后者覆盖与递归合并，数组却有专门规则：
 
@@ -172,13 +184,13 @@ export function settingsMergeCustomizer(
 }
 ```
 
-`settingsMergeCustomizer(objValue, srcValue)` 接收当前累计值和更高优先级来源值。两者都是数组时，返回“旧数组在前、新数组在后”的去重结果；不是数组时返回 `undefined`，这里的 `undefined` 是明确协议：交回 Lodash 的默认深合并逻辑，不表示把配置字段写成 `undefined`。`null` 没有专门分支，会按默认 merge 语义处理。
+`settingsMergeCustomizer(objValue, srcValue)` 接收当前累计值和更高优先级来源值。两者都是数组时，返回“旧数组在前、新数组在后”的去重结果；其他类型返回 `undefined`，Lodash 收到该返回值后继续执行默认深合并，而不会把目标字段赋成 `undefined`。`null` 也进入 Lodash 默认分支。
 
 因此“高优先级覆盖低优先级”对数组并不准确。权限规则、hook 等数组字段可能累计多个来源的内容；真正的 allow/ask/deny 冲突，还要由第 12 篇讲过的权限引擎解释，不能只凭 settings merge 顺序判断最终授权。
 
 ## Flag 层里，SDK inline 又覆盖文件
 
-Flag 并非只有 `--settings path`。SDK 可以把 inline settings 写入 bootstrap state，读取 flag source 时再合并：
+Flag source 同时承载 `--settings path` 和 SDK 写入 bootstrap state 的 inline settings：
 
 ```ts
 if (source === 'flagSettings') {
@@ -205,7 +217,7 @@ return fileSettings
 
 ## Policy 是一个槽位，但槽位内部 first source wins
 
-托管策略的行为与普通来源不同。它不是把四种管理渠道叠加，而是选中第一份非空策略后停止：
+托管策略采用优先级选择：选中第一份非空策略后停止：
 
 ```ts
 if (source === 'policySettings') {
@@ -228,13 +240,13 @@ if (source === 'policySettings') {
 }
 ```
 
-`source` 为 `policySettings` 时，候选顺序固定为 Remote → MDM → managed files → HKCU。MDM 在 macOS 对应 plist，在 Windows 对应 HKLM；文件候选包含 `managed-settings.json` 与 `managed-settings.d/`；HKCU 最低。全部没有内容时返回 `null`，表示当前没有托管策略，而不是一份会清空前面来源的空对象。
+`source` 为 `policySettings` 时，候选顺序固定为 Remote → MDM → managed files → HKCU。MDM 在 macOS 对应 plist，在 Windows 对应 HKLM；文件候选包含 `managed-settings.json` 与 `managed-settings.d/`；HKCU 最低。全部候选为空时返回 `null`，调用方据此跳过 policy merge，前面来源的有效值保持不变。
 
 选中的 policy 随后作为 settings cascade 的最后一层合并，所以它的普通字段优先级最高。但“Remote 和本机 managed file 谁覆盖谁”这个问题本身不成立：只要 Remote 非空，本机候选根本不会参加字段级合并。
 
-还要注意失败边界。`loadSettingsFromDisk()` 会对 Remote 做 schema 校验；Remote 存在但无效时记录错误并继续尝试 MDM，而不是把无效对象当成 winner。
+还要注意失败边界。`loadSettingsFromDisk()` 会对 Remote 做 schema 校验；Remote 存在但无效时记录错误并继续尝试 MDM，只有通过校验的对象才能成为 winner。
 
-## env 不是普通字段：信任决定何时写入进程
+## env 需要经过目录信任才写入进程
 
 如果把 settings 中的 `env` 与 `theme` 一样合并后立刻 `Object.assign(process.env)`，一个刚 clone 的恶意项目就能在信任对话框出现前改写 `ANTHROPIC_BASE_URL`、`PATH` 或 `LD_PRELOAD`。
 
@@ -273,7 +285,7 @@ Object.assign(
 
 运行中，`restored-src/src/utils/settings/changeDetector.ts` 用 Chokidar 监听文件，用轮询观察 registry/plist。它故意跳过 `flagSettings`：CLI 临时文件不会变化，而且临时目录可能包含 FIFO、socket 等特殊文件。普通写入还要等待 1000ms 稳定，500ms 轮询；删除则有 `1000 + 500 + 200 = 1700ms` grace，吸收常见的 delete-and-recreate。
 
-变化不是立刻生效。它先执行 `ConfigChange` hook：
+变化先执行 `ConfigChange` hook，再进入状态同步：
 
 ```ts
 void executeConfigChangeHooks(
@@ -294,9 +306,9 @@ function fanOut(source: SettingSource): void {
 
 `source` 是五类内部来源；不过文件 watcher 不会产生 `flagSettings` 事件。`path` 是开放文件路径。`hasBlockingResult(results)` 为 `true` 时保留当前 session 状态；为 `false` 时统一清缓存，再通知订阅者。先 reset、后 emit 很重要：第一个 listener 负责重新读盘，后续 listener 直接命中新缓存，避免 N 个订阅者各自清一次缓存。
 
-交互式 `AppStateProvider` 和无头 `runHeadless()` 都订阅这条信号，并调用 `applySettingsChange(source, setAppState)`。后者重新取得有效 settings、磁盘权限规则和 hook snapshot，再更新 `AppState.settings` 与 `toolPermissionContext`。因此 headless 并没有因为缺少 React 设置界面就失去动态同步。
+交互式 `AppStateProvider` 和无头 `runHeadless()` 都订阅这条信号，并调用 `applySettingsChange(source, setAppState)`。后者重新取得有效 settings、磁盘权限规则和 hook snapshot，再更新 `AppState.settings` 与 `toolPermissionContext`。headless 由同一订阅机制获得动态同步，无需 React 设置界面参与。
 
-但动态同步不是“所有配置立即重放”。源码明确同步了 settings、权限、hook、计划/自动模式转换和有条件的 effort；已经启动的子进程、正在执行的 tool call、已构造但没有订阅刷新信号的对象，不会因为一个 JSON 改动自动重建。某个字段从当前任务还是下一轮生效，要看它的 consumer 是否每次读取 AppState，静态地列出 watcher 并不能一概而论。
+动态同步覆盖 settings、权限、hook、计划/自动模式转换和有条件的 effort。已经启动的子进程、正在执行的 tool call，以及未订阅刷新信号的既有对象会保持原实例；某个字段从当前任务还是下一轮生效，取决于 consumer 是否在每次使用前重新读取 AppState。
 
 ## GrowthBook 走另一套缓存与刷新协议
 
@@ -325,13 +337,13 @@ export function getFeatureValue_CACHED_MAY_BE_STALE<T>(
 }
 ```
 
-；`defaultValue` 是调用方提供的泛型回退值，可以是布尔、字符串、数字或对象。优先级是内部环境覆盖 → 内部配置覆盖 → GrowthBook 是否启用 → 进程内 Remote Eval 值 → `~/.claude.json` 磁盘缓存 → `defaultValue`。只有值为 `undefined` 才落到默认值，缓存中的 `false`、`0`、空字符串都属于有效结果。
+`feature` 是开放字符串 key；`defaultValue` 是调用方提供的泛型回退值，可以是布尔、字符串、数字或对象。优先级是内部环境覆盖 → 内部配置覆盖 → GrowthBook 是否启用 → 进程内 Remote Eval 值 → `~/.claude.json` 磁盘缓存 → `defaultValue`。只有缓存查询得到 `undefined` 才落到默认值，`false`、`0`、空字符串都会原样返回。
 
 前两种 override 还有限制：`CLAUDE_INTERNAL_FC_OVERRIDES` 和 `/config` Gates override 只在 `USER_TYPE === 'ant'` 生效，不能写成面向所有外部用户的公开配置接口。
 
 函数名中的 `MAY_BE_STALE` 是诚实的契约。它为了同步启动路径立即返回，允许读取上个进程留下的磁盘值。远端 payload 成功到达后会同步更新进程 Map 与磁盘，并发出 refresh signal。长期持有 gate 值的系统需要调用 `onGrowthBookRefresh(listener)` 自己重建；每次调用 getter 的热路径天然会读到进程内新值。
 
-源码还保留了 `getFeatureValue_CACHED_WITH_REFRESH(feature, defaultValue, _refreshIntervalMs)`，但 2.1.88 中第三个参数带下划线且完全未使用，函数只是转调 `MAY_BE_STALE`。真正的周期刷新集中在 GrowthBook client：外部构建间隔 6 小时，`ant` 为 20 分钟；定时器会 `unref()`，不会单独阻止进程退出。。
+源码还保留了 `getFeatureValue_CACHED_WITH_REFRESH(feature, defaultValue, _refreshIntervalMs)`，但 2.1.88 中第三个参数带下划线且完全未使用，函数只是转调 `MAY_BE_STALE`。真正的周期刷新集中在 GrowthBook client：外部构建间隔 6 小时，`ant` 为 20 分钟；定时器会 `unref()`，不会单独阻止进程退出。
 
 ## 读配置时，用一张决策表避免串层
 
@@ -362,3 +374,8 @@ Feature Flags 则有两层：`bun:bundle feature()` 决定代码是否存在，G
 
 配置确定以后，Claude Code 如何选择模型、处理认证，并在 Anthropic、Bedrock、Vertex 与 Foundry 等 provider 之间适配请求？
 
+## 参考资料
+
+- [Claude Code Settings](https://code.claude.com/docs/en/settings)
+
+- [Debug Claude Code Configuration](https://code.claude.com/docs/en/debug-your-config)

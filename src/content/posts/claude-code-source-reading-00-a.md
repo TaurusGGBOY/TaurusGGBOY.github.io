@@ -9,6 +9,18 @@ image: "/images/posts/claude-code-source-reading-00-a/claude-code-source-reading
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **设计空间**：同一工程问题通常存在多种可行机制；论文通过对照这些选择解释架构，而非只罗列模块。
+
+- **架构案例研究**：研究对象是一套具体生产系统，目标是追踪价值、原则与实现选择之间的关系。
+
+- **证据三角测量**：源码、官方材料和外部实证互相校验；结论强度由三者的重合程度决定。
+
+![论文如何从证据提炼设计原则](/images/posts/claude-code-source-reading-00-a/00-a-paper-method-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 从 source map 泄露到一篇逆向论文
 
 2026 年 3 月，Claude Code 的 npm 发布包意外带上了 source map。这个文件原本供调试器使用，其中的 `sourcesContent` 却保存了可以还原的 TypeScript 源码。npm 撤包和 GitHub DMCA 能够压缩后续传播范围，已经保存到本地的静态快照不会随之消失。
@@ -17,7 +29,7 @@ imagePosition: "left"
 
 论文 v1 比较了 Claude Code 和 OpenClaw。2026 年 7 月 2 日更新的 v2 又加入 Hermes Agent，并吸收了快照之后出现的 Agent 研究。当前版本覆盖约 1884 个文件、51.2 万行 TypeScript，配套资料发布在 [VILA-Lab/Dive-into-Claude-Code](https://github.com/VILA-Lab/Dive-into-Claude-Code)。
 
-这篇论文没有重新实现 Claude Code，也没有拿 SWE-bench 跑一组成功率。它做的是软件架构案例研究：先从源码中找出存在替代方案的设计点，再解释 Claude Code 为什么会选择现在这条路径。
+这篇论文采用软件架构案例研究方法：先从源码中找出存在替代方案的设计点，再解释 Claude Code 为什么会选择现在这条路径。重新实现系统和用 SWE-bench 测量成功率均在研究范围之外。
 
 ## 作者介绍
 
@@ -59,7 +71,7 @@ VILA Lab 则是 Zhiqiang Shen 在 MBZUAI 机器学习系带领的研究组。[�
 
 这是一项定性研究。
 
-论文没有受试者、benchmark 数据集和控制组，也没有统计显著性或 effect size。因此，它能够解释系统怎样组织，不能给出“某种架构让任务成功率提高多少”这样的因果结论。七种权限模式和五层压缩各自带来多少收益，论文同样没有测量。
+论文的证据来自静态源码和公开材料，适合解释系统怎样组织。受试者、benchmark、控制组、统计显著性和 effect size 均不在研究设计中，因此“某种架构让任务成功率提高多少”以及七种权限模式、五层压缩各自带来多少收益，都超出它能够支持的结论范围。
 
 作者的研究过程可以整理成四步：
 
@@ -88,7 +100,7 @@ Tier C 是 reconstructed evidence，包括社区分析、跨系统比较，以�
 
 论文据此提出“模型判断下一步，harness 负责执行与约束”。这里已经从函数进入架构解释，需要源码和官方材料共同支撑。
 
-作者继续推演，认为未来 Agent 应该显式保护开发者的长期理解力。这属于研究方向。2.1.88 的源码并没有把它实现成一个可确认的产品目标。
+作者继续推演，认为未来 Agent 应该显式保护开发者的长期理解力。这属于研究方向；2.1.88 源码能够确认的产品目标不包含这一项。
 
 所以，读这篇论文时可以记住一个简单规则：越靠近函数、类型和分支，结论越硬；越靠近价值判断和未来系统，限定条件越重要。
 
@@ -124,7 +136,7 @@ Tier C 是 reconstructed evidence，包括社区分析、跨系统比较，以�
 
 一条原则只有跨多个子系统反复出现，才具备架构解释力。单个函数使用 JSONL，只能说明它选择了某种格式；会话、sidechain、compact boundary 和读取时链修补都偏向追加式设计，才有理由把“可审计状态”上升为系统原则。
 
-这里要保留一个边界：这 5 个价值和 13 条原则是作者提出的解释框架。我们没有看到 Anthropic 的内部设计文档，源码里也不存在一份同名的正式架构规范。
+这里要保留一个边界：这 5 个价值和 13 条原则是作者提出的解释框架，证据来自公开材料和可观察源码，而非 Anthropic 内部设计文档或一份同名的正式架构规范。
 
 ## 从一次修复失败测试开始
 
@@ -154,13 +166,13 @@ Tier C 是 reconstructed evidence，包括社区分析、跨系统比较，以�
 继续调用模型，直到停止
 ```
 
-`queryLoop()` 的实现有 1489 行，论文仍把它称为 simple while-loop。这里的“简单”说的是循环骨架：模型给出下一步，系统执行，再把结果送回模型。它没有说明函数体很短，更没有说明外围工程简单。
+`queryLoop()` 的实现有 1489 行，论文仍把它称为 simple while-loop。这里的“简单”只描述循环骨架：模型给出下一步，系统执行，再把结果送回模型；函数体和外围工程依然复杂。
 
 模型决定先读哪个文件、是否运行测试、下一步调用哪个工具。Harness 决定这一轮模型能看到什么上下文和 Schema，工具输入是否合法，当前权限能否执行，多个调用能否并行，失败后怎样恢复，结果怎样写入 transcript，以及窗口满时保留什么。
 
 这与显式状态图形成了清楚的对照。状态图在 harness 里规定下一步走哪条边；Claude Code 让模型选择局部路径，再用代码确保它只能通过结构化 `tool_use` 影响文件系统、shell 和网络。
 
-论文引用一个社区估算：约 1.6% 的代码属于 AI decision logic，其余 98.4% 是 operational infrastructure。这个数字很有传播力，证据却只有 Tier C。怎样区分“决策逻辑”和“基础设施”没有统一口径，论文也没有给出可复现的逐文件分类数据。
+论文引用一个社区估算：约 1.6% 的代码属于 AI decision logic，其余 98.4% 是 operational infrastructure。这个数字属于 Tier C，分类口径和可复现的逐文件数据均未给出。
 
 所以，1.6% 适合表达趋势，不能当作精确的软件度量。源码能够稳定支持的结论是：权限、工具路由、上下文、恢复与持久化占据了主要实现面。
 
@@ -212,7 +224,7 @@ Tier C 是 reconstructed evidence，包括社区分析、跨系统比较，以�
 | `bypassPermissions` | 跳过大部分询问，安全关键检查和 bypass-immune 规则仍可阻断 |
 | `bubble` | 内部模式，用于 subagent 把权限请求上抛给父终端 |
 
-公开模式数组包含 `acceptEdits`、`bypassPermissions`、`default`、`dontAsk` 和 `plan`。`auto` 受 feature gate 控制，`bubble` 用于内部权限传播。静态源码无法确认某个线上构建是否启用了 `auto`，也不能计算各模式的使用比例。
+公开模式数组包含 `acceptEdits`、`bypassPermissions`、`default`、`dontAsk` 和 `plan`。`auto` 受 feature gate 控制，`bubble` 用于内部权限传播。
 
 一次动作还可能经过七类安全边界：工具池预过滤、deny-first 规则、permission mode、可选分类器、shell sandbox、resume 不恢复会话权限，以及 Hook 拦截。
 
@@ -220,9 +232,9 @@ Tier C 是 reconstructed evidence，包括社区分析、跨系统比较，以�
 
 `toolMatchesRule()` 支持工具级与内容级匹配，deny 先于 allow。宽泛 deny 不会被更具体的 allow 暗中覆盖。`PreToolUse` 可以阻断、要求询问或改写输入，但 Hook 返回 allow 也不能跳过后续 deny 和安全检查。
 
-这套设计承认用户会产生 approval fatigue。论文引用 Anthropic 的公开分析：用户批准了约 93% 的权限请求。高批准率意味着弹窗本身不能成为唯一安全边界，于是规则、分类器与 sandbox 必须在用户没有认真检查时仍能工作。
+这套设计承认用户会产生 approval fatigue。论文引用 Anthropic 的公开分析：用户批准了约 93% 的权限请求。高批准率要求规则、分类器与 sandbox 在用户快速批准时继续承担独立的安全判断。
 
-纵深防御也有代价。多个层如果共享解析器、性能预算和上下文，它们的独立性可能低于设计图呈现的程度。论文 v2 引用了长复合命令退化成通用确认、sandbox parser differential 等外部安全分析。这些是特定版本窗口里的 Tier C 证据，不能推广到所有当前版本。它们说明了一点：安全层数增加，不等于失效模式已经彼此隔离。
+纵深防御也有代价。多个层如果共享解析器、性能预算和上下文，它们的独立性可能低于设计图呈现的程度。论文 v2 引用了长复合命令退化成通用确认、sandbox parser differential 等外部安全分析。这些是特定版本窗口里的 Tier C 证据，适用范围限于相应版本；安全层数和失效模式的独立程度需要分别验证。
 
 ## 上下文快满时，系统为什么要分五步处理
 
@@ -238,17 +250,17 @@ Tier C 是 reconstructed evidence，包括社区分析、跨系统比较，以�
 
 这五层处理的对象不同。Budget reduction 面向单个巨大输出，snip 面向时间深度，microcompact 还关心 cache，context collapse 改变模型看到的视图，auto-compact 的语义损失和调用成本最高，因此最后执行。
 
-`compactConversation()` 的签名也能验证这一点。它接收消息、工具上下文、cache-safe 参数、是否抑制后续问题、自定义指令、`isAutoCompact` 和可选的重新压缩信息。其中 `isAutoCompact` 默认是 `false`；自定义指令与重新压缩信息可以是 `undefined`。这些取值会改变 Hook 信息、提示词与重新压缩分支。
+`compactConversation()` 的签名也能验证这一点。它接收消息、工具上下文、cache-safe 参数、是否抑制后续问题、自定义指令、`isAutoCompact` 和可选的重新压缩信息。其中 `isAutoCompact` 默认是 `false`，走手动压缩的 Hook 与提示词路径；传入 `true` 时切到自动压缩语义。省略自定义指令会使用内置压缩提示，省略重新压缩信息则跳过 recompact 分支。
 
 论文 v2 还把可见性边界说得更准确：budget reduction 始终启用，snip、cache-aware microcompact 与 context collapse 受 feature gate 影响，auto-compact 默认启用但可以关闭。不同构建目标可能运行完全不同的组合。
 
 上下文管理还分散在 compact 模块之外。嵌套目录指令延迟加载、ToolSearch 延迟暴露完整 Schema、单工具结果预算和 subagent summary-only return，都在减少当轮输入。
 
-这种设计让长会话能够继续，却引入一个透明性问题：磁盘上仍保存完整 transcript，不代表模型下一轮仍看到同样的信息。Auto-compact 会留下可见摘要，microcompact 会产生边界标记，context collapse 则可以在没有用户可见输出的情况下改变模型视图。
+这种设计让长会话能够继续，却引入一个透明性问题：磁盘上仍保存完整 transcript，不代表模型下一轮仍看到同样的信息。Auto-compact 会留下可见摘要，microcompact 会产生边界标记，context collapse 则会静默改变模型视图。
 
 所以，“会话可以恢复”与“模型仍然记得全部细节”是两件不同的事。
 
-## MCP、Plugin、Skill 和 Hook 为什么没有合并
+## MCP、Plugin、Skill 和 Hook 为什么保持分层
 
 MCP、Plugin、Skill 和 Hook 都能扩展 Claude Code，看起来很容易被归到同一个“插件系统”里。论文先把它们放回 Agent loop 的三个插入点：
 
@@ -256,7 +268,7 @@ MCP、Plugin、Skill 和 Hook 都能扩展 Claude Code，看起来很容易被�
 - model：决定模型能够调用什么；
 - execute：决定动作能否以及怎样执行。
 
-MCP 主要贡献外部工具、资源与提示。`assembleToolPool(permissionContext, mcpTools)` 先取得内置工具，再按 deny 规则过滤 MCP 工具，最后合并、去重和排序。`permissionContext` 决定可见边界，`mcpTools` 来自运行时连接，静态源码不能穷举实际服务器与工具名。
+MCP 主要贡献外部工具、资源与提示。`assembleToolPool(permissionContext, mcpTools)` 先取得内置工具，再按 deny 规则过滤 MCP 工具，最后合并、去重和排序。
 
 Plugin 是包装与分发格式。它可以同时携带 commands、agents、skills、hooks、MCP servers、LSP servers、output styles、channels、settings 和 user configuration，再由 loader 分发到不同注册表。Plugin 自身不会增加一个独立运行时插入点。
 
@@ -270,11 +282,11 @@ Hook 插入生命周期，可以在用户提交、工具执行前后、权限拒
 
 Claude Code 通过 `AgentTool.tsx` 分派内置或自定义 subagent。不同构建与入口最多可以出现 Explore、Plan、general-purpose、Claude Code Guide、Verification 和 Statusline-setup 六类内置定义。
 
-这里的“最多”很重要。类型和 feature gates 只说明候选能力，不能保证每个外部用户都能在每个构建中看到它们。
+这里的“最多”很重要。
 
 Agent 输入 Schema 中，`isolation` 对外部构建通常只有 `worktree`，内部构建可以增加 `remote`；`cwd` 与 `run_in_background` 也受功能开关影响。未指定 isolation 时，默认是在同一文件系统中运行，但 conversation context 隔离。`worktree` 进一步隔离文件修改，`remote` 在论文分析的构建中属于内部路径。
 
-自定义 agent 还能指定 `tools`、`disallowedTools`、`model`、`effort`、`permissionMode`、`mcpServers`、`hooks`、`maxTurns`、`skills`、memory scope、后台运行和 isolation。开放字段如 prompt、路径和轮数来自配置或运行时输入，源码只能说明类型与约束，无法穷举实际值。
+自定义 agent 还能指定 `tools`、`disallowedTools`、`model`、`effort`、`permissionMode`、`mcpServers`、`hooks`、`maxTurns`、`skills`、memory scope、后台运行和 isolation。开放字段如 prompt、路径和轮数来自配置或运行时输入，源码只能说明类型与约束，实际值由外部配置和运行时输入决定，本文不逐一展开。
 
 默认路径中，subagent 会获得一段自包含 prompt，以及重新组装的工具与权限上下文。父会话的完整历史不会直接继承，最终只有文本与元数据返回父 Agent。Fork-subagent 是一个例外，它可以复用父上下文。
 
@@ -290,7 +302,7 @@ Claude Code 把会话写进项目范围的 JSONL transcript。用户消息、ass
 
 Compact boundary 会记录 `headUuid`、`anchorUuid` 和 `tailUuid`。Loader 可以在读取时修补消息链，因此压缩通常不需要回头修改或删除旧 transcript 行。
 
-`--resume` 通过 replay transcript 重建消息，fork 从旧会话创建新分支。会话级临时权限不会随之恢复，因为这些权限没有被序列化成 transcript 中可继承的信任状态。新会话会根据 CLI 参数和磁盘设置重新建立 permission context，未识别请求再次回到 deny-first 路径。
+`--resume` 通过 replay transcript 重建消息，fork 从旧会话创建新分支。会话级临时权限未序列化进 transcript，因此恢复时只重建消息；新会话根据 CLI 参数和磁盘设置重新建立 permission context，未识别请求再次进入 deny-first 路径。
 
 这是一种明确的取舍。消息历史可以跨会话延续，临时信任停在原来的 session boundary 内。
 
@@ -330,17 +342,15 @@ Hermes Agent 是单个 Python 进程，角色由 `hermes`、`hermes-agent` 或 `
 
 第三项贡献，是把模型之外的工程放回 Agent 研究中心。
 
-论文没有提出新的搜索算法或训练方法。它说明生产系统的主要差异往往发生在 permission gate、tool routing、context shaping、recovery、persistence 和 deployment topology 中。模型能力相同，harness 设计不同，系统能安全完成的工作也会不同。
+论文的贡献集中在架构解释，而非搜索算法或训练方法。它说明生产系统的主要差异往往发生在 permission gate、tool routing、context shaping、recovery、persistence 和 deployment topology 中。模型能力相同，harness 设计不同，系统能安全完成的工作也会不同。
 
-## 四个边界决定这篇论文不能证明什么
 
-第一个边界来自静态快照。
 
-源码能证明某个分支存在，不能证明生产 feature flag 已经打开；能证明 retry 上限，不能证明线上经常触发；能证明 permission mode 的控制流，不能给出分类器误报率；能证明五层压缩机制，不能证明它们足以维持大型代码库的一致性。
+第一个边界来自静态快照：源码确认的是 2.1.88 的结构化实现，后续运行状态仍受 build、feature gate 与环境变量影响。
 
-第二个边界来自 reverse-engineering epistemology。Source map 可以恢复发布物中的结构、路径与变量，却不能保证这些路径等同于 Anthropic 内部原始仓库，也不能自动确认设计者意图。
+第二个边界来自 reverse-engineering epistemology。
 
-第三个边界来自外部实证材料。论文引用 Cursor 仓库复杂度、AI 生成提交的技术债、开发者理解力和长期生产率研究，用来推测 bounded context 与局部决策可能造成的全局问题。这些研究提供相邻证据，没有直接评测 Claude Code 2.1.88。
+第三个边界来自外部实证材料。论文引用 Cursor 仓库复杂度、AI 生成提交的技术债、开发者理解力和长期生产率研究，用来推测 bounded context 与局部决策可能造成的全局问题。这些研究提供相邻证据，其直接研究对象是 Cursor、AI 生成提交与开发者行为。
 
 第四个边界来自时间混合。论文核心静态快照停在 2.1.88，v2 的未来方向却已经讨论 2.1.154 dynamic workflows、Claude 4.8 以及 2026 年后续政策与研究。后快照材料可以展示设计空间怎样继续移动，不能反向写成 2.1.88 已有行为。
 
@@ -361,16 +371,22 @@ Hermes Agent 是单个 Python 进程，角色由 `hermes`、`hermes-agent` 或 `
 
 模型能力提高以后，permission gate 不会自动变成外部审计系统；上下文窗口变长以后，跨月项目不会自动获得可靠记忆；subagent 数量增加以后，局部验证不会自动形成全局一致性；代码生成更快以后，开发者也不会自动理解 Agent 改过的系统。
 
-论文在长期开发者能力上做了一个值得注意的处理。作者没有把它强行列为 Claude Code 已经体现的第六项价值，因为官方材料和 2.1.88 架构都缺少足够证据。他们把它单独列为 cross-cutting question，用来评估短期能力放大是否损害长期理解、代码库连贯性和开发者培养路径。
+论文在长期开发者能力上做了一个值得注意的处理。官方材料和 2.1.88 架构提供的证据不足以把它列为 Claude Code 已经体现的第六项价值，作者便将其单独列为 cross-cutting question，用来评估短期能力放大是否损害长期理解、代码库连贯性和开发者培养路径。
 
-作者在这里保留了证据边界。源码分析能够看到系统当前优化了什么，也能看出哪些重要目标还没有成为一等架构对象。至于“保护开发者”能否算作 Claude Code 的第六个设计目标，现有材料还不足以下这个结论。
+作者在这里保留了证据边界。源码分析能够看到系统当前优化了什么，也能识别尚未成为一等架构对象的重要目标；现有材料只支持把“保护开发者”作为开放问题讨论。
 
 ## 小结
 
-*Dive into Claude Code* 的研究类型，是基于公开静态源码的软件架构案例研究。它不具备官方架构说明的身份，也没有提供性能实验数据。
+*Dive into Claude Code* 是基于公开静态源码的软件架构案例研究，其结论属于第三方架构解释，证据范围不包括性能实验数据。
 
 论文先用 Tier A、Tier B 和 Tier C 区分公开意图、源码事实与重建解释，再从 2.1.88 中提炼出 5 个价值、13 条原则、7 个高层组件和 5 层实现结构。最有解释力的结论是，Claude Code 让模型保留局部行动选择，同时用密集的确定性 harness 管理工具、权限、上下文、恢复和持久化。
 
 OpenClaw 与 Hermes Agent 的对照进一步说明，相似的 Agent 问题会因为 repository session、persistent gateway 和 multi-surface process 三种部署语境而得到不同答案。
 
 源码泄露提供了可观察材料，论文进一步提供了分析这些材料的语言。沿着这套方法，我们可以把 Agent 系统的讨论从模型能力和功能数量，推进到能够被源码核验的边界、权衡与设计选择。
+
+## 参考资料
+
+- [论文：Dive into Claude Code](https://arxiv.org/abs/2604.14228)
+
+- [论文配套代码与材料](https://github.com/VILA-Lab/Dive-into-Claude-Code)

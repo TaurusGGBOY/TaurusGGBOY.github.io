@@ -10,19 +10,31 @@ image: "/images/posts/claude-code-source-reading-15/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **检索流水线**：候选发现、内容读取、相关性裁剪和证据回填是四个独立步骤。
+
+- **有界结果**：分页、截断与范围参数限制一次检索占用的上下文和执行时间。
+
+- **证据局部性**：模型应拿到与问题最接近的路径、行号和片段，以便继续验证。
+
+![本地与网络检索的有界流水线](/images/posts/claude-code-source-reading-15/15-retrieval-pipeline-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 上一篇留下的问题是：当 Agent 不知道目标在哪里时，Glob、Grep、Read、WebSearch 与 WebFetch 等检索工具如何分层搜索并裁剪结果？
 
-答案先说：**Claude Code 没有设计一个包办所有事情的“万能搜索”。它把未知范围逐层缩小，再把每一层的结果压成模型能够继续消费的 `tool_result`。**
+答案先说：**Claude Code 用多种检索工具逐层缩小未知范围，再把每一层的结果压成模型能够继续消费的 `tool_result`。**
 
 本地路径最典型的顺序是 `Glob → Grep → Read`。`Glob` 根据文件名模式圈出候选文件，`Grep` 用正则在文件内容里定位命中，`Read` 最后读取确定文件的一段内容。网络路径则是 `WebSearch → WebFetch`：前者找候选页面与链接，后者抓取指定 URL，并按照 `prompt` 提取与当前任务相关的信息。
 
-这几种工具可以交叉使用，并不强制组成固定流水线。已经知道文件路径时可以直接 `Read`；只需要确认某个符号出现在哪些文件时，`Grep` 可以直接从 cwd 开始；用户给出了网页 URL，也没有必要先 `WebSearch`。所谓“分层”，指的是各工具负责不同粒度的问题，而不是运行时硬编码了一条只能从头走到尾的链。
+这几种工具可以按已知信息自由组合。已经知道文件路径时可以直接 `Read`；只需要确认某个符号出现在哪些文件时，`Grep` 可以直接从 cwd 开始；用户给出了网页 URL，可以直接交给 `WebFetch`。这里的“分层”指各工具分别处理路径发现、内容定位、定点读取和网络提取，调用顺序由当前证据决定。
 
 裁剪发生在每一层。`Glob` 默认最多返回 100 个路径；`Grep` 默认保留 250 行或条目，并支持 `offset` 翻页；`Read` 用 `offset`、`limit`、字节上限和 token 上限控制文件切片；`WebSearch` 把服务端搜索块整理为标题、URL 和文本；`WebFetch` 最多把 100,000 个字符交给二次模型处理。它们最后都经过各自的 `mapToolResultToToolResultBlockParam()`，变成查询循环能追加到消息历史的 `tool_result`。
 
-因此，`No files found` 或 `No matches found` 只表示：**在本次 path、pattern、ignore 规则、权限范围、分页窗口和执行状态之下没有返回结果。超时、截断、权限拒绝和网络失败更不应该被解释成“没有”。
+因此，`No files found` 或 `No matches found` 只表示：**本次 path、pattern、ignore 规则、权限范围与分页窗口共同得到空结果。** 超时、截断、权限拒绝和网络失败属于独立状态，不能归入空结果。
 
 本文继续限定在 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码。下面的代码均来自 `restored-src/`，只省略与本段结论无关的字段与分支。
 
@@ -40,11 +52,11 @@ imagePosition: "left"
 
 ![Claude Code 本地与网络分层检索流程手绘图](/images/posts/claude-code-source-reading-15/15-search-retrieval-handdrawn.png)
 
-图里的回箭头很重要。第一次搜索通常只会产生下一次搜索的线索。模型看到文件名以后可以改用更窄的 `Grep`，看到命中行以后再 `Read` 相邻范围；网页搜索同样可能先返回文档入口，再由 `WebFetch` 读取具体页面。检索不是一次性数据库查询，而是 query loop 中可重复执行的观察动作。
+图里的回箭头很重要。第一次搜索通常只会产生下一次搜索的线索。模型看到文件名以后可以改用更窄的 `Grep`，看到命中行以后再 `Read` 相邻范围；网页搜索同样可能先返回文档入口，再由 `WebFetch` 读取具体页面。检索在 query loop 中反复产生观察结果，每次结果都为下一次更窄的检索提供线索。
 
 ## Glob 先找路径，不读取文件内容
 
-`restored-src/src/tools/GlobTool/GlobTool.ts` 的输入很小：必填 `pattern`，可选 `path`。`path` 省略时使用 `getCwd()`；它不是字符串值 `"undefined"` 或 `"null"`，而是真的不提供该字段。
+`restored-src/src/tools/GlobTool/GlobTool.ts` 的输入很小：必填 `pattern`，可选 `path`。调用方省略 `path` 时，`GlobTool.getPath()` 把搜索根回退到 `getCwd()`。
 
 ```ts
 async call(input, { abortController, getAppState, globLimits }) {
@@ -71,9 +83,11 @@ async call(input, { abortController, getAppState, globLimits }) {
 }
 ```
 
-**函数说明：** `GlobTool.call()` 调用 `utils/glob.ts` 中的 `glob()` 枚举匹配路径，再把 cwd 内的绝对路径转成相对路径，以减少消息里的 token。返回值同时保留 `truncated`，因此模型能知道路径列表是不是完整。
+**函数说明：** `GlobTool.call()` 调用 `utils/glob.ts` 中的 `glob()` 枚举匹配路径，再把 cwd 内的绝对路径转成相对路径，以减少消息里的 token。返回值同时保留 `truncated`，因此模型能判断路径列表是否完整。
 
-**参数说明：** `input.pattern` 是必填 glob 字符串，例如 `**/*.ts`，候选值开放；`input.path` 是 `string | undefined`，省略时回退 cwd。`abortController.signal` 允许上游取消搜索。`globLimits?.maxResults` 是 `number | undefined`，缺省值为 `100`；这里把 `offset` 固定为 `0`，所以 `Glob` 自身没有对外分页参数。`toolPermissionContext` 提供文件读取规则与忽略模式。
+**参数说明：** `input.pattern` 是必填 glob 字符串，例如 `**/*.ts`，候选值开放；`input.path` 是 `string | undefined`，省略时回退 cwd。`abortController.signal` 允许上游取消搜索。`globLimits?.maxResults` 是 `number | undefined`，缺省值为 `100`；`offset` 固定为 `0`，所以 `Glob` 的公开输入只覆盖首个窗口。`toolPermissionContext` 提供文件读取规则与忽略模式。
+
+**字段说明：** `start` 记录计时起点，`appState` 提供当前应用状态，`limit` 保存本次结果上限；底层返回的 `files` 是候选路径，`truncated` 标记上限之后是否仍有候选。输出把路径转换为 `filenames`，用 `durationMs` 记录耗时、`numFiles` 记录返回数量，并将整个 `output` 放入 `data`。
 
 真正的文件枚举由 `restored-src/src/utils/glob.ts` 完成。绝对 glob 会先通过 `extractGlobBaseDirectory()` 拆成静态根目录和相对 pattern，再交给 ripgrep 的 `--files`。源码传入 `--sort=modified`，注释明确写的是按修改时间从旧到新排列。随后才执行 `slice(offset, offset + limit)`。
 
@@ -83,13 +97,13 @@ Glob 对 ignore 的处理有一个容易忽略的默认值：
 - `CLAUDE_CODE_GLOB_HIDDEN` 默认按 `true` 处理，因此默认包含隐藏文件；显式设为假值才不加 `--hidden`。
 - 权限上下文里的文件读取 ignore pattern 仍会转换成排除 glob；孤立的插件缓存版本目录也会被排除。
 
-这说明“Glob 会不会看到一个文件”同时取决于 pattern、搜索根、两个环境变量、权限 ignore 与插件缓存排除。返回空数组只能证明这个组合没有产出路径。
+Glob 的可见集合同时取决于 pattern、搜索根、两个环境变量、权限 ignore 与插件缓存排除。空数组只证明这个组合产出 0 条路径。
 
-在调用前，`GlobTool.validateInput()` 还会检查显式 `path` 是否存在且为目录。Windows UNC 路径会跳过这次预先 `stat`，避免验证阶段触发 NTLM 凭据泄漏；这不是自动放行，后面的共享权限流程仍然存在。不存在的目录返回 `errorCode: 1`，路径存在但不是目录返回 `errorCode: 2`。
+在调用前，`GlobTool.validateInput()` 还会检查显式 `path` 是否存在且为目录。Windows UNC 路径会跳过这次预先 `stat`，以规避验证阶段触发 NTLM 凭据泄漏；后续仍进入共享权限流程。目录缺失返回 `errorCode: 1`，路径存在但类型为非目录时返回 `errorCode: 2`。
 
 ## Grep 在内容里定位，并把排序与分页说清楚
 
-`Glob` 只看路径。需要寻找函数名、错误文本或调用痕迹时，`GrepTool` 才进入文件内容。它没有自己实现正则引擎，而是在 `restored-src/src/tools/GrepTool/GrepTool.ts` 中组装参数，再调用 `restored-src/src/utils/ripgrep.ts` 的 `ripGrep()`。
+`Glob` 只看路径。需要寻找函数名、错误文本或调用痕迹时，`GrepTool` 才进入文件内容。它在 `restored-src/src/tools/GrepTool/GrepTool.ts` 中组装参数，再调用 `restored-src/src/utils/ripgrep.ts` 的 `ripGrep()` 执行正则搜索。
 
 ```ts
 function applyHeadLimit<T>(
@@ -112,25 +126,25 @@ function applyHeadLimit<T>(
 
 **函数说明：** `applyHeadLimit()` 是 `GrepTool.call()` 三种输出模式共用的分页函数。它先跳过 offset，再截取当前窗口；只有窗口之后确实还有结果时，才回传 `appliedLimit` 提醒模型继续翻页。常量 `DEFAULT_HEAD_LIMIT` 在同一文件中固定为 `250`。
 
-**参数说明：** `items` 是 ripgrep 返回的行或文件条目数组；`limit` 是 `number | undefined`，`undefined` 使用 250，显式 `0` 表示跳过条数上限；`offset` 是数字，默认 `0`。输入 schema 用 `semanticNumber` 接收 `head_limit` 和 `offset`，这里没有另外声明可枚举值。
+**参数说明：** `items` 是 ripgrep 返回的行或文件条目数组；`limit` 是 `number | undefined`，`undefined` 使用 250，显式 `0` 表示跳过条数上限；`offset` 是数字，默认 `0`。输入 schema 用 `semanticNumber` 接收 `head_limit` 和 `offset`，两者按开放数值处理。
 
 `GrepTool.call()` 还负责把其他结构化输入翻译成 ripgrep 参数。`pattern` 是必填 ripgrep 正则；`path` 为文件、目录或 `undefined`，省略时使用 cwd；`glob` 与 `type` 都是可选字符串过滤器。`output_mode` 只能是 `content`、`files_with_matches`、`count`，默认 `files_with_matches`。`-n` 默认 `true`，但只影响 `content`；`-i` 默认 `false`；`multiline` 默认 `false`，设为 `true` 时加入 `-U --multiline-dotall`。工具始终添加 `--hidden` 和 `--max-columns 500`。
 
-三种 `output_mode` 解决的不是显示偏好，而是不同阶段的问题：
+三种 `output_mode` 分别服务于三个检索阶段：
 
 - `files_with_matches` 返回匹配文件名。正常运行时先按 mtime 从新到旧排序，相同时间再按文件名排序；测试环境直接按文件名排序。
-- `content` 返回实际命中行，可以使用 `-A`、`-B`、`-C` 或 `context`。`context` 优先于 `-C`，两者都没有提供时才分别使用 `-B` 与 `-A`。
+- `content` 返回实际命中行，可以使用 `-A`、`-B`、`-C` 或 `context`。`context` 优先于 `-C`；两者均省略时才分别使用 `-B` 与 `-A`。
 - `count` 返回 `文件:数量`，并计算当前返回窗口里的总命中数与文件数。
 
-`GrepTool` 默认执行 `applyHeadLimit(results, undefined, 0)`，有效上限为 250。只有真的还有更多条目时，输出里才出现 `appliedLimit`；只传了非零 `offset` 时则会出现 `appliedOffset`。模型可以增加 `offset` 继续读下一页。显式 `head_limit: 0` 会取消这一层限制，但结果仍受工具的 20,000 字符持久化阈值、ripgrep 20 MB stdout buffer 和上下文容量影响，所以它不等于无限成本。
+`GrepTool` 默认执行 `applyHeadLimit(results, undefined, 0)`，有效上限为 250。只有真的还有更多条目时，输出里才出现 `appliedLimit`；只传了非零 `offset` 时则会出现 `appliedOffset`。模型可以增加 `offset` 继续读下一页。显式 `head_limit: 0` 会取消这一层限制，工具的 20,000 字符持久化阈值、ripgrep 20 MB stdout buffer 和上下文容量仍会约束总成本。
 
-Grep 默认尊重 ripgrep 自己的 ignore 规则，因为它没有像 Glob 那样添加 `--no-ignore`。同时，它会显式排除 `.git`、`.svn`、`.hg`、`.bzr`、`.jj`、`.sl`，再叠加权限上下文中的读取 ignore pattern 和插件缓存排除。这里同样不存在“搜索整个磁盘且绕过配置”的语义。
+Grep 保留 ripgrep 自己的 ignore 规则，参数中省略 `--no-ignore`。同时，它会显式排除 `.git`、`.svn`、`.hg`、`.bzr`、`.jj`、`.sl`，再叠加权限上下文中的读取 ignore pattern 和插件缓存排除。因此，可见范围始终受 ignore 与权限配置约束。
 
-`ripGrep()` 对退出状态做了专门区分：退出码 `1` 才是正常的无匹配；`ENOENT`、`EACCES`、`EPERM` 会抛出；EAGAIN 会以单线程 `-j 1` 重试一次。默认超时在 WSL 为 60 秒，其他平台为 20 秒，可由 `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS` 的正整数秒覆盖。超时且没有任何结果时抛出 `RipgrepTimeoutError`，明确提醒模型缩小路径或 pattern，避免把“没搜完”误写成“没有”。如果异常发生前已有完整行，部分错误路径会返回这些行，因此读者仍要把它理解成一次有执行边界的观察。
+`ripGrep()` 对退出状态做了专门区分：退出码 `1` 才是正常的无匹配；`ENOENT`、`EACCES`、`EPERM` 会抛出；EAGAIN 会以单线程 `-j 1` 重试一次。默认超时在 WSL 为 60 秒，其他平台为 20 秒，可由 `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS` 的正整数秒覆盖。超时且结果为空时抛出 `RipgrepTimeoutError`，明确提醒模型缩小路径或 pattern，从状态上区分搜索未完成与零命中。如果异常发生前已有完整行，部分错误路径会返回这些行，因此读者仍要把它理解成一次有执行边界的观察。
 
 ## Read 读取确定范围，并阻止一个文件吞掉上下文
 
-搜索最终需要落到内容。`FileReadTool` 不只是文本文件读取器，它的输出类型还包括 `image`、`notebook`、`pdf`、PDF 页图片 `parts`，以及重复读取命中的 `file_unchanged`。本篇聚焦最常见的文本路径。
+搜索最终需要落到内容。`FileReadTool` 同时处理文本、`image`、`notebook`、`pdf`、PDF 页图片 `parts`，以及重复读取命中的 `file_unchanged`。本篇聚焦最常见的文本路径。
 
 ```ts
 const defaults = getDefaultFileReadingLimits()
@@ -140,17 +154,17 @@ const maxTokens =
   fileReadingLimits?.maxTokens ?? defaults.maxTokens
 ```
 
-**函数说明：** 这段源码位于 `FileReadTool.call()`。函数先从 `ToolUseContext` 取得宿主覆盖值，没有覆盖才读取 `getDefaultFileReadingLimits()`；随后还会规范化路径、检查相同范围去重，并进入 `callInner()` 按文件类型读取。
+**函数说明：** 这段源码位于 `FileReadTool.call()`。函数优先采用 `ToolUseContext` 的宿主覆盖值，缺省时读取 `getDefaultFileReadingLimits()`；随后还会规范化路径、检查相同范围去重，并进入 `callInner()` 按文件类型读取。
 
-**参数说明：** `file_path` 是必填绝对路径字符串；`offset` 是非负整数，默认 `1`，文本读取时表示从第 1 行开始，显式 `0` 也会映射到底层第 0 行索引；`limit` 是正整数或 `undefined`，省略表示没有显式行数切片；`pages` 是 PDF 专用的页码字符串或 `undefined`，支持 `"3"`、`"1-5"` 这类单页和闭区间，一次最多 20 页。`fileReadingLimits` 可由宿主覆盖；没有覆盖时使用默认限制。
+**参数说明：** `file_path` 是必填绝对路径字符串；`offset` 是非负整数，默认 `1`，文本读取时表示从第 1 行开始，显式 `0` 也会映射到底层第 0 行索引；`limit` 是正整数，省略时跳过显式行数切片，但字节与 token 上限仍然生效；`pages` 是 PDF 专用的可选页码字符串，支持 `"3"`、`"1-5"` 这类单页和闭区间，一次最多 20 页。宿主省略 `fileReadingLimits` 时，函数采用默认字节与 token 限制。
 
 `restored-src/src/tools/FileReadTool/limits.ts` 给出的硬编码回退是：总文件大小 256 KB，输出最多 25,000 token。`maxTokens` 的优先级是环境变量 `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`、GrowthBook 配置、25,000；无效值都会回退。
 
-文本路径的 `callInner()` 调用 `readFileInRange()`。提供 `limit` 时按行切片；没有提供时，总文件大小上限会先挡住过大的文件。返回内容还会做 token 估算，接近阈值时调用 token count API 精确计算，超过上限抛出 `MaxFileReadTokenExceededError`。这也是为什么大文件应该先 Grep，再用 `offset + limit` 读取局部。
+文本路径的 `callInner()` 调用 `readFileInRange()`。提供 `limit` 时按行切片；省略时，总文件大小上限会先挡住过大的文件。返回内容还会做 token 估算，接近阈值时调用 token count API 精确计算，超过上限抛出 `MaxFileReadTokenExceededError`。这也是为什么大文件应该先 Grep，再用 `offset + limit` 读取局部。
 
-读取成功后，工具会把内容、mtime、offset 和 limit 写入 `readFileState`。下一次读取完全相同范围且 mtime 未变时，可以返回 `file_unchanged` stub，避免把同一段内容再次塞进上下文。功能开关 `tengu_read_dedup_killswitch` 默认为 `false`，也就是去重默认启用；。
+读取成功后，工具会把内容、mtime、offset 和 limit 写入 `readFileState`。下一次读取完全相同范围且 mtime 未变时，可以返回 `file_unchanged` stub，避免把同一段内容再次塞进上下文。功能开关 `tengu_read_dedup_killswitch` 默认为 `false`，也就是去重默认启用。
 
-`Read` 同样先经过 `checkReadPermissionForTool()`。显式 deny 路径在输入校验阶段就会返回错误，危险设备文件也会被拒绝。路径在 cwd 之外时，是否允许、询问或拒绝由权限上下文和可读内部路径共同决定。只读工具没有修改文件，不代表它可以读取任意目录。
+`Read` 同样先经过 `checkReadPermissionForTool()`。显式 deny 路径在输入校验阶段就会返回错误，危险设备文件也会被拒绝。路径在 cwd 之外时，权限上下文和内部可读路径共同给出 allow、ask 或 deny；只读属性只影响副作用分类，不扩大可读目录。
 
 ## 本地搜索的边界由 cwd、ignore 和权限共同决定
 
@@ -158,15 +172,15 @@ const maxTokens =
 
 `可见结果 = 搜索根 ∩ pattern/type/glob ∩ ignore 后剩余路径 ∩ 权限可读范围 ∩ 本页与大小限制`
 
-cwd 只是省略 `path` 时的默认根，不是不可越过的沙箱。显式绝对路径可能把目标指向 cwd 外部，此时会进入 `checkReadPermissionForTool()`：deny 规则优先拒绝，ask 规则要求确认，allow 规则或受认可的内部只读路径才能继续。上一章讨论的权限与沙箱边界，在检索工具这里仍然有效。
+cwd 只是省略 `path` 时的默认根。显式绝对路径可以指向 cwd 外部，此时会进入 `checkReadPermissionForTool()`：deny 规则优先拒绝，ask 规则要求确认，allow 规则或受认可的内部只读路径才能继续。上一章讨论的权限与沙箱边界，在检索工具这里仍然有效。
 
-ignore 也不是单一 `.gitignore`。Glob、Grep 的 ripgrep 参数不同，权限系统还会生成自己的 ignore pattern。因此，排查漏搜时要同时记录工具、cwd、path、环境变量和权限配置，不能只盯着正则。
+ignore 由多层规则组成：Glob 与 Grep 使用不同的 ripgrep 参数，权限系统还会生成自己的 ignore pattern。因此，排查漏搜时要同时记录工具、cwd、path、环境变量和权限配置。
 
 排序更不能混为一谈。Glob 的底层列表按修改时间从旧到新；Grep 的 `files_with_matches` 在工具层重排为从新到旧；`content` 和 `count` 则保留 ripgrep 返回顺序再分页。Claude Code 选择这些顺序，是为了让路径发现稳定、让最近修改的命中文件优先进入有限窗口。
 
 ## WebSearch 找候选来源，不直接抓页面
 
-`WebSearchTool` 与本地 Grep 的实现差异很大。它不会在客户端直接调用某个搜索引擎 HTTP API，而是构造 Anthropic API 的 `web_search_20250305` server tool，再发起一条独立的模型流。
+`WebSearchTool` 与本地 Grep 的实现差异很大。它构造 Anthropic API 的 `web_search_20250305` server tool，再发起一条独立的模型流。
 
 ```ts
 function makeToolSchema(input: Input): BetaWebSearchTool20250305 {
@@ -184,17 +198,19 @@ function makeToolSchema(input: Input): BetaWebSearchTool20250305 {
 
 **参数说明：** `query` 是长度至少为 2 的必填字符串；`allowed_domains` 与 `blocked_domains` 均为 `string[] | undefined`，分别表示只包含指定域名和排除指定域名，域名字符串属于开放输入，静态源码不枚举清单。两个数组都为非空时校验失败；空数组或 `undefined` 不增加对应过滤。`max_uses` 固定为 `8`，指这次服务端工具调用中允许的搜索次数上限。`tools: []` 表示这条二次模型流不加载普通客户端工具，`extraToolSchemas` 只注入当前 web search schema。
 
-具体使用哪个模型受 `tengu_plum_vx3` 控制。该开关在此处的默认回退是 `false`：假值使用主循环模型和当前 thinking 配置；真值使用 small fast model、禁用 thinking，并强制 `toolChoice` 为 `web_search`。。
+**字段说明：** 服务端 schema 的 `type` 固定为 `'web_search_20250305'`，`name` 固定为 `'web_search'`；`allowed_domains` 与 `blocked_domains` 原样取 `input` 对应字段。
+
+具体使用哪个模型受 `tengu_plum_vx3` 控制。该开关在此处的默认回退是 `false`：假值使用主循环模型和当前 thinking 配置；真值使用 small fast model、禁用 thinking，并强制 `toolChoice` 为 `web_search`。
 
 搜索流到达时，工具会持续发出 `query_update` 和 `search_results_received` 进度事件。最终输出只保留搜索文本以及每条命中的 `title`、`url`；错误块会转成 `Web search error: <error_code>`。映射成 `tool_result` 时，末尾还会提醒主模型在最终回答中用 Markdown 链接列出来源。
 
-`allowed_domains` 解决的是结果过滤，不是网页信任。搜索结果的标题、摘要和链接来自外部服务与页面，仍可能过时、错误或带有恶意内容。源码没有在 `WebSearchTool` 里建立事实校验器。它只提供候选来源，最终结论仍需要主模型比较来源并清楚引用。
+`allowed_domains` 只负责结果过滤。搜索结果的标题、摘要和链接来自外部服务与页面，仍可能过时、错误或带有恶意内容。`WebSearchTool` 提供候选来源，事实校验由主模型通过来源比较与清楚引用完成。
 
 工具是否出现还取决于 provider 与模型。2.1.88 的 `isEnabled()` 对 first-party 和 Foundry 返回 `true`，Vertex 仅对源码列出的 Claude 4 系列名称返回 `true`，其他 provider 返回 `false`。这只是客户端启用条件，不代表当前账号、地区、网络和服务端一定可用。
 
 ## WebFetch 把指定 URL 变成与问题相关的内容
 
-拿到链接后，`WebFetchTool` 才负责抓页面。它的输入只有 `url` 和 `prompt`：前者告诉工具去哪里，后者告诉二次模型从页面里提取什么。没有 `prompt` 的“整页无差别灌入”路径。
+拿到链接后，`WebFetchTool` 才负责抓页面。它的输入只有 `url` 和 `prompt`：前者告诉工具去哪里，后者告诉二次模型从页面里提取什么。`prompt` 必填，工具始终按提取要求处理页面。
 
 ```ts
 const isPreapproved = isPreapprovedUrl(url)
@@ -225,7 +241,7 @@ if (
 
 第一道是 URL。`validateURL()` 拒绝超过 2,000 字符、带 username/password、无法解析或 hostname 少于两个点分段的地址；HTTP 会在请求前升级为 HTTPS。
 
-第二道是域名权限。预批准 host 可以直接 allow；其他域名把权限规则写成 `domain:<hostname>`，依次检查 deny、ask、allow，没有规则时默认 ask。允许一个域名不等于允许所有重定向目标。
+第二道是域名权限。预批准 host 可以直接 allow；其他域名把权限规则写成 `domain:<hostname>`，依次检查 deny、ask、allow，规则未命中时默认 ask。每个重定向目标仍需独立授权。
 
 第三道是域名预检。`skipWebFetchPreflight` 为 `false` 或 `undefined` 时，会向 Anthropic 的 domain info 接口查询是否允许抓取，超时为 10 秒；值为 `true` 时跳过这一步，源码注释把它定位为受限企业网络的选项。跳过预检只省略这次检查，不会关闭工具权限、HTTP 限制或代理出口策略。
 
@@ -233,9 +249,9 @@ if (
 
 响应内容也不会原样无条件回流。HTML 通过 Turndown 转为 Markdown；二进制内容会尝试持久化到磁盘，并在结果中附上保存路径；URL 内容缓存使用 15 分钟 TTL 和 50 MB 总量，域名允许预检另有 5 分钟缓存。对于未预批准域名，二次模型 prompt 还限制单一来源逐字引用不超过 125 个字符。这里的 `prompt` 是“从已经抓到的内容里提取什么”，不能让工具绕过认证：源码的工具说明明确提示，私有或需要登录的 URL 会失败，应优先使用具备认证能力的 MCP 工具。
 
-外部页面必须按不可信输入处理。域名 allow、HTTPS、blocklist 和重定向检查解决的是“能不能连接”，不验证页面陈述是否正确，也不消除 prompt injection。`applyPromptToMarkdown()` 会把页面 Markdown 与提取要求一起交给二次模型；源码没有显示一个能够保证清除所有恶意指令的通用 sanitizer。因此，页面返回的命令、配置建议和事实仍要由主 Agent 结合用户任务、权限规则与其他证据判断。
+外部页面必须按不可信输入处理。域名 allow、HTTPS、blocklist 和重定向检查只决定连接资格；页面事实与 prompt injection 仍需独立判断。`applyPromptToMarkdown()` 会把页面 Markdown 与提取要求一起交给二次模型；静态源码只显示连接与提取流程，未提供通用 sanitizer 保证。因此，页面返回的命令、配置建议和事实仍要由主 Agent 结合用户任务、权限规则与其他证据判断。
 
-## 失败必须回到 Agent，而不是伪装成空结果
+## 失败必须作为独立状态回到 Agent
 
 五种工具最终都要回到同一套工具执行生命周期。`restored-src/src/services/tools/toolExecution.ts` 的 `checkPermissionsAndCallTool()` 在调用成功后执行工具自己的 `mapToolResultToToolResultBlockParam()`；`restored-src/src/utils/toolResultStorage.ts` 的 `processToolResultBlock()` 还会对过大的普通文本结果执行持久化处理。得到的块形如：
 
@@ -251,12 +267,14 @@ return {
 
 **参数说明：** `toolUseID` 是当前 `tool_use` 的开放字符串标识，必须原样关联请求与结果；`result` 根据工具而变化，可能是文件列表、带行号文本、搜索链接、网页提取结果或结构化内容。失败路径不会都进入这个成功片段：权限拒绝、验证错误、取消、网络错误和执行异常会由共享执行器生成对应的错误结果或终止事件。
 
+**字段说明：** `tool_use_id` 原样取 `toolUseID`，`type` 固定为 `'tool_result'`，`content` 原样取 `result`。
+
 不同工具对“空”与“失败”做了有意区分：
 
 - Glob 的空数组映射成 `No files found`，截断时追加更具体的 path/pattern 提示。
 - Grep 的退出码 1 才映射成空匹配；无结果、分页信息和 count 摘要进入不同文案。
 - Read 对空文件和 offset 超过文件长度给出不同 system reminder；文件不存在会尝试建议 cwd 下的相似路径。
-- WebSearch 把服务端错误码保留在结果数组中；没有链接与调用失败不是同一状态。
+- WebSearch 把服务端错误码保留在结果数组中；链接数组为空与调用失败使用不同状态。
 - WebFetch 的无效 URL、域名拒绝、预检失败、超时、出口代理拦截和取消都会抛错；二次模型返回空内容时才回退为 `No response from model`。
 
 主模型拿到 `tool_result` 后，可以缩小 pattern、翻到下一页、读取另一个范围、改用其他来源，或者向用户说明当前边界。这里才是分层搜索真正闭环的地方：工具负责产生可解释的观察，query loop 负责决定下一步。
@@ -269,7 +287,7 @@ Claude Code 的检索能力可以概括成三条原则。
 
 第二，限制本身也是结果。100 个路径、250 条 grep 结果、Read 的字节/token 上限、WebSearch 的 8 次搜索和 WebFetch 的 100,000 字符，都必须连同截断、offset 或错误状态一起解释。空结果从来只对本次搜索窗口成立。
 
-第三，搜索范围由运行环境决定。cwd、ignore、权限、provider、域名规则、代理和网络状态都会改变可见结果。。
+第三，搜索范围由运行环境决定。cwd、ignore、权限、provider、域名规则、代理和网络状态都会改变可见结果。
 
 从 query loop 的角度看，检索工具的共同价值只有一个：把一个过大的未知空间，压缩成下一轮模型可以继续判断的观察结果。
 
@@ -277,3 +295,8 @@ Claude Code 的检索能力可以概括成三条原则。
 
 搜索结果和项目文件找齐以后，Claude Code 如何把 CLAUDE.md、cwd、git 状态、工具与用户配置组装成 system prompt 和本轮上下文？
 
+## 参考资料
+
+- [Claude Code 工具参考](https://code.claude.com/docs/en/tools-reference)
+
+- [Claude Code 上下文窗口](https://code.claude.com/docs/en/context-window)

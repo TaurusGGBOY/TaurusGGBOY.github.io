@@ -10,21 +10,33 @@ image: "/images/posts/claude-code-source-reading-43/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **主动调度**：系统依据空闲、提醒与后台结果安排下一次模型运行，形成跨轮次推进。
+
+- **长生命周期 Agent**：执行端保留本地项目能力，Viewer 和远程控制端负责观察与发消息。
+
+- **带外控制**：Cron、push 与用户消息通过独立通道唤醒主循环，仍受原有权限约束。
+
+![KAIROS 的主动调度与带外控制闭环](/images/posts/claude-code-source-reading-43/43-kairos-control-loop-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 Dream 把经验沉淀下来以后，Assistant 与 KAIROS 如何利用这些记忆主动规划、提醒并推进用户任务？
 
-先说结论：**Assistant/KAIROS 没有在主 Agent 旁边再造一套“更聪明的模型循环”，而是把普通 Claude Code 变成一段更长寿、能被时间和远程消息重新唤醒的工作关系。**
+先说结论：**Assistant/KAIROS 复用主 Agent 的模型循环，并增加长生命周期、定时唤醒和远程消息入口。**
 
-记忆负责给它连续性。KAIROS 模式仍加载 `MEMORY.md`，但新信息不再每次直接整理进索引，而是追加到按日期分片的 daily log；夜间 `/dream` 再把日志蒸馏回 topic 文件和 `MEMORY.md`。因此，它醒来时看到的不是一份待执行任务数据库，而是用户偏好、项目背景和历史决策这些“做判断所需的旧经验”。
+记忆负责给它连续性。KAIROS 模式仍加载 `MEMORY.md`，新信息先追加到按日期分片的 daily log；夜间 `/dream` 再把日志蒸馏回 topic 文件和 `MEMORY.md`。它醒来时得到的是用户偏好、项目背景和历史决策，正在执行的任务状态则由 Task/AppState 提供。
 
-主动性来自另外三条链路：`<tick>` 让长驻会话在用户没有输入时重新进入主循环；Cron 把“稍后提醒我”或“定期检查”变成排队的 prompt；后台 Agent/Skill 执行完以后，再把结果作为隐藏的 meta prompt 放回主队列。主 Agent 最后决定要不要继续行动，以及是否通过 `SendUserMessage` 把结论发给用户。
+主动性来自另外三条链路：`<tick>` 让长驻会话在空闲期间重新进入主循环；Cron 把“稍后提醒我”或“定期检查”变成排队的 prompt；后台 Agent/Skill 执行完以后，再把结果作为隐藏的 meta prompt 放回主队列。主 Agent 最后决定是否继续行动，以及是否通过 `SendUserMessage` 把结论发给用户。
 
-这里有一个必须先拆开的概念：**记忆不是触发器，触发器也不是权限。** `MEMORY.md` 不会自己在上午九点运行，Cron 也不会因为按时触发就绕过工具授权。KAIROS 复用原来的 Query Loop、Tool、Task、权限上下文和消息队列，只是改变了“下一轮从哪里来”“工作能否在后台继续”“结果通过什么通道抵达用户”。
+这里要拆开三个职责：**记忆提供上下文，触发器创建下一轮，权限决定动作能否执行。** `MEMORY.md` 本身不调度任务，Cron 到点后仍要经过工具授权。KAIROS 复用原来的 Query Loop、Tool、Task、权限上下文和消息队列，改变的是“下一轮从哪里来”“工作能否在后台继续”“结果通过什么通道抵达用户”。
 
-所以更准确的回答是：Assistant/KAIROS 用 Dream 产出的记忆做上下文，用 tick、Cron 和远程输入重新唤醒 Agent，用异步任务保持前台可响应，再用有优先级的队列和 `SendUserMessage` 收口。。
+所以更准确的回答是：Assistant/KAIROS 用 Dream 产出的记忆做上下文，用 tick、Cron 和远程输入重新唤醒 Agent，用异步任务保持前台可响应，再用有优先级的队列和 `SendUserMessage` 收口。
 
-## Assistant/KAIROS 是长期体验层，不是第二套 Agent 内核
+## Assistant/KAIROS 在现有内核上增加长期体验层
 
 本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码片段只保留证明控制流所需的分支，省略日志、遥测和无关参数；还原路径不代表 Anthropic 内部仓库的原始目录结构。
 
@@ -34,13 +46,13 @@ Dream 把经验沉淀下来以后，Assistant 与 KAIROS 如何利用这些记�
 
 ### 先补四个基础概念
 
-第一个概念是 **Assistant mode**。源码中的 `assistant` 设置被描述为“custom system prompt、brief view、scheduled check-in skills”的组合入口。它不是 Anthropic Messages API 里的 `assistant` role，也不是泛指所有 Claude 回复。本文提到 Assistant 时，只指这组受 KAIROS 构建和运行时开关保护的产品模式。
+第一个概念是 **Assistant mode**。源码中的 `assistant` 设置被描述为“custom system prompt、brief view、scheduled check-in skills”的组合入口。本文提到 Assistant 时，专指这组受 KAIROS 构建和运行时开关保护的产品模式；Messages API 的 `assistant` role 仍只表示消息角色。
 
 第二个概念是 **KAIROS**。在 2.1.88 还原源码里，它既是构建期开关，也是若干 assistant 能力的总边界。代码会用 `feature('KAIROS')` 决定是否把 assistant、history、Brief 等模块编进产物，再用信任状态、GrowthBook gate 和本地设置决定本次会话是否激活。它是源码里的产品概念，不应当被写成稳定的公开 API 契约。
 
-第三个概念是 **proactive loop**。普通 REPL 等待人输入；主动模式则接受 `<tick>`，把它理解成“你醒了，现在有没有值得做的事”。如果有，就继续查、改、测试或汇报；没有，就调用 Sleep 控制下一次醒来的时间。tick 只提供再次判断的机会，不等于每次都必须制造新工作。
+第三个概念是 **proactive loop**。普通 REPL 等待人输入；主动模式则接受 `<tick>`，重新判断当前是否有值得做的事。有工作时继续查、改、测试或汇报，空闲时调用 Sleep 控制下一次醒来的时间。tick 只提供一次新的决策机会。
 
-第四个概念是 **Brief view**。Assistant 的主要可见输出不是散落在详细执行记录里的普通文本，而是 `SendUserMessage`。这样后台任务可以保留完整工具过程，用户侧只收到确认、关键进度、结果或阻塞。它改变的是呈现通道，不是模型能做什么。
+第四个概念是 **Brief view**。Assistant 通过 `SendUserMessage` 提供主要可见输出；后台任务保留完整工具过程，用户侧只收到确认、关键进度、结果或阻塞。Brief view 改变呈现通道，工具能力仍由原有权限上下文决定。
 
 ## 激活链路：开关、显式设置与目录信任缺一不可
 
@@ -76,15 +88,15 @@ if (
 
 **函数说明：** 这段来自 `restored-src/src/main.tsx` 的 CLI action 初始化段。它把 Assistant 激活收敛为一个进程期 `kairosEnabled`，随后用于 system prompt、AppState、后台 Agent 和远程桥。`initializeAssistantTeam()` 在 setup 读取 teammate mode 以前预建团队上下文，因此 Assistant 可以直接委派 Agent，而不要求模型先调用 `TeamCreate`。
 
-**参数说明：** `options.assistant` 是可选布尔值；没有传入时不会触发 daemon 强制路径。`options.agentId` 可为 `undefined` 或某个已生成的 Agent ID；存在时表示当前进程是 teammate，必须跳过 leader 的重复初始化。`assistantModule.isAssistantForced()` 返回布尔值，源码注释说明 `--assistant` daemon 已在父层检查 entitlement，因此该路径跳过本地 GrowthBook 检查。普通配置路径则等待 `kairosGate.isKairosEnabled()`。`kairosEnabled` 初始为 `false`，任一门槛失败都保持关闭。
+**参数说明：** `options.assistant` 是可选布尔值；省略时走普通配置路径。`options.agentId` 可为 `undefined` 或某个已生成的 Agent ID；存在时表示当前进程是 teammate，必须跳过 leader 的重复初始化。`assistantModule.isAssistantForced()` 返回布尔值，源码注释说明 `--assistant` daemon 已在父层检查 entitlement，因此该路径跳过本地 GrowthBook 检查。普通配置路径则等待 `kairosGate.isKairosEnabled()`。`kairosEnabled` 初始为 `false`，任一门槛失败都保持关闭。
 
-为什么目录信任要放在这里？因为项目里的 `.claude/settings.json` 和 `.claude/agents/assistant.md` 都可能来自刚 clone 的不可信仓库。如果先把项目自带 Assistant 指令塞进 system prompt，再让用户确认信任，攻击面已经发生了。源码选择的是“先信任，后激活”，而不是把 assistant 体验当成可信白名单。
+目录信任必须先于 Assistant 激活。项目里的 `.claude/settings.json` 和 `.claude/agents/assistant.md` 可能来自刚 clone 的仓库；先完成 trust 检查，再把项目指令装入 system prompt，才能阻止未信任内容提前影响模型。
 
-这个开关也没有替用户选择权限模式。`main.tsx` 的注释明确写着 permission mode 仍采用用户的 `settings.defaultMode` 或 `--permission-mode`。也就是说，Assistant 默认更主动，不等于默认 `bypassPermissions`。
+Assistant 开关沿用用户通过 `settings.defaultMode` 或 `--permission-mode` 选择的权限模式。主动调度只增加唤醒机会，`bypassPermissions` 仍需显式配置。
 
 ## 主动规划的本质：让同一个 Query Loop 多几个再次运行的机会
 
-系统提示词里的 `getProactiveSection()` 给主动循环定义了行为纪律：首次唤醒先问用户要做什么，后续 tick 才寻找有用工作；没有工作必须 Sleep；终端未聚焦时更偏自主行动，用户正在交互时优先响应。
+系统提示词里的 `getProactiveSection()` 给主动循环定义了行为纪律：首次唤醒先问用户要做什么，后续 tick 寻找有用工作；空闲时必须 Sleep；终端未聚焦时更偏自主行动，用户正在交互时优先响应。
 
 ```ts
 function getProactiveSection(): string | null {
@@ -103,11 +115,11 @@ Unfocused: lean heavily into autonomous action.`
 }
 ```
 
-**函数说明：** `getProactiveSection()` 位于 `restored-src/src/constants/prompts.ts`，由 `getSystemPrompt()` 调用。它只在构建包含 `PROACTIVE` 或 `KAIROS`，并且当前 proactive module 已激活时返回字符串；否则返回 `null`，不会把自主工作规则注入普通会话。
+**函数说明：** `getProactiveSection()` 位于 `restored-src/src/constants/prompts.ts`，由 `getSystemPrompt()` 调用。构建包含 `PROACTIVE` 或 `KAIROS` 且 proactive module 已激活时，它返回自主工作段；其他情况返回 `null`，`getSystemPrompt()` 过滤该项并继续构造普通会话提示词。
 
-**参数说明：** 函数没有参数，返回值只有 `string` 或 `null`。`feature(...)` 是构建期条件，`isProactiveActive()` 是运行期状态。源码还能确认 `--proactive` 或真值环境变量 `CLAUDE_CODE_PROACTIVE` 会调用 `activateProactive('command')`；。
+**参数说明：** 函数接受零个参数，返回值只有 `string` 或 `null`。`feature(...)` 是构建期条件，`isProactiveActive()` 是运行期状态。源码还能确认 `--proactive` 或真值环境变量 `CLAUDE_CODE_PROACTIVE` 会调用 `activateProactive('command')`。
 
-这就是“主动规划”最朴素的实现：并没有额外的 Planner 服务定期生成一张权威计划表，而是让模型在一次次唤醒中结合当前消息、任务状态、工具结果和记忆，重新判断最有价值的下一步。
+“主动规划”由一次次重新进入 Query Loop 实现：模型结合当前消息、任务状态、工具结果和记忆，在每次唤醒时重新判断最有价值的下一步。
 
 REPL 把 tick 接回现有输入链时，会避开几个容易产生竞态的状态：
 
@@ -130,7 +142,7 @@ useProactive?.({
 
 ## 记忆怎样参与：读取蒸馏结果，新事实先写 daily log
 
-上一篇已经分析 AutoDream。进入 KAIROS 后，变化最大的不是旧记忆如何读取，而是**新记忆先写到哪里**。`loadMemoryPrompt()` 在 auto memory 开启且 KAIROS active 时，优先返回 Assistant daily-log prompt：
+上一篇已经分析 AutoDream。进入 KAIROS 后，读取仍沿用旧记忆链，新事实则先写入 daily log。`loadMemoryPrompt()` 在 auto memory 开启且 KAIROS active 时，优先返回 Assistant daily-log prompt：
 
 ```ts
 if (feature('KAIROS') && autoEnabled && getKairosActive()) {
@@ -153,13 +165,13 @@ function buildAssistantDailyLogPrompt(skipIndex = false): string {
 
 **函数说明：** `loadMemoryPrompt()` 与 `buildAssistantDailyLogPrompt()` 位于 `restored-src/src/memdir/memdir.ts`。普通 auto memory 让模型维护 topic 和索引；Assistant 把新观察追加到当天日志，由另一个 nightly `/dream` 过程蒸馏。`MEMORY.md` 仍由 Claude.md 读取链加载，作为已经整理过的方向索引。
 
-**参数说明：** `autoEnabled` 是 `isAutoMemoryEnabled()` 的布尔结果；为 `false` 时 KAIROS 分支也不会创建记忆。`getKairosActive()` 返回进程期布尔状态。`skipIndex` 默认 `false`，来自 `tengu_moth_copse`；为 `true` 时提示词不描述 `MEMORY.md` 入口，为 `false` 时提醒模型读取但不要直接维护它。日志路径里的年月日是模式字符串，不是启动时写死的日期；会话跨过午夜后，模型根据 `currentDate` 和 date-change attachment 切换新文件。
+**参数说明：** `autoEnabled` 是 `isAutoMemoryEnabled()` 的布尔结果；为 `false` 时 KAIROS 分支跳过记忆创建。`getKairosActive()` 返回进程期布尔状态。`skipIndex` 默认 `false`，来自 `tengu_moth_copse`；为 `true` 时提示词省略 `MEMORY.md` 入口，为 `false` 时提醒模型读取但不要直接维护它。日志路径里的年月日是运行期模式字符串；会话跨过午夜后，模型根据 `currentDate` 和 date-change attachment 切换新文件。
 
 为什么长期 Assistant 更适合 append-only 日志？因为它可能跨越很多轮和日期。每次获得一点新信息就重写 `MEMORY.md`，容易在并发、崩溃或语义尚未稳定时污染索引；先记录事实，再定期整合，写入动作更简单，也给 Dream 留出合并、纠错和淘汰的空间。
 
-但这仍不是可靠的任务状态数据库。daily log 可以记录截止时间和决策，`MEMORY.md` 可以帮助模型重新理解项目，真正正在运行、完成或失败的工作仍由 Task/AppState 和消息队列表达。把记忆当任务状态，会遇到最直接的问题：文件里的“正在部署”可能已经过期。
+daily log 可以记录截止时间和决策，`MEMORY.md` 可以帮助模型重新理解项目；正在运行、完成或失败的工作由 Task/AppState 和消息队列表达。任务面板以运行时状态为准，避免把记忆文件里可能过期的“正在部署”当成当前事实。
 
-## 提醒如何落地：Cron 保存的是未来 prompt，不是未来答案
+## 提醒如何落地：Cron 保存未来 prompt
 
 `CronCreate` 接收五段 cron、将来要入队的 prompt，以及两个布尔控制项：
 
@@ -186,9 +198,9 @@ async call({
 }
 ```
 
-**函数说明：** 这段来自 `restored-src/src/tools/ScheduleCronTool/CronCreateTool.ts`。工具只注册一个未来触发条件；到点后 scheduler 才把 `prompt` 送回 lead 或 teammate。它没有预先生成未来回答，也不会冻结当前上下文快照。
+**函数说明：** 这段来自 `restored-src/src/tools/ScheduleCronTool/CronCreateTool.ts`。工具只注册一个未来触发条件；到点后 scheduler 才把 `prompt` 送回 lead 或 teammate，由届时的上下文生成回答。
 
-**参数说明：** `cron` 是开放字符串，但必须被解析为标准五段表达式，并且未来一年内至少存在一次匹配；`prompt` 是届时提交给 Agent 的开放文本。`recurring` 可为 `true`、`false` 或 `undefined`，省略时默认 `true`，`false` 表示命中一次后自动删除。`durable` 同样是可选布尔值，默认 `false`；只有传 `true` 且 `isDurableCronEnabled()` 仍为真，才写入 `.claude/scheduled_tasks.json`。Teammate 不能创建 durable cron，因为其 Agent ID 不跨会话存活；全局任务数上限为 50。
+**参数说明：** `cron` 是开放字符串，但必须被解析为标准五段表达式，并且未来一年内至少存在一次匹配；`prompt` 是届时提交给 Agent 的开放文本。`recurring` 省略时默认 `true`，`false` 表示命中一次后自动删除；`durable` 默认 `false`，只有传 `true` 且 gate 开启才写入 `.claude/scheduled_tasks.json`。返回 `data.id` 用于后续管理任务，`humanSchedule` 是 `cronToHuman(cron)` 的展示文本，`recurring` 回显实际重复语义，`durable` 回显经过 gate 后的 `effectiveDurable`。Teammate 不能创建 durable cron；全局任务数上限为 50。
 
 总开关也有两层：构建必须包含 `AGENT_TRIGGERS`，本地 `CLAUDE_CODE_DISABLE_CRON` 不能为真，运行时 `tengu_kairos_cron` 也不能关闭。源码回退值是 `true`，但这是 2.1.88 的静态回退，不代表服务端永远不会使用 kill switch。
 
@@ -222,11 +234,11 @@ const scheduler = createCronScheduler({
 
 **函数说明：** `useScheduledTasks()` 位于 `restored-src/src/hooks/useScheduledTasks.ts`。lead 的 Cron 触发被包装成隐藏 prompt；teammate cron 则路由给仍存活的对应 Agent，找不到时删除孤儿任务。`isKilled` 在 scheduler 检查时重新读取 gate，因此运行中也能被 kill switch 停止。
 
-**参数说明：** `priority: 'later'` 是关键。统一队列顺序是 `now > next > later`，同优先级 FIFO；普通用户输入默认 `next`，所以不会被一批定时任务饿死。`isMeta: true` 表示系统通知，不在队列预览里冒充用户输入。`assistantMode` 默认 `false`；为真时 scheduler 可以绕开普通 `isLoading` 饥饿问题，但任务仍需通过队列进入后续回合。`workload: WORKLOAD_CRON` 只用于来源/服务质量归因，不能推导模型、延迟或一定成功。
+**参数说明：** 入队对象的 `value` 保存触发时要交给 Agent 的 prompt，`mode: 'prompt'` 让队列按新一轮模型输入处理它。`priority: 'later'` 是关键。统一队列顺序是 `now > next > later`，同优先级 FIFO；普通用户输入默认 `next`，所以不会被一批定时任务饿死。`isMeta: true` 表示系统通知，不在队列预览里冒充用户输入。scheduler 的 `onFire` 接收普通 lead prompt 并调用 `enqueueForLead`；`onFireTask` 接收完整 task，借助 `agentId` 决定 teammate 路由或 lead 的 fire message。`assistantMode` 默认 `false`；为真时 scheduler 可以绕开普通 `isLoading` 饥饿问题，但任务仍需通过队列进入后续回合。`workload: WORKLOAD_CRON` 只用于来源/服务质量归因，不能推导模型、延迟或一定成功。
 
 ## 推进工作：后台 Agent 完成后，还要让主 Agent 再判断一次
 
-Assistant 最容易卡死的情况，不是模型不会做，而是一次慢 subagent 把主线程占住，用户消息只能一直排队。KAIROS 因而把 Agent 调用强制转为 async（除非全局禁用后台任务）：
+一次慢 subagent 若占住主线程，用户消息只能持续排队。KAIROS 因而把 Agent 调用强制转为 async（除非全局禁用后台任务）：
 
 ```ts
 const assistantForceAsync = feature('KAIROS')
@@ -247,7 +259,7 @@ const shouldRunAsync = (
 
 **参数说明：** `run_in_background` 可为 `true`、`false` 或 `undefined`；Agent 定义里的 `background` 也可能显式为 `true`。`assistantForceAsync` 只有 KAIROS 构建且 `appState.kairosEnabled === true` 时成立。最终还要与 `!isBackgroundTasksDisabled` 合取，所以环境或系统禁用后台任务时会回到同步路径。异步任务使用独立 AbortController，不随主线程 Escape 自动取消；要通过任务 kill 路径显式终止。
 
-定时 Skill 的闭环更能说明为什么“后台完成”不等于“用户已经收到结果”。Assistant 模式下，forked slash command 会立即返回；后台结束后，代码再把结果包成隐藏输入：
+定时 Skill 分两步完成闭环：Assistant 模式下，forked slash command 立即返回；后台结束后，代码再把结果包成隐藏输入：
 
 ```ts
 const enqueueResult = (value: string): void =>
@@ -269,9 +281,9 @@ ${resultText}
 
 **函数说明：** 这段来自 `restored-src/src/utils/processUserInput/processSlashCommand.tsx` 的 `executeForkedSlashCommand()`。后台 Agent 负责做具体工作，结果重新入队以后，主 Agent 才能结合当前对话判断是继续处理、记录记忆，还是向用户发送结果。异常也会以 `status="failed"` 的同类 meta prompt 回来，不会静默伪装成功。
 
-**参数说明：** `priority` 固定为 `'later'`，`isMeta` 固定为 `true`。`skipSlashCommands: true` 防止结果文本碰巧以 `/` 开头时再次被解释为命令。`spawnTimeWorkload` 可能为字符串或 `undefined`，这里只保持原任务的归因。`resultText` 来自后台 Agent 消息，提取不到时回退为 `Command completed`；。
+**参数说明：** `mode` 固定为 `'prompt'`，让后台结果重新成为主 Agent 的输入；`priority` 固定为 `'later'`，`isMeta` 固定为 `true`。`skipSlashCommands: true` 防止结果文本碰巧以 `/` 开头时再次被解释为命令。`workload` 接收可能为字符串或 `undefined` 的 `spawnTimeWorkload`，保持原任务的归因。`resultText` 来自后台 Agent 消息，提取不到时回退为 `Command completed`。
 
-## 主动消息：SendUserMessage 是出口，不是权限捷径
+## 主动消息：SendUserMessage 提供用户出口
 
 Brief 模式把用户真正会看到的回复收敛到 `SendUserMessage`：
 
@@ -297,17 +309,17 @@ async call({ message, attachments, status }, context) {
 
 **函数说明：** `BriefTool` 位于 `restored-src/src/tools/BriefTool/BriefTool.ts`。工具被声明为 concurrency-safe、read-only，负责生成用户消息及可选附件元数据。Assistant 模式下 `getKairosActive()` 可绕过单独 Brief opt-in，但仍要求对应构建/entitlement 条件成立。
 
-**参数说明：** `message` 是必填开放字符串，支持 Markdown。`attachments` 可为字符串路径数组或 `undefined`；空数组与缺失都走无附件路径，非空时逐个验证并可能经 bridge 上传。`status` 只有 `'normal'` 和 `'proactive'`：前者回应用户刚说的话，后者用于用户没有主动询问的完成、阻塞或状态更新。它是下游路由使用的意图标签，不会替代工具权限判定。`sentAt` 是调用进程生成的 ISO 时间；旧会话回放可能没有该字段。
+**参数说明：** `message` 是必填开放字符串，支持 Markdown。`attachments` 可为字符串路径数组或 `undefined`；空数组与缺失都走无附件路径，非空时逐个验证并可能经 bridge 上传。附件解析参数中的 `replBridgeEnabled` 读取当前 AppState，决定是否启用 bridge 相关解析与上传能力；`signal` 取工具调用的 `abortController.signal`，用于在本轮取消时终止附件处理。`status` 只有 `'normal'` 和 `'proactive'`：前者回应当前用户输入，后者用于 Agent 主动发起的完成、阻塞或状态更新。它是下游路由使用的意图标签，工具权限仍由权限引擎判定。`sentAt` 是调用进程生成的 ISO 时间；旧会话回放时该字段可缺失。
 
-这也解释了为什么系统提示词要求“ack → work → result”，但不鼓励逐步播报。Assistant 要解决的是用户离开终端后看不见普通 stdout 的问题，不是把每次 Read、Grep、Bash 都变成通知。
+这也解释了为什么系统提示词要求“ack → work → result”，但不鼓励逐步播报。Assistant 用少量主动消息覆盖用户离开终端后的关键状态，Read、Grep、Bash 等细节仍留在执行记录。
 
 ## 长期会话：执行端与 Viewer 必须分开理解
 
 Assistant 的另一个关键变化是会话不随一个 CLI 进程退出就必然结束。`useReplBridge` 在 Assistant mode 下把 bridge 标为 perpetual，复用 `bridge-pointer.json` 中的 environment/session ID；服务端则用 `worker_type: 'claude_code_assistant'` 区分这类 worker。
 
-当用户运行 `claude assistant [sessionId]` 时，本地 REPL 是远程会话 Viewer：它设置 `viewerOnly: true`、`initialTools: []`，通过 bridge POST 新消息并流式显示事件。Agentic loop 在远程 worker 中运行，不是在 Viewer 进程里又执行一遍。
+当用户运行 `claude assistant [sessionId]` 时，本地 REPL 成为远程会话 Viewer：它设置 `viewerOnly: true`、`initialTools: []`，通过 bridge POST 新消息并流式显示事件；Agentic loop 只在远程 worker 中运行。
 
-历史读取也采用分页而不是启动时全量下载：
+历史读取采用分页：
 
 ```ts
 export async function fetchLatestEvents(
@@ -330,7 +342,7 @@ export async function fetchOlderEvents(
 
 **函数说明：** 这两个函数位于 `restored-src/src/assistant/sessionHistory.ts`。Viewer 首次取最新一页，滚动到顶部附近时再用最老 event ID 取上一页；`useAssistantHistory()` 把 SDK event 经 `convertSDKMessage()` 适配成 REPL `Message[]`，并通过滚动高度差保持阅读位置。
 
-**参数说明：** `ctx` 包含 session events URL 和 OAuth/组织 headers。`limit` 是可选数字，默认 `HISTORY_PAGE_SIZE = 100`；源码没有在这两个包装函数里限制调用者传入的其他正数。`beforeId` 是必填开放字符串，来自上一页 `firstId`。返回值为 `HistoryPage | null`：网络异常、15 秒超时或 HTTP 非 200 都返回 `null`；空的 `data` 会回退为空数组。失败时 Viewer 保留 cursor，用户再次滚动可以重试，而不是把一次网络错误当成“已经到会话开头”。
+**参数说明：** `ctx` 包含 session events URL 和 OAuth/组织 headers。`limit` 是可选数字，默认 `HISTORY_PAGE_SIZE = 100`；这两个包装函数会原样接受调用者传入的其他正数。`beforeId` 是必填开放字符串，来自上一页 `firstId`。返回值为 `HistoryPage | null`：网络异常、15 秒超时或 HTTP 非 200 都返回 `null`；空的 `data` 会回退为空数组。失败时 Viewer 保留 cursor，用户再次滚动可以重试；只有成功返回的空页才表示到达历史边界。
 
 ## 权限、优先级和失败边界
 
@@ -340,23 +352,28 @@ export async function fetchOlderEvents(
 
 第二，**用户输入优先于后台通知**。普通输入默认 `next`，Cron、任务结果和其他系统通知使用 `later`；`now` 消息还会中断当前 AbortController。Assistant 可以在后台推进，但不能用一批低优先级例行任务把用户刚发来的问题长期压住。
 
-第三，**取消不是事务回滚**。Escape 会暂停 proactive 并结束主查询，但已经完成的文件写入不会撤销；异步 Agent 使用独立取消控制器，也不会因为主线程 Escape 自动停止。用户必须显式 kill 后台任务，工具自身的副作用仍按对应章节讨论的边界处理。
+第三，**取消只影响后续控制流**。Escape 会暂停 proactive 并结束主查询，已经完成的文件写入保持不变；异步 Agent 使用独立取消控制器，需要用户显式 kill。工具副作用仍按对应章节讨论的边界处理。
 
-第四，**Cron 是至少一次尝试语义附近的调度，不是准点承诺**。scheduler 只在进程/会话和 gate 允许时运行，还有 jitter、idle、过期、孤儿 teammate 与持久化失败等条件。源码能说明如何排队和补偿，不能承诺墙上时钟到点一定完成业务动作。
+第四，**Cron 提供条件化调度**。scheduler 只在进程/会话和 gate 允许时运行，还受 jitter、idle、过期、孤儿 teammate 与持久化失败等条件影响。源码能说明排队和补偿机制，墙上时钟的准点业务完成仍取决于运行环境。
 
-第五，**记忆可能过期，主动消息也可能错**。Dream 产物只是模型生成并存入文件的上下文；KAIROS 的下一轮仍需核对代码、外部系统和任务状态。`status: 'proactive'` 只说明这是一条主动消息，不是事实正确性的签名。
+第五，**记忆与主动消息都需要复核**。Dream 产物是模型生成并存入文件的上下文；KAIROS 的下一轮仍需核对代码、外部系统和任务状态。`status: 'proactive'` 只标记消息来源，事实正确性要由实际状态证明。
 
-第六，**功能存在不等于线上默认可见**。`KAIROS`、`PROACTIVE`、`AGENT_TRIGGERS` 是构建边界，`tengu_kairos`、`tengu_kairos_cron`、`tengu_kairos_brief` 等是运行时边界，目录信任、OAuth、remote bridge、auto memory 和本地环境变量还会继续裁剪能力。本文只能说明 2.1.88 可见源码的组合逻辑。
+第六，**功能可见性由多层 gate 共同决定**。`KAIROS`、`PROACTIVE`、`AGENT_TRIGGERS` 是构建边界，`tengu_kairos`、`tengu_kairos_cron`、`tengu_kairos_brief` 等是运行时边界，目录信任、OAuth、remote bridge、auto memory 和本地环境变量还会继续裁剪能力。本文只说明 2.1.88 可见源码的组合逻辑。
 
 ## 小结
 
-Assistant/KAIROS 的核心不是换了一个 Agent，而是给原来的 Agent 增加了时间维度和宿主维度。
+Assistant/KAIROS 给原来的 Agent 增加了时间维度和宿主维度。
 
 Dream 与 `MEMORY.md` 提供长期判断依据，daily log 承接尚未蒸馏的新事实；tick 让会话有机会主动复盘下一步，Cron 把未来时刻变成 prompt；异步 Agent 和 forked Skill 避免慢任务阻塞前台；统一队列让用户输入压过后台通知；`SendUserMessage` 把确认、进度、结果和阻塞送到用户真正会看的地方；perpetual bridge 与 Viewer 则让这段工作关系跨 CLI 进程延续。
 
-但每一层都有边界：开关与目录信任决定能否启动，权限引擎决定能否行动，Task/AppState 决定运行状态，AbortController 只能取消未来控制流，记忆和主动消息都不天然保证正确。理解这些边界，才能把“主动助手”看成一套可恢复的事件闭环，而不是一个获得无限授权的后台机器人。
+每一层都有边界：开关与目录信任决定能否启动，权限引擎决定能否行动，Task/AppState 决定运行状态，AbortController 只取消未来控制流，记忆和主动消息需要外部事实复核。这些部件共同组成一套可恢复、权限受控的事件闭环。
 
 ## 留给下一篇的问题
 
 主动助手能够推进任务以后，Buddy 如何把这些能力包装成更连续的陪伴式体验，并管理状态、建议与反馈？
 
+## 参考资料
+
+- [Claude Code Remote Control](https://code.claude.com/docs/en/remote-control)
+
+- [Dive into Claude Code：生产级 Agent 的设计空间](https://arxiv.org/abs/2604.14228)

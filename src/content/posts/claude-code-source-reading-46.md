@@ -10,37 +10,49 @@ image: "/images/posts/claude-code-source-reading-46/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **维护型旁路**：文档更新在主对话空闲时运行，读取受限上下文并把写权限限定到声明文件。
+
+- **预测缓存**：建议结果按父请求和输入状态缓存，避免预测调用扰动主对话的缓存前缀。
+
+- **临时交互状态**：候选建议停留在 AppState，接受后才进入正式 prompt 历史。
+
+![MagicDocs 与 Prompt Suggestions 两条旁路](/images/posts/claude-code-source-reading-46/46-sidecars-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 语音输入补充交互以后，MagicDocs 与 Prompt Suggestions 如何从上下文生成文档和下一步建议，并把结果展示给用户？
 
 先说答案：**它们都在主回合结束以后读取上下文，再启动一条旁路生成；但两条旁路的输入、输出和确认方式完全不同。**
 
-MagicDocs 先等主 Agent 通过 `Read` 看见带有 `# MAGIC DOC:` 标记的 Markdown，再把文件路径记进进程内 `Map`。模型完成一次采样、最后一条 assistant 消息也没有工具调用时，它重新读取文档，把完整会话、system prompt、用户上下文、当前文档和自定义说明交给一个 Sonnet 子 Agent。这个 Agent 不把文档“展示成建议”，而是只能对刚才那一个文件调用 `Edit`；没有值得补充的内容时，它也可以什么都不改。
+MagicDocs 先等主 Agent 通过 `Read` 看见带有 `# MAGIC DOC:` 标记的 Markdown，再把文件路径记进进程内 `Map`。模型完成一次采样、最后一条 assistant 消息自然收尾时，它重新读取文档，把完整会话、system prompt、用户上下文、当前文档和自定义说明交给一个 Sonnet 子 Agent。这个 Agent 只对刚才那一个文件调用 `Edit`；内容已经完整时直接停止。
 
 Prompt Suggestions 则在主线程停止阶段预测“用户下一句最可能输入什么”。它复用父请求的缓存安全参数，启动一个禁用所有工具的 fork，只取 2 到 12 个词的文本。通过长度、格式和语气过滤后，候选值写进 AppState，输入框为空且主 Agent 已停止响应时，才作为 ghost text 展示。用户按 Tab 或在空输入框按 Enter，就把它变成普通 prompt；用户输入别的内容再提交，就记为 ignored 并清掉。
 
-所以，这里没有一个统一的“主动生成服务”。MagicDocs 的终点是受限文件编辑，Prompt Suggestions 的终点是等待用户确认的输入候选。前者在 2.1.88 的源码里还被 `USER_TYPE === 'ant'` 限制，后者则受环境变量、GrowthBook、交互模式、设置、权限等待状态等多道门控制。把两者混成“Claude 自动帮你做下一步”，会错过最重要的边界。
+所以，两条能力采用独立旁路：MagicDocs 的终点是受限文件编辑，Prompt Suggestions 的终点是等待用户确认的输入候选。前者在 2.1.88 的源码里被 `USER_TYPE === 'ant'` 限制，后者受环境变量、GrowthBook、交互模式、设置、权限等待状态等多道门控制。
 
 本篇仍只讨论仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码。下面的片段省略了与当前机制无关的类型、日志和分支；函数名、关键取值与调用顺序保持不变。
 
-## 两条旁路，不是一条流水线
+## 两条旁路分别维护文档与预测输入
 
 先补两个基础概念。
 
 **forked agent** 是从当前会话上下文分叉出来的一次模型执行。它能看见父会话提供的历史和配置，但可以拥有更窄的提示词、工具与持久化策略。这样做的价值是：文档维护和下一句预测都不必污染主 Agent 的回答，也不需要把结果塞回主对话，让主模型再判断一次。
 
-**post-sampling hook** 是模型采样完成后的内部回调。它不是用户在 `settings.json` 里配置的普通 Hook；2.1.88 的 `postSamplingHooks.ts` 明确把它称为内部 API。MagicDocs 注册在这里。Prompt Suggestions 虽然也发生在回合尾部，却从 `handleStopHooks()` 直接触发。它们时机相近，注册入口并不相同。
+**post-sampling hook** 是模型采样完成后的内部回调，由 2.1.88 的 `postSamplingHooks.ts` 管理；用户 Hook 则从 `settings.json` 注册。MagicDocs 使用前者。Prompt Suggestions 虽然也发生在回合尾部，却从 `handleStopHooks()` 直接触发。
 
 两条链可以压成下面这张图：
 
 ![MagicDocs 与 Prompt Suggestions 两条回合后旁路的手绘流程图](/images/posts/claude-code-source-reading-46/46-magicdocs-prompt-suggestions-handdrawn.png)
 
-图中实线对应还原源码可确认的调用或状态流。注意上、下两条线没有互相调用：MagicDocs 不会拿提示词建议去写文档，Prompt Suggestions 也不会读取 Magic Doc 作为专用知识源。
+图中实线对应还原源码可确认的调用或状态流。上、下两条线各自从回合尾部启动：MagicDocs 维护文件，Prompt Suggestions 生成输入候选，可见调用图中不存在二者之间的直接边。
 
 ## MagicDocs：先用文件头声明“这份文档要被维护”
 
-MagicDocs 没有扫描整个仓库找文档。它只监听已经被 `FileReadTool` 读过的内容，再用一个特殊标题识别 opt-in 文件。核心识别函数在 `restored-src/src/services/MagicDocs/magicDocs.ts`：
+MagicDocs 只监听已经被 `FileReadTool` 读过的内容，再用特殊标题识别 opt-in 文件。核心识别函数在 `restored-src/src/services/MagicDocs/magicDocs.ts`：
 
 ```ts
 const MAGIC_DOC_HEADER_PATTERN = /^#\s*MAGIC\s+DOC:\s*(.+)$/im
@@ -62,9 +74,9 @@ export function detectMagicDocHeader(
 }
 ```
 
-**函数与参数说明：** `detectMagicDocHeader(content)` 的 `content` 是完整文件字符串。匹配成功时返回 `{ title }`，紧随标题的斜体行存在时再增加可选字符串 `instructions`；不匹配返回 `null`，这里没有 `undefined` 返回值。正则带 `i` 和 `m`：大小写不敏感，并允许 `^` 匹配任意行首；因此实现实际上不只认文件第一行，尽管源码注释写着 first line。文章以可执行正则为准，不把注释扩大成不存在的约束。
+**函数与参数说明：** `detectMagicDocHeader(content)` 的 `content` 是完整文件字符串。匹配成功时返回 `{ title }`，紧随标题的斜体行存在时再增加可选字符串 `instructions`；不匹配返回 `null`，文件读取监听器据此跳过 `registerMagicDoc()`。正则带 `i` 和 `m`：大小写不敏感，并允许 `^` 匹配任意行首；因此实现实际上不只认文件第一行，尽管源码注释写着 first line。文章以可执行正则为准。
 
-斜体说明不是展示文案，而是给文档维护 Agent 的额外指令。例如：
+斜体说明会作为文档维护 Agent 的额外指令。例如：
 
 ```md
 # MAGIC DOC: Authentication architecture
@@ -95,13 +107,13 @@ export async function initMagicDocs(): Promise<void> {
 }
 ```
 
-**函数与参数说明：** `registerMagicDoc(filePath)` 接受由文件读取监听器提供的路径字符串。重复路径保持原记录，不会追加版本。`initMagicDocs()` 没有参数，返回 `Promise<void>`；`USER_TYPE` 严格等于字符串 `'ant'` 时才注册两个回调，`undefined`、`'external'` 或其他值都不启用。。
+**函数与参数说明：** `registerMagicDoc(filePath)` 接受由文件读取监听器提供的路径字符串。重复路径保持原记录并跳过追加。`initMagicDocs()` 接受零个参数，返回 `Promise<void>`；`USER_TYPE` 严格等于字符串 `'ant'` 时注册两个回调，`undefined`、`'external'` 或其他值都沿关闭分支返回。
 
-这意味着“生成文档”的第一步其实不是生成，而是声明与发现。用户（或已有文件）用标题声明这份 Markdown 可以被后台维护，主 Agent 的普通 `Read` 再让运行时发现它。源码没有周期性目录扫描，也没有为未读文件建立索引。
+因此文档维护从声明与发现开始。用户（或已有文件）用标题声明这份 Markdown 可以被后台维护，主 Agent 的普通 `Read` 再让运行时发现它。跟踪集合只包含已经读取且标题匹配的文件。
 
 ## 更新只在主对话空闲时串行发生
 
-注册后的 `updateMagicDocs` 会经过三道门：来源必须是 `repl_main_thread`，最后一个 assistant turn 不能含工具调用，Map 里必须已有文档。多个文档逐个等待完成；外层 `sequential()` 还保证同一 hook 的多次调用排队，而不是重叠执行。
+注册后的 `updateMagicDocs` 会经过三道门：来源必须是 `repl_main_thread`，最后一个 assistant turn 必须自然收尾，Map 里必须已有文档。多个文档逐个等待完成；外层 `sequential()` 还保证同一 hook 的多次调用按队列顺序执行。
 
 ```ts
 const updateMagicDocs = sequential(async function (
@@ -119,11 +131,11 @@ const updateMagicDocs = sequential(async function (
 })
 ```
 
-**函数与参数说明：** `context` 包含完整 `messages`、system/user/system context 和 `toolUseContext`。`querySource` 是运行时来源；这里只接受精确值 `'repl_main_thread'`，`undefined`、`'sdk'`、`'magic_docs'` 以及其他子 Agent 来源都直接返回。`hasToolCallsInLastAssistantTurn()` 返回布尔值，`true` 表示主 Agent 还在工具循环附近，本次不更新；`false` 才继续。Map 为空时没有模型调用。
+**函数与参数说明：** `context` 包含完整 `messages`、system/user/system context 和 `toolUseContext`。`querySource` 只有精确值 `'repl_main_thread'` 才继续，省略值、`'sdk'`、`'magic_docs'` 以及其他子 Agent 来源都会结束本次 hook。`hasToolCallsInLastAssistantTurn()` 为 `true` 时推迟更新，为 `false` 时继续；Map 为空时跳过模型调用。循环中的 `docInfo` 至少含跟踪路径，并与同一份 `context` 一起交给 `updateMagicDoc()`，`await` 使多个文档串行维护。
 
-“空闲”在这里是很窄的代码判断：最后一次 assistant turn 没有工具调用。它不等于操作系统空闲，也不代表用户离开终端。MagicDocs 更不会每隔固定分钟自动跑一次；源码说明里的 periodically，落实到调用链上，是每次 post-sampling hook 获得机会时重新判断。
+“空闲”在这里是很窄的代码判断：最后一次 assistant turn 自然收尾。该条件只描述模型回合状态；每次 post-sampling hook 获得机会时重新判断，操作系统空闲和固定分钟 timer 都不参与。
 
-## 上下文不是只拿聊天记录，而是四层合并
+## 上下文合并四个来源
 
 更新单个文档时，MagicDocs 会重新读取最新内容。它特意克隆 `readFileState`，再删掉当前路径的缓存项，避免 `FileReadTool` 因“文件未变化”只返回 `file_unchanged` 占位符。
 
@@ -139,9 +151,9 @@ const result = await FileReadTool.call(
 )
 ```
 
-**调用与参数说明：** `cloneFileStateCache()` 接收父会话的文件状态缓存，产生隔离副本；`delete(docInfo.path)` 只清当前 Magic Doc。`FileReadTool.call()` 的输入对象只有开放字符串 `file_path`，值固定来自跟踪记录，不由模型临时选择。第二个参数沿用父 `toolUseContext` 的其他字段，但替换缓存副本，因此读取不会破坏主会话自己的去重状态。
+**调用与参数说明：** `cloneFileStateCache()` 接收父会话的 `toolUseContext.readFileState`，产生隔离的 `clonedReadFileState`；`delete(docInfo.path)` 只清当前 Magic Doc。`FileReadTool.call()` 的输入对象只有开放字符串 `file_path`，值固定来自跟踪记录，不由模型临时选择；返回的 `result` 随后提供最新文件内容。第二个参数沿用父 `toolUseContext` 的其他字段，但把 `readFileState` 替换为缓存副本，因此读取不会破坏主会话自己的去重状态。
 
-随后，`buildMagicDocsUpdatePrompt()` 把四个变量塞进模板：当前文档全文、文件路径、标题、可选说明。模板默认要求维护“当前状态”，不是追加 changelog；没有实质新信息时不要调用工具。用户还可以在 `~/.claude/magic-docs/prompt.md` 放自定义模板：
+随后，`buildMagicDocsUpdatePrompt()` 把四个变量塞进模板：当前文档全文、文件路径、标题、可选说明。模板默认要求维护当前状态并跳过 changelog 式追加；内容已经完整时结束工具调用。用户还可以在 `~/.claude/magic-docs/prompt.md` 放自定义模板：
 
 ```ts
 export async function buildMagicDocsUpdatePrompt(
@@ -164,11 +176,11 @@ export async function buildMagicDocsUpdatePrompt(
 }
 ```
 
-**函数与参数说明：** 前三个参数都是开放字符串，分别来自最新文件、跟踪路径和重新识别的标题；`instructions` 是 `string | undefined`，缺省时 `customInstructions` 回退为空字符串。自定义模板读取失败（包括不存在或不可读）会静默回退默认模板。替换只处理 `{{wordName}}` 形式的已知键；未知变量保留原样，而且单次 `replace()` 不会再次替换文档正文里碰巧出现的占位符。
+**函数与参数说明：** `docContents`、`docPath`、`docTitle` 都是开放字符串，分别来自最新文件、跟踪路径和重新识别的标题；`instructions` 是 `string | undefined`，缺省时 `customInstructions` 回退为空字符串。`promptTemplate` 来自 `loadMagicDocsPrompt()`；自定义模板不存在或不可读时静默回退默认模板。替换对象只提供 `docContents`、`docPath`、`docTitle`、`customInstructions` 四个键；未知变量保留原样，而且单次 `replace()` 不会再次替换文档正文里碰巧出现的占位符。
 
 最终的 Agent 同时拿到两类上下文：`forkContextMessages: messages` 提供父会话历史；`override` 继续使用本轮 `systemPrompt`、`userContext` 和 `systemContext`；新的 user message 则装入维护规则和当前文档。这比“把聊天总结成 Markdown”更精确：它是在父会话语义、项目环境与文档现状之间做受限更新。
 
-## 文档更新没有确认弹窗，但权限被压到一个文件
+## 文档更新通过精确路径权限自动决策
 
 MagicDocs 使用内建 Agent 定义，模型固定为 `'sonnet'`，工具声明只含 `Edit`。更关键的是，它另写了一层 `canUseTool`：工具名必须是 `Edit`，输入必须是非 `null` 对象，`file_path` 必须是字符串，并且必须等于当前文档路径。
 
@@ -196,13 +208,13 @@ const canUseTool = async (tool: Tool, input: unknown) => {
 }
 ```
 
-**函数与取值说明：** `getMagicDocsAgent()` 没有参数。`agentType`、`source`、`baseDir` 是固定字符串，模型固定 `'sonnet'`；本文不能把它外推为可配置模型。`canUseTool(tool, input)` 的 `input` 类型是 `unknown`，必须逐层收窄；成功只返回 `behavior: 'allow'`，并原样返回 `updatedInput`。其余工具、`null`、非对象、缺少路径、非字符串路径或其他文件路径都返回 `behavior: 'deny'`，没有 `'ask'` 分支。
+**函数与取值说明：** `getMagicDocsAgent()` 接受零个参数。`agentType`、`source`、`baseDir` 是固定字符串；`tools` 只声明 `FILE_EDIT_TOOL_NAME`，`model` 固定为 `'sonnet'`，`getSystemPrompt` 返回空字符串，由单独构造的 MagicDocs user prompt 承载维护规则。这个调用点未暴露模型配置入口。`canUseTool(tool, input)` 的 `input` 类型是 `unknown`，必须逐层收窄；精确路径上的 `Edit` 返回 `behavior: 'allow'` 并原样返回 `updatedInput`。其余工具、`null`、非对象、缺少路径、非字符串路径或其他文件路径都返回 `behavior: 'deny'`；封闭返回路径只包含 allow/deny。
 
-这回答了“接受/拒绝”的一半：**MagicDocs 没有为每次编辑展示接受按钮。** opt-in 发生在文件标记与被读取时，执行阶段则由内部权限回调自动允许精确文件上的 `Edit`，自动拒绝其他行为。它不会因为是“文档功能”就获得 `Write`、Bash 或整个仓库的编辑权。
+这回答了“接受/拒绝”的一半：opt-in 发生在文件标记与被读取时，执行阶段由内部权限回调自动允许精确文件上的 `Edit`，其他行为统一 deny。工具集合和路径检查把副作用收窄到当前文档，`Write`、Bash 与其他仓库路径都被拒绝。
 
-`runAgent()` 的消息被 `for await` 完整消费，但没有合并进主 transcript，也没有单独渲染 Agent 的解释文本。可观察产物是文件是否被 `Edit` 改变。若模型判断没有重大新信息，默认提示允许它只返回简短解释并停止，此时用户不会得到一份待接受的 diff 卡片。
+`runAgent()` 的消息被 `for await` 完整消费，主 transcript 和 UI 都只观察最终文件副作用。若模型判断内容已经完整，默认提示允许它返回简短解释并停止，此时文件保持原状。
 
-## Prompt Suggestions：预测用户会说什么，不是建议 Claude 应该做什么
+## Prompt Suggestions 预测用户的下一句输入
 
 Prompt Suggestions 的提示词把目标限定得非常死：看最近消息与原始请求，预测用户自然会输入的下一句；不要评价、不要提问、不要引入新想法、不要用 Claude 的口吻，输出 2 到 12 个词或者保持空白。
 
@@ -226,7 +238,7 @@ export function shouldEnablePromptSuggestion(): boolean {
 }
 ```
 
-**函数与取值说明：** 函数没有参数。环境变量若被帮助函数识别为显式假值则强制关闭，识别为真值则强制开启，并且优先于后续所有门；静态片段没有在这里硬编码可枚举字符串，因此本文不臆造完整真/假值列表。环境变量未形成覆盖时，GrowthBook 键以 `false` 为回退值；非交互会话关闭；启用 swarm 且当前是 teammate 时关闭。设置字段为 `boolean | undefined`：只有 `false` 关闭，`true` 与 `undefined` 都通过最后一关。
+**函数与取值说明：** 函数接受零个参数。环境变量若被帮助函数识别为显式假值则强制关闭，识别为真值则强制开启，并且优先于后续所有门；具体真/假值集合由共享 helper 定义。环境变量未形成覆盖时，GrowthBook 键以 `false` 为回退值；非交互会话关闭；启用 swarm 且当前是 teammate 时关闭。设置字段为 `boolean | undefined`：`false` 关闭，`true` 与 `undefined` 都通过最后一关。
 
 环境变量真值会“覆盖所有门”是源码注释表达的测试通道语义。因此它甚至早于非交互与 teammate 判断。正常产品路径下则先要求实验开关存在，再谈用户设置。Settings UI 只有 GrowthBook 开启时才显示 `Prompt suggestions`；用户打开时把持久字段写回 `undefined`，关闭时写 `false`，用缺省值表达默认开启。
 
@@ -249,11 +261,11 @@ export function getSuggestionSuppressReason(
 }
 ```
 
-**函数与返回值说明：** `appState` 是当前状态快照。返回开放字符串原因或 `null`；`null` 代表这一组守卫没有阻止生成，不等于生成一定成功。`pendingWorkerRequest` 与 `pendingSandboxRequest` 都是对象或 `null`，任一个非空都归为 `'pending_permission'`。elicitation 队列非空、权限模式精确为 `'plan'`、外部用户当前限额状态不是 `'allowed'` 也会分别阻止。
+**函数与返回值说明：** `appState` 是当前状态快照。返回字符串时，调用方记录该 suppress reason 并跳过模型调用；返回 `null` 时继续执行会话成熟度、缓存成本和生成步骤。`pendingWorkerRequest` 与 `pendingSandboxRequest` 任一个为对象时归为 `'pending_permission'`，两者都为 `null` 才通过；elicitation 队列非空、权限模式精确为 `'plan'`、外部用户当前限额状态处于 `'allowed'` 之外也会分别阻止。
 
-除此之外，assistant 消息少于 2 条会记为 `early_conversation`；上一条 assistant 是 API 错误会停止；父请求最新 usage 的 `input_tokens + cache_creation_input_tokens + output_tokens` 超过 10,000，会以 `cache_cold` 停止。这里的阈值不是会话总 token，也不是模型窗口上限，而是源码为这条 fork 定义的未缓存成本保护。
+除此之外，assistant 消息少于 2 条会记为 `early_conversation`；上一条 assistant 是 API 错误会停止；父请求最新 usage 的 `input_tokens + cache_creation_input_tokens + output_tokens` 超过 10,000，会以 `cache_cold` 停止。这个阈值只约束该 fork 的未缓存成本，和会话总 token、模型窗口上限分别统计。
 
-## 缓存的关键不是“存住答案”，而是别改父请求的 cache key
+## 生成参数保持父请求的 cache key
 
 建议生成调用 `runForkedAgent()`，却刻意不传 `tools: []`，也不改 effort 或输出 token 参数。源码注释说明，这些改变会破坏与父请求共享的缓存键。它改用客户端 `canUseTool` 拒绝工具，并且不写 transcript、不增加新的 cache write 标记：
 
@@ -276,15 +288,15 @@ const result = await runForkedAgent({
 })
 ```
 
-**调用与参数说明：** `cacheSafeParams` 由父回合上下文生成，目的在保持服务端 cache-key 相关参数一致；它不是“建议文本缓存”。`canUseTool` 无论收到什么工具与输入都返回 `'deny'`，没有 allow/ask 候选。`abortController` 只控制客户端取消；`skipTranscript: true` 表示这条 fork 不写入会话记录，`skipCacheWrite: true` 控制 cache-control 标记。两个布尔值固定为真，源码没有在此提供回退分支。
+**调用与参数说明：** `promptMessages` 只放一条由建议 prompt 构造的 user message；`cacheSafeParams` 由父回合上下文生成，用于保持服务端 cache-key 相关参数一致，它并不保存建议文本。`canUseTool` 返回固定对象：`behavior: 'deny'` 阻止执行，`message` 形成工具拒绝文本，`decisionReason.type/reason` 为诊断保留结构化原因。`overrides` 只覆盖 `abortController`，让建议旁路继承本轮取消信号而不改其他 agent 参数；`querySource` 与 `forkLabel` 固定标识建议旁路；`skipTranscript: true` 跳过会话记录，`skipCacheWrite: true` 跳过新的 cache write 标记。
 
-模型仍可能先尝试工具、被拒绝后再输出文本，所以代码遍历 fork 返回的所有 assistant 消息，取第一个非空 text block，而不是只看最后一条。第一条 assistant 的 `requestId` 还会保存为 `generationRequestId`，用于后续统计关联；没有 request ID 时为 `null`。
+模型仍可能先尝试工具、被拒绝后再输出文本，所以代码遍历 fork 返回的所有 assistant 消息，取第一个非空 text block。第一条 assistant 的 `requestId` 还会保存为 `generationRequestId`，用于后续统计关联；request ID 缺失时存为 `null`。
 
-文本回来后并不会原样展示。过滤器拒绝 `done`、解释“没有建议”的元文本、括号包裹的推理、API 错误、`label: value` 前缀、超过 12 词、长度达到 100、多个句子、Markdown、评价性表达与 Claude 口吻。单词建议通常被拒绝，但 slash command 和 `yes`、`push`、`commit`、`deploy`、`stop`、`continue` 等白名单值可以通过。这里是确定性过滤，不是第二次模型审核。
+文本回来后先经过确定性过滤。过滤器拒绝 `done`、空建议元文本、括号包裹的推理、API 错误、`label: value` 前缀、超过 12 词、长度达到 100、多个句子、Markdown、评价性表达与 Claude 口吻。单词建议通常被拒绝，但 slash command 和 `yes`、`push`、`commit`、`deploy`、`stop`、`continue` 等白名单值可以通过。
 
-## 展示是临时 AppState，不是跨会话历史
+## 候选只保存在临时 AppState
 
-通过过滤的结果写入 AppState：文本与 prompt variant 一起保存，`shownAt`、`acceptedAt` 初始化为 0。它不是磁盘缓存，也不会因 `skipTranscript` 被恢复到下一次会话。
+通过过滤的结果写入 AppState：文本与 prompt variant 一起保存，`shownAt`、`acceptedAt` 初始化为 0。候选只存在当前进程的临时状态，会话恢复链不读取它。
 
 ```ts
 promptSuggestion: {
@@ -301,11 +313,11 @@ const suggestion =
     : suggestionText
 ```
 
-**字段与取值说明：** `text`、`promptId`、`generationRequestId` 都允许 `null`；当前 `PromptVariant` 类型包含 `'user_intent' | 'stated_intent'`，而 `getPromptVariant()` 在 2.1.88 固定返回 `'user_intent'`。`shownAt` 和 `acceptedAt` 是毫秒时间戳，0 表示尚未发生。`inputValue` 是任意输入字符串；主 Agent 正在响应或字符串长度大于 0 时，hook 返回的可展示 suggestion 为 `null`。
+**字段与取值说明：** `promptSuggestion` 是 AppState 中承载整份临时候选的字段；`text` 为字符串时提供 ghost text，为 `null` 时展示层跳过候选；`promptId` 与 `generationRequestId` 有值时关联父 prompt 和生成请求，为 `null` 时对应遥测字段保持空值，但候选仍可展示。当前 `PromptVariant` 类型包含 `'user_intent' | 'stated_intent'`，而 `getPromptVariant()` 在 2.1.88 固定返回 `'user_intent'`。`shownAt` 和 `acceptedAt` 是毫秒时间戳，0 表示待展示/待接受。`inputValue` 非空或主 Agent 正在响应时，三元表达式返回 `null` 并隐藏候选；两者都满足展示条件时才返回 `suggestionText`。
 
-PromptInput 还要求当前处于 prompt mode、没有普通 typeahead 候选、没有查看 teammate 任务。满足后才把 `shownAt` 改为 `Date.now()`，并把 suggestion 当作输入框 placeholder。若候选已生成，却因为用户已经开始输入等时序原因无法展示，代码记录 `timing` suppression 并清空状态。
+PromptInput 还要求当前处于 prompt mode、普通 typeahead 候选为空、teammate 任务视图关闭。满足后才把 `shownAt` 改为 `Date.now()`，并把 suggestion 当作输入框 placeholder。若候选已生成，却因为用户已经开始输入等时序原因无法展示，代码记录 `timing` suppression 并清空状态。
 
-换句话说，AppState 里“有候选”不等于用户“看见候选”。`shownAt > 0` 才是展示完成的证据。这个区分随后用于判断接受、忽略和停留时间。
+AppState 里的候选要等 `shownAt > 0` 才算完成展示。这个时间戳随后用于判断接受、忽略和停留时间。
 
 ## Tab、Enter 与继续打字，对应三条结果
 
@@ -332,7 +344,7 @@ logEvent('tengu_prompt_suggestion', {
 if (!opts?.skipReset) resetSuggestion()
 ```
 
-**函数与参数说明：** `logOutcomeAtSubmission(finalInput, opts?)` 的 `finalInput` 是用户最终提交的开放字符串。`opts` 是可选对象，唯一字段 `skipReset` 为 boolean；`undefined` 或 `false` 都会清理，`true` 只用于 speculative execution 接管时避免过早 abort。接受结果只有 `'accepted'`，否则为 `'ignored'`；接受方式只有 `'tab'` 或 `'enter'`。源码没有单独的“拒绝按钮”，继续输入并提交就是拒绝语义。
+**函数与参数说明：** `logOutcomeAtSubmission(finalInput, opts?)` 的 `finalInput` 是用户最终提交的开放字符串。`tabWasPressed` 由 `acceptedAt > shownAt` 判定，`wasAccepted` 还接受最终输入与候选完全相等；`outcome` 因而只有 `'accepted'` 或 `'ignored'`，`acceptMethod` 只在接受时写入 `'tab'` 或 `'enter'`。`opts.skipReset` 省略或为 `false` 时调用 `resetSuggestion()`，为 `true` 时让 speculative execution 暂时保留状态。继续输入并提交构成 ignored 语义。
 
 这里也有隐私边界。通用事件会上报 outcome、prompt id、用时、焦点状态和长度相似度；只有 `USER_TYPE === 'ant'` 的分支才额外附带 suggestion 与 userInput 原文。
 
@@ -340,23 +352,28 @@ if (!opts?.skipReset) resetSuggestion()
 
 两套能力都被设计成旁路失败，不阻断主回答，但失败方式不同。
 
-MagicDocs 重新读取时，如果文件不存在、EACCES/EPERM，或内容已不再匹配 Magic Doc 标题，就从 Map 删除路径并返回。其他异常会向 post-sampling hook 冒泡，由统一执行器记录错误后继续，不会让 queryLoop 因文档维护失败而失败。自定义提示词读取失败静默回退默认模板。。
+MagicDocs 重新读取时，如果文件不存在、EACCES/EPERM，或内容已不再匹配 Magic Doc 标题，就从 Map 删除路径并返回。其他异常会向 post-sampling hook 冒泡，由统一执行器记录错误后继续，不会让 queryLoop 因文档维护失败而失败。自定义提示词读取失败静默回退默认模板。
 
-Prompt Suggestions 使用模块级 `currentAbortController`。新生成开始后可以由 `abortPromptSuggestion()` 取消；`AbortError` 和 `APIUserAbortError` 记为 aborted 并静默返回，其他错误只写日志。空输出、过滤命中、过早会话、API 错误、缓存过冷、权限等待、elicitation、plan mode、rate limit 和展示时序都可能让用户什么也看不到。这不是 UI 丢消息，而是源码有意把“不打扰”当作合法终态。
+Prompt Suggestions 使用模块级 `currentAbortController`。新生成开始后可以由 `abortPromptSuggestion()` 取消；`AbortError` 和 `APIUserAbortError` 记为 aborted 并静默返回，其他错误只写日志。空输出、过滤命中、过早会话、API 错误、缓存过冷、权限等待、elicitation、plan mode、rate limit 和展示时序都可能产生空候选；源码把静默结束定义为合法终态。
 
-还要注意 fire-and-forget 的时序：`handleStopHooks()` 用 `void executePromptSuggestion(...)` 启动建议生成，主回合不等待它；MagicDocs 由 post-sampling hook 执行器 `await`，但 hook 自己处在主采样之后。。
+还要注意 fire-and-forget 的时序：`handleStopHooks()` 用 `void executePromptSuggestion(...)` 启动建议生成，主回合不等待它；MagicDocs 由 post-sampling hook 执行器 `await`，但 hook 自己处在主采样之后。
 
 ## 小结
 
 MagicDocs 与 Prompt Suggestions 都复用了 Claude Code 已有的会话上下文和 Agent 执行能力，但它们刻意选择了不同的落点。
 
-MagicDocs 通过特殊文件头和 `Read` 监听建立进程内跟踪，在主 REPL 没有继续工具调用时，重新读取当前文档，把父会话、系统上下文和文档指令交给 Sonnet fork。它没有逐次确认 UI，却把权限收窄到“只允许 Edit 当前精确路径”；文件消失、不可读或移除标题后就停止跟踪。2.1.88 里它只在 `USER_TYPE === 'ant'` 初始化，这是一条不能忽略的产品边界。
+MagicDocs 通过特殊文件头和 `Read` 监听建立进程内跟踪，在主 REPL 自然收尾时重新读取当前文档，把父会话、系统上下文和文档指令交给 Sonnet fork。内部权限回调自动允许当前精确路径上的 `Edit`，其余行为直接 deny；文件消失、不可读或移除标题后就停止跟踪。2.1.88 里它只在 `USER_TYPE === 'ant'` 初始化，这是一条关键产品边界。
 
 Prompt Suggestions 在停止阶段预测用户下一句，先经过功能门与运行时 suppress guards，再用父请求的 cache-safe 参数启动禁用工具、跳过 transcript 的 fork。通过确定性过滤的短文本只存在 AppState，在输入框真正可展示后才记录 `shownAt`。Tab 或 Enter 把候选变成普通输入，其他提交记为 ignored；取消、过滤和失败都可以安静结束。
 
-真正值得借鉴的不是“再调一次模型”，而是每次旁路生成都要回答四个问题：它读哪些上下文，能产生什么副作用，谁负责确认，失败是否影响主路径。MagicDocs 和 Prompt Suggestions 给出了两套不同但都很克制的答案。
+每次旁路生成都要回答四个问题：它读哪些上下文，能产生什么副作用，谁负责确认，失败是否影响主路径。MagicDocs 和 Prompt Suggestions 给出了两套不同但都很克制的答案。
 
 ## 留给下一篇的问题
 
 文档与建议生成以后，Claude Code 如何通过通知、mailbox 与 output style 把结果送到正确的人、Agent 和界面，并完成整个运行闭环？
 
+## 参考资料
+
+- [Claude Code Skills](https://code.claude.com/docs/en/skills)
+
+- [Dive into Claude Code：生产级 Agent 的设计空间](https://arxiv.org/abs/2604.14228)

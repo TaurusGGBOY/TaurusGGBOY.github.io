@@ -10,21 +10,33 @@ image: "/images/posts/claude-code-source-reading-33/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **Chord automaton**：按键序列在完整匹配、候选前缀和失配之间迁移，超时与焦点参与判定。
+
+- **模态编辑**：同一按键在 normal、insert 和 operator-pending 状态中映射到不同动作。
+
+- **Pending operator**：删除、修改等操作先记录 operator，再由 motion 计算范围并提交文本变更。
+
+![按键 chord 与 Vim operator-pending 状态机](/images/posts/claude-code-source-reading-33/33-key-state-machine-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 上一篇留下的问题是：REPL 能显示与接收输入以后，Claude Code 如何解析按键、管理快捷键上下文，并实现 Vim 的 normal、insert 与 operator-pending 状态？
 
 先给结论：Claude Code 把这件事拆成了两台状态机。
 
-第一台是快捷键解析器。终端字节先被归一化成 `input + Key`，再拿“当前激活的上下文、默认绑定、用户覆盖和未完成的 chord”做匹配。匹配成功就调用 action handler；只是某个组合键的前缀，就暂存 1 秒；没有匹配，事件才继续向输入组件传播。
+第一台是快捷键解析器。终端字节先被归一化成 `input + Key`，再拿“当前激活的上下文、默认绑定、用户覆盖和未完成的 chord”做匹配。完整匹配会调用 action handler；前缀匹配暂存 1 秒；零匹配才把事件继续传给输入组件。
 
-第二台才是 Vim。它只在 Chat 输入最终落到 `VimTextInput` 后工作。源码的顶层 `VimState` 实际只有 `INSERT` 和 `NORMAL` 两种模式；常说的 operator-pending 并不是第三种顶层 mode，而是 `NORMAL.command` 中的 `operator`、`operatorCount`、`operatorFind`、`operatorTextObj` 等等待态。按下 `d` 不是立刻删除，而是先记住 operator，再等 `w`、`f<char>` 或 `i"` 补齐范围。
+第二台是 Vim。它在 Chat 输入落到 `VimTextInput` 后工作。源码的顶层 `VimState` 只有 `INSERT` 和 `NORMAL` 两种模式；operator-pending 由 `NORMAL.command` 中的 `operator`、`operatorCount`、`operatorFind`、`operatorTextObj` 等等待态表达。按下 `d` 先记住 operator，再等 `w`、`f<char>` 或 `i"` 补齐范围后执行删除。
 
 也就是说，`ctrl+x ctrl+e` 等待第二键，和 Vim 的 `d` 等待 motion，看起来都像“pending”，但属于两套不同的状态机。前者解决“哪个应用动作被触发”，后者解决“怎样编辑 prompt 文本”。
 
 ![快捷键解析与 Vim 状态机手绘图](/images/posts/claude-code-source-reading-33/33-keybindings-vim-mode-handdrawn.png)
 
-## 一个按键不是一个字符
+## 一个按键包含字符与控制信息
 
 本文继续以 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码为边界。还原路径是阅读索引，不假定它等同于 Anthropic 内部仓库的原始目录。下面的代码只保留证明当前结论的分支，无关按键与 UI 分支会省略。
 
@@ -65,15 +77,17 @@ function parseKey(keypress: ParsedKey): [Key, string] {
 }
 ```
 
-`parseKey(keypress)` 接收 `ParsedKey`，返回 `[Key, string]`。`keypress.name` 是解析后的键名，`sequence` 是终端序列；`ctrl`、`shift`、`meta`、`option`、`super` 都是布尔值。`sequence` 为 `undefined` 时，`input` 回退为空字符串，而不是把未知序列写入 prompt。源码后续还专门处理 CSI u、modifyOtherKeys、数字键盘和无法识别的功能键，避免控制序列泄漏成普通文本。
+`parseKey(keypress)` 接收 `ParsedKey`，返回 `[Key, string]`。`keypress.name` 是解析后的键名，`sequence` 是终端序列；`ctrl`、`shift`、`meta`、`option`、`super` 都是布尔值。`sequence` 为 `undefined` 时，`input` 回退为空字符串，使未知控制序列停留在按键层。源码后续还专门处理 CSI u、modifyOtherKeys、数字键盘和无法识别的功能键，避免控制序列泄漏成普通文本。
+
+`Key` 的布尔字段按键族分组：`upArrow/downArrow/leftArrow/rightArrow` 表示方向，`pageDown/pageUp/home/end` 表示导航，`wheelUp/wheelDown` 表示滚轮，`return/tab/backspace/delete/escape` 表示编辑与控制键；每项都由 `keypress.name` 的精确相等判断产生。`fn`、`ctrl`、`shift`、`super` 原样继承解析结果，`meta` 则在 `keypress.meta`、Escape 或 `keypress.option` 任一成立时为真，因此 Option/Alt 会并入 Meta 语义。
 
 这里已经能看到第一个平台边界：Ink 的历史兼容层把 `Alt` / `Option` 汇入 `meta`，因此传统终端里两者不能可靠区分；`super` 仍然独立，但只有支持 Kitty keyboard protocol 的终端才可能把 Cmd/Win 送进 PTY。配置文件能写出 `cmd+c`，不代表当前终端一定能产生它。
 
-在新 Ink DOM 事件路径里，`KeyboardEvent` 又把同一个 `ParsedKey` 转成类似浏览器的 `keydown` 事件：可打印键使用字面字符，控制组合使用键名，特殊键使用 `return`、`down` 等名称。`Ink.dispatchKeyboardEvent()` 从当前 focus element 开始做 capture/bubble；只有没有 handler 调用 `preventDefault()` 时，Tab 才执行默认的焦点切换。这个事件路径解释了“按键怎样进入组件树”，而快捷键 action 的主要匹配仍使用 `InputEvent` 中的 `input + Key`。
+在新 Ink DOM 事件路径里，`KeyboardEvent` 又把同一个 `ParsedKey` 转成类似浏览器的 `keydown` 事件：可打印键使用字面字符，控制组合使用键名，特殊键使用 `return`、`down` 等名称。`Ink.dispatchKeyboardEvent()` 从当前 focus element 开始做 capture/bubble；所有 handler 都放行时，Tab 才执行默认的焦点切换。这个事件路径解释了“按键怎样进入组件树”，而快捷键 action 的主要匹配仍使用 `InputEvent` 中的 `input + Key`。
 
-## 绑定不是写死在组件里的按键判断
+## 绑定把组件动作与按键映射分开
 
-组件注册的是 `chat:submit`、`app:interrupt` 这类动作，不是到处重复判断 `key.return`。默认映射集中在 `restored-src/src/keybindings/defaultBindings.ts`，用户配置则被解析成同一种扁平结构。
+组件注册 `chat:submit`、`app:interrupt` 这类动作；默认按键映射集中在 `restored-src/src/keybindings/defaultBindings.ts`，用户配置也被解析成同一种扁平结构。
 
 `parseKeystroke()` 会处理修饰键别名和少量键名别名：
 
@@ -98,7 +112,7 @@ export function parseBindings(blocks: KeybindingBlock[]): ParsedBinding[] {
 }
 ```
 
-`parseChord(input)` 的 `input` 是开放字符串，例如 `ctrl+x ctrl+e`；空格分隔多个 keystroke，但单独一个空格被特殊解释成 Space 键。`parseBindings(blocks)` 的 `blocks` 是配置块数组，每块包含 `context` 与 `bindings`。`action` 可以是内置 action、符合 `command:<name>` 格式的命令绑定，或者 `null`；`null` 的含义不是“什么都没写”，而是显式解除默认绑定。
+`parseChord(input)` 的 `input` 是开放字符串，例如 `ctrl+x ctrl+e`；空格分隔多个 keystroke，但单独一个空格被特殊解释成 Space 键。`parseBindings(blocks)` 的 `blocks` 是配置块数组，每块包含 `context` 与 `bindings`。`action` 可以是内置 action、符合 `command:<name>` 格式的命令绑定，或者 `null`；遇到 `null` 时，合并后的映射保留这个槽位并阻止同 chord 的默认 action 被调用。
 
 源码能够确认的配置上下文包括 `Global`、`Chat`、`Autocomplete`、`Confirmation`、`Help`、`Transcript`、`HistorySearch`、`Task`、`ThemePicker`、`Settings`、`Tabs`、`Attachments`、`Footer`、`MessageSelector`、`DiffDialog`、`ModelPicker`、`Select` 和 `Plugin`。action 列表也由 schema 封闭定义。
 
@@ -115,11 +129,11 @@ const userParsed = parseBindings(userBlocks)
 const mergedBindings = [...defaultBindings, ...userParsed]
 ```
 
-`isKeybindingCustomizationEnabled()` 没有参数，读取 `tengu_keybinding_customization_release` 功能开关，并以 `false` 为回退值。开关关闭时，函数只返回默认绑定与空 warning；打开时才读取 `~/.claude/keybindings.json`，把用户绑定放在默认绑定之后。。
+`isKeybindingCustomizationEnabled()` 接受零个参数，读取 `tengu_keybinding_customization_release` 功能开关，并以 `false` 为回退值。开关关闭时，`bindings` 直接取 `defaultBindings`，`warnings` 为空数组；打开时解析用户块得到 `userParsed`，再按 `[...defaultBindings, ...userParsed]` 生成 `mergedBindings`，使靠后的用户项参与最终覆盖。
 
-配置加载失败时也不是让 REPL 无法启动。文件不存在、格式错误或解析异常都会回退默认绑定；可诊断的问题被整理为 `parse_error`、`duplicate`、`reserved`、`invalid_context` 或 `invalid_action`，严重度是 `error` 或 `warning`。
+文件不存在、格式错误或解析异常时，加载器回退默认绑定并继续启动 REPL；可诊断的问题被整理为 `parse_error`、`duplicate`、`reserved`、`invalid_context` 或 `invalid_action`，严重度是 `error` 或 `warning`。
 
-## 它没有 trie，而是每次扫描候选前缀
+## 候选前缀通过线性扫描解析
 
 多键 chord 很容易让人联想到前缀树。但 2.1.88 的实现更直接：绑定总量不大，每次输入都过滤激活上下文，再扫描是否存在“更长且当前序列是其前缀”的绑定。
 
@@ -150,7 +164,7 @@ export function resolveKeyWithChordState(
 }
 ```
 
-`input` 是归一化后的可打印字符串，`key` 是特殊键与修饰键标志，`activeContexts` 是本次允许参与匹配的上下文，`bindings` 是默认与用户配置合并后的数组。`pending` 为 `null` 表示当前没有 chord；非 `null` 时保存此前已经命中的 keystroke。返回值可能是 `match`、`none`、`unbound`、`chord_started` 或 `chord_cancelled`，调用方必须分别处理。
+`input` 是归一化后的可打印字符串，`key` 是特殊键与修饰键标志，`activeContexts` 是本次允许参与匹配的上下文，`bindings` 是默认与用户配置合并后的数组。`pending` 为数组时把当前键追加到此前前缀，为 `null` 时从当前键开始新序列。返回值可能是 `match`、`none`、`unbound`、`chord_started` 或 `chord_cancelled`，调用方必须分别处理。
 
 匹配顺序有两个值得注意的细节。
 
@@ -162,7 +176,7 @@ export function resolveKeyWithChordState(
 
 ## 为什么还需要全局 ChordInterceptor
 
-假设 `ctrl+x` 已经启动 chord，第二键 `e` 先被普通文本输入处理，编辑框就会多出一个 `e`，然后快捷键系统才发现组合完整。这不是显示问题，而是事件顺序错误。
+假设 `ctrl+x` 已经启动 chord，第二键 `e` 若先被普通文本输入处理，编辑框就会多出一个 `e`，随后快捷键系统才发现组合完整。根因是事件消费顺序颠倒。
 
 因此 `KeybindingSetup` 把 `ChordInterceptor` 放在 children 之前。它先观察所有按键，只在 chord 相关分支中阻断传播：
 
@@ -195,11 +209,11 @@ switch (result.type) {
 
 这里的 `contexts` 来自已注册 handler 的 context、当前 active context 和 `Global`；`pendingChordRef.current` 为 `null` 或当前 chord 前缀。`stopImmediatePropagation()` 会阻止后续 `useInput` handler 看到同一次事件。`none` 不阻断，让文本输入、Vim 或其他更局部的 handler 继续处理；`match` 在完成 pending chord 时由 registry 找到 action handler 并调用。
 
-单键 action 则由组件里的 `useKeybinding()` / `useKeybindings()` 处理。handler 同步返回 `false` 表示没有消费事件，允许继续传播；返回 `void` 或 `Promise<void>` 会被视为已处理。这个约定让“滚动没有实际移动时，把滚轮交给子列表”成为可能，也避免一个声明存在但当前无效的 action 永久吞键。
+单键 action 则由组件里的 `useKeybinding()` / `useKeybindings()` 处理。handler 同步返回 `false` 表示事件继续传播；返回 `void` 或 `Promise<void>` 表示已处理。这个约定让未发生位移的滚动事件继续交给子列表，也避免当前无效的 action 永久吞键。
 
 上下文本质上是 UI 所有权。确认框挂载时注册 `Confirmation`，历史搜索注册 `HistorySearch`，Chat 输入注册 `Chat`。它们决定某个动作此刻是否有资格响应，不会改变 QueryEngine、工具权限或 Agent 循环。快捷键最多触发“提交”“取消”“选择 yes”等宿主动作，不能凭一个绑定绕过工具授权。
 
-## 冲突不是只看有没有重复键
+## 冲突校验同时考虑上下文与终端保留键
 
 `restored-src/src/keybindings/validate.ts` 会检查同一块 JSON 中的重复键、非法 context/action 和保留快捷键。不同 context 中都绑定 `enter` 是合法的，因为焦点与 overlay 会决定谁参与匹配。
 
@@ -207,7 +221,7 @@ switch (result.type) {
 
 默认绑定也包含平台回退。例如 Windows 终端缺少可靠 VT mode 时，模式切换从 `shift+tab` 回退为 `meta+m`；图片粘贴在 Windows 使用 `alt+v`，其他平台使用 `ctrl+v`。
 
-到这里，快捷键系统已经做完它的工作：能解析成 action 的按键被消费；没有匹配的 Chat 输入继续落到文本组件。下面才进入 Vim。
+到这里，快捷键系统已经完成分流：能解析成 action 的按键被消费，零匹配的 Chat 输入继续落到文本组件。下面进入 Vim。
 
 ## Vim 只有两个顶层模式
 
@@ -232,13 +246,13 @@ export type CommandState =
   | { type: 'indent'; dir: '>' | '<'; count: number }
 ```
 
-`VimState.mode` 只有 `'INSERT'` 与 `'NORMAL'`。INSERT 的 `insertedText` 用于记录可被 `.` 重放的插入；NORMAL 的 `command` 是第二层判别联合。`Operator` 的可选值只有 `'delete'`、`'change'`、`'yank'`；`FindType` 是 `'f' | 'F' | 't' | 'T'`；`TextObjScope` 是 `'inner' | 'around'`。这些封闭值决定 transition 能穷举每个等待态。
+`VimState.mode` 只有 `'INSERT'` 与 `'NORMAL'`。INSERT 的 `insertedText` 用于记录可被 `.` 重放的插入；NORMAL 的 `command` 是第二层判别联合。`digits` 保存 count 等待态已累计的原始数字字符，后续 transition 再把它转换成计数并应用 `MAX_VIM_COUNT` 上限。`Operator` 的可选值只有 `'delete'`、`'change'`、`'yank'`；`FindType` 是 `'f' | 'F' | 't' | 'T'`；`TextObjScope` 是 `'inner' | 'around'`。这些封闭值决定 transition 能穷举每个等待态。
 
-初始化不是 Normal，而是 `{ mode: 'INSERT', insertedText: '' }`。另有 `PersistentState` 保存 `lastChange`、`lastFind`、register 内容和 linewise 标志；前两项初始为 `null`，register 初始为空字符串。它们跨 command 保存，但只活在这个输入组件实例的内存里，不能把它理解成会话 transcript 或系统剪贴板。
+初始化状态是 `{ mode: 'INSERT', insertedText: '' }`。另有 `PersistentState` 保存 `lastChange`、`lastFind`、register 内容和 linewise 标志；`lastChange` 与 `lastFind` 为 `null` 时，`.`、`;`、`,` 等重复命令直接保持当前文本，register 初始为空字符串。它们跨 command 保存，但只活在当前输入组件实例的内存里。
 
-`VimTextInput` 并没有重新实现渲染。它调用 `useVimInput()` 生成一个兼容普通文本输入的 `inputState`，再交给同一个 `BaseTextInput`。因此 Vim 是输入语义适配层，不是另一套 REPL。
+`VimTextInput` 调用 `useVimInput()` 生成兼容普通文本输入的 `inputState`，再交给同一个 `BaseTextInput`。因此 Vim 只增加输入语义，渲染仍复用普通 REPL。
 
-## Esc 为什么没有迁移成可配置 action
+## Esc 由 Vim 模式直接处理
 
 `useVimInput()` 先复用 `useTextInput()`，然后在 `handleVimInput()` 中按模式分流：
 
@@ -264,11 +278,11 @@ if (key.return) {
 }
 ```
 
-`handleVimInput(rawInput, key)` 的 `rawInput` 是未经过 Vim 解释的字符串，`key` 是 Ink 的按键标志。Ctrl 组合统一下放给基础输入，让 readline 风格与应用快捷键继续工作；Esc 在 INSERT 中固定切到 NORMAL，在 NORMAL 中固定取消 pending command；Enter 无论模式都交给基础输入，因此 NORMAL 下仍可提交 prompt。这些分支没有可选返回值，也不会进入 `transition()`。
+`handleVimInput(rawInput, key)` 的 `rawInput` 是进入 Vim 前的原始字符串，`key` 是 Ink 的按键标志。Ctrl 组合统一下放给基础输入，让 readline 风格与应用快捷键继续工作；Esc 在 INSERT 中固定切到 NORMAL，在 NORMAL 中固定取消 pending command；Enter 无论模式都交给基础输入，因此 NORMAL 下仍可提交 prompt。这些分支直接返回固定结果，跳过 `transition()`。
 
-源码注释明确说，INSERT → NORMAL 的 Esc 是 Vim 用户依赖的标准语义，所以故意没有迁移成可配置 keybinding。外层也配合这条规则：`CancelRequestHandler` 在 Vim INSERT 模式下不激活 `chat:cancel`；否则默认 `escape: chat:cancel` 会先被快捷键层吞掉，Vim 永远收不到 Esc。
+源码注释明确说，INSERT → NORMAL 的 Esc 是 Vim 用户依赖的标准语义，因此该键固定由 Vim 状态机处理。外层 `CancelRequestHandler` 在 Vim INSERT 模式下停用 `chat:cancel`，确保默认的 `escape: chat:cancel` 不会抢先消费 Esc。
 
-切出 INSERT 时，`switchToNormalMode()` 会把非空 `insertedText` 记为 `lastChange`，并在不是行首时把光标左移一个 grapheme 位置。切回 INSERT 时清空本轮 `insertedText`。这里保存的是 dot-repeat 所需的编辑记忆，不是 React 展示状态；`mode` 另存在 `useState` 中，负责 footer 等组件刷新。
+切出 INSERT 时，`switchToNormalMode()` 会把非空 `insertedText` 记为 `lastChange`，并在光标位于行首之外时左移一个 grapheme。切回 INSERT 时清空本轮 `insertedText`。这份数据保存 dot-repeat 所需的编辑记忆；`mode` 另存在 `useState` 中，负责 footer 等组件刷新。
 
 ## operator-pending 是怎样推进的
 
@@ -304,11 +318,11 @@ function fromOperator(
 }
 ```
 
-`state.op` 只能是 delete/change/yank，`state.count` 是 operator 前的计数，`input` 是当前 NORMAL 命令字符，`ctx` 提供文本、Cursor、setter、register 和 repeat 回调。返回 `next` 会继续停留在 NORMAL 的子状态；返回 `execute` 后，`useVimInput()` 在没有切入 INSERT 的情况下把 command 复位到 `idle`。未知输入不会猜测，直接取消当前 operator。
+`state.op` 只能是 delete/change/yank，`state.count` 是 operator 前的计数，`input` 是当前 NORMAL 命令字符，`ctx` 提供文本、Cursor、setter、register 和 repeat 回调。返回 `next` 会继续停留在 NORMAL 的子状态；返回 `execute` 后，`useVimInput()` 在仍处于 NORMAL 时把 command 复位到 `idle`。未知输入直接取消当前 operator。
 
-这套拆分可以自然表达组合语法：`dd` / `cc` / `yy` 进入整行操作；`d3w` 进入 `operatorCount`；`dfx` 进入 `operatorFind`；`di"` 先进入 `operatorTextObj(inner)`，再等待对象类型。operator 前后的 count 会相乘，累计数字被 `MAX_VIM_COUNT = 10000` 截断，避免异常长数字让 motion 循环失控。
+这套拆分可以自然表达组合语法：`dd` / `cc` / `yy` 进入整行操作；`d3w` 进入 `operatorCount`，其中 `digits` 累积 operator 后输入的数字；`dfx` 进入 `operatorFind`；`di"` 先进入 `operatorTextObj(inner)`，再等待对象类型。operator 前后的 count 会相乘，累计数字被 `MAX_VIM_COUNT = 10000` 截断，避免异常长数字让 motion 循环失控。
 
-`change` 和 `delete` 的差异不只是最终文本。`applyOperator()` 对 yank 只更新 register 和光标，对 delete 拼接范围两侧，对 change 删除范围后调用 `enterInsert(from)`。所以图中的 change 箭头会回到 INSERT，而 delete/yank 完成后回到 NORMAL idle。
+`change` 和 `delete` 还会导向不同状态。`applyOperator()` 对 yank 只更新 register 和光标，对 delete 拼接范围两侧，对 change 删除范围后调用 `enterInsert(from)`。所以图中的 change 箭头会回到 INSERT，delete/yank 完成后回到 NORMAL idle。
 
 ## motion 计算与文本修改为什么分开
 
@@ -318,7 +332,7 @@ function fromOperator(
 
 一是同一个 motion 可以独立移动，也可以被 `d/c/y` 复用。`w` 只移动；`dw` 先算目标，再删除范围。二是文本边界集中处理。`x`、replace 和普通 motion 按 grapheme 推进，不直接用 UTF-16 code unit；word motion 落进 `[Image #N]` 占位片段时，operator range 会扩到整个 image ref，避免删除半个占位符。
 
-源码也保留了 Vim 的特殊规则。例如 `cw` / `cW` 不是简单走到下一个词首，而是改到当前词尾；`j/k/G/gg` 与 operator 结合时按整行处理；`f/F/t/T` 会更新 `lastFind`，`;` 和 `,` 再按原方向或反方向重复。。
+源码也保留了 Vim 的特殊规则。例如 `cw` / `cW` 把范围截到当前词尾；`j/k/G/gg` 与 operator 结合时按整行处理；`f/F/t/T` 会更新 `lastFind`，`;` 和 `,` 再按原方向或反方向重复。
 
 ## 两套 pending 怎样避免互相踩踏
 
@@ -326,17 +340,17 @@ function fromOperator(
 
 终端输入先经过全局 chord interceptor。若它是一个有效 action 或 chord 前缀，事件被消费，Vim 看不到它；若结果是 `none`，事件继续传播到 Chat 输入。Vim INSERT 把普通字符交给基础文本编辑器；Vim NORMAL 把字符解释为 command state transition。
 
-这里不是简单的“快捷键优先级高于 Vim”规则，而是组件按场景注册 handler。例如 Vim INSERT 时，外层主动停用 Esc 的 `chat:cancel`，把 Esc 留给模式切换；有任务运行且 Vim 已在 NORMAL 时，Esc 才可以由取消 handler 接管。控制键也由 `useVimInput()` 下放，避免 Vim 字符命令吞掉 `ctrl+c` 等全局动作。
+组件按场景注册 handler，形成动态优先级。例如 Vim INSERT 时，外层主动停用 Esc 的 `chat:cancel`，把 Esc 留给模式切换；有任务运行且 Vim 已在 NORMAL 时，Esc 才由取消 handler 接管。控制键也由 `useVimInput()` 下放，避免 Vim 字符命令吞掉 `ctrl+c` 等全局动作。
 
-远程或 headless 模式没有终端按键，自然也不需要维持 chord 与 Vim command state。它们向核心提交的仍是 user message、permission response 或 control event。换句话说，Keybindings 与 Vim 都属于交互宿主：它们决定 prompt 怎样被编辑、哪个 UI 动作被调用，不改变同一条 Agent 查询循环的工具与权限语义。
+远程或 headless 模式直接向核心提交 user message、permission response 或 control event，省去终端按键、chord 与 Vim command state。Keybindings 与 Vim 都属于交互宿主：它们决定 prompt 怎样被编辑、哪个 UI 动作被调用；Agent 查询循环继续沿用同一套工具与权限语义。
 
 ## 小结
 
-Claude Code 的终端输入不是一组散落的 `if (key === ...)`，而是两层可组合机制。
+Claude Code 的终端输入由两层可组合机制构成。
 
 快捷键层把终端差异归一化成 `input + Key`，用 context 过滤绑定，用数组末项实现用户覆盖，用前缀扫描和 1 秒 pending 支持 chord，再通过事件传播把未消费输入交给组件。它的边界是终端协议、操作系统保留键与运行时功能开关。
 
-Vim 层复用普通文本输入，只增加 `INSERT | NORMAL` 顶层状态、NORMAL 内部 command 状态机，以及 register、lastFind、lastChange 等短期记忆。operator-pending 是 NORMAL 的子状态，不是第三个模式；motion 负责算范围，operator 负责应用修改，change 才会切回 INSERT。
+Vim 层复用普通文本输入，只增加 `INSERT | NORMAL` 顶层状态、NORMAL 内部 command 状态机，以及 register、lastFind、lastChange 等短期记忆。operator-pending 位于 NORMAL 子状态；motion 负责算范围，operator 负责应用修改，change 才会切回 INSERT。
 
 这套实现的意义不在于复刻完整 Vim，而在于把“应用快捷键”和“编辑语言”分开。前一层可以随着 overlay、焦点和用户配置变化，后一层仍然用确定的状态转移解释 `d3w`、`ci"` 或 `.`。
 
@@ -344,3 +358,8 @@ Vim 层复用普通文本输入，只增加 `INSERT | NORMAL` 顶层状态、NOR
 
 交互式 REPL 之外，Claude Code 如何在 `-p`、SDK 与结构化输入输出模式下运行同一套 Agent 循环，并处理不可交互的权限请求？
 
+## 参考资料
+
+- [Claude Code Keybindings](https://code.claude.com/docs/en/keybindings)
+
+- [Claude Code Interactive Mode](https://code.claude.com/docs/en/interactive-mode)

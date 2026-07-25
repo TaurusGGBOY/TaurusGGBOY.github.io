@@ -10,27 +10,39 @@ image: "/images/posts/claude-code-source-reading-11/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **副作用边界**：`tool.call` 之前的步骤负责解释与授权，越过边界后外部世界可能已经改变。
+
+- **生命周期切面**：Hook 在固定阶段观察或干预调用，核心流程仍负责聚合最终决定。
+
+- **执行证据**：进度、原始返回值、映射后的 `tool_result` 和持久化记录分别服务不同消费者。
+
+![工具生命周期中的副作用边界与执行证据](/images/posts/claude-code-source-reading-11/11-side-effect-boundary-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 上一篇留下的问题是：一个工具被选中以后，它如何依次经过输入校验、权限检查、实际调用、结果转换与持久化？
 
-先说结论：这不是一次简单的 `tool.call(input)`，而是一条可以在多个位置提前结束的流水线。
+先说结论：一次工具调用是一条带多道提前出口的执行流水线，`tool.call(input)` 只位于副作用边界之后。
 
 模型返回的 `tool_use` 先由 `runToolUse` 查找工具。找到以后，`checkPermissionsAndCallTool` 先做 Zod 结构校验，再调用工具自己的 `validateInput` 做语义校验；随后运行 `PreToolUse` Hook，并把 Hook 的意见、权限规则和宿主响应收敛成权限决策。只有最终结果为 `allow`，程序才会越过副作用边界，真正调用 `tool.call`。
 
 调用过程中产生的 progress 主要用于实时反馈；调用结束后，原始返回值会经过工具自己的映射函数变成 `tool_result`。结果过大时，正文会另存到 session 的 `tool-results/` 目录，消息中只保留路径和预览。最后，用户消息形式的 `tool_result` 随消息链写入 transcript JSONL。对于 Edit、Write 这类文件工具，文件历史备份、实际写盘和 `readFileState` 更新则发生在 `tool.call` 内部。
 
-也就是说，这条链上至少有三种不同的“完成”：工具代码执行完成、模型可见结果构造完成、会话记录持久化完成。它们不是同一件事。
+这条链上至少有三种完成状态：工具代码执行完成、模型可见结果构造完成、会话记录持久化完成。排障时必须分别确认。
 
 ## 先画出一条工具执行流水线
 
-本文仍然只讨论仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原出的代码。。
+本文仍然只讨论仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原出的代码。
 
 为了把问题缩小，我们只跟踪一个已经出现在 assistant message 里的 `tool_use`。多个工具如何串并行调度，上一篇已经讨论过；这一篇关心的是单个调用进入执行器以后，每一扇门何时打开，何时会把调用拦下来。
 
 ![一次工具调用从 tool_use 走到副作用与持久化](/images/posts/claude-code-source-reading-11/11-tool-execution-lifecycle-handdrawn.png)
 
-这张图最重要的不是箭头数量，而是中间那条 `SIDE EFFECT BOUNDARY`：
+这张图的重点是中间那条 `SIDE EFFECT BOUNDARY`：
 
 1. 工具查找、输入校验、PreToolUse 和权限决策都在边界左边；
 2. `tool.call` 在边界右边，它可能读文件、写文件、执行命令或者请求网络；
@@ -38,7 +50,7 @@ imagePosition: "left"
 
 下面沿这条路径逐段看源码。为保持片段短小，代码块省略了遥测、日志和与当前结论无关的分支；省略处会明确写成 `// ...`，其余内容均来自 `restored-src/` 下的还原源码。
 
-## 第一扇门：tool_use 只是请求，不是执行
+## 第一扇门：tool_use 先完成名称解析
 
 模型返回的 `tool_use` 至少带有 `id`、`name` 和 `input`。其中 `id` 很关键：后面无论成功、拒绝还是异常，生成的 `tool_result.tool_use_id` 都要用它与这次请求配对。
 
@@ -86,11 +98,11 @@ export async function* runToolUse(
 
 这里有一个容易忽略的限制：它先在 `toolUseContext.options.tools` 中找，也就是当前运行上下文真正提供给模型的工具集合。只有找不到时，才会去基础工具池检查兼容别名，而且必须是 `aliases` 命中，不能借此绕过当前工具集合直接调用任意基础工具。
 
-如果仍然找不到，程序会直接构造 `is_error: true` 的 `tool_result` 并返回。此时没有进入输入校验，更没有调用工具。
+如果仍然找不到，程序会直接构造 `is_error: true` 的 `tool_result` 并返回。该分支终止于名称解析阶段，输入校验与工具调用保持未触发状态。
 
 取消也有同样的边界。`abortController.signal.aborted` 在进入执行器前已经为 `true` 时，`runToolUse` 会返回 stop result。至于工具运行期间收到新输入是取消还是等待，则由工具可选的 `interruptBehavior()` 决定；源码可确认的返回值是 `'cancel'` 或 `'block'`，未实现、返回异常时都回退到 `'block'`。
 
-## 第二扇门：结构正确，不等于语义可执行
+## 第二扇门：结构校验之后再做语义校验
 
 工具找到以后，校验分两层。
 
@@ -121,7 +133,7 @@ if (isValidCall?.result === false) {
 
 `inputSchema` 适合表达稳定、可序列化的契约，还能发送给模型。`validateInput` 则可以读取运行时上下文，执行异步检查。把文件是否存在、当前 cwd 或会话状态都塞进静态 Schema，不仅困难，也会混淆“参数长什么样”和“参数现在能不能用”。
 
-更重要的是，两种失败都被转换成 `tool_result`，而不是让整个 query loop 因一个坏参数崩溃。模型看到错误以后，可以修正参数再次发起调用。
+两种校验失败都会转换成 `tool_result`，让 query loop 保持协议完整；模型看到错误后可以修正参数再次调用。
 
 ## PreToolUse：权限之前还有一层可编排入口
 
@@ -156,15 +168,15 @@ for await (const result of runPreToolUseHooks(
 
 函数说明：`runPreToolUseHooks` 定义在 `restored-src/src/services/tools/toolHooks.ts`，调用点在 `checkPermissionsAndCallTool`。它是异步生成器，可以产出进度/附件消息、权限意见、更新后的输入、附加上下文以及停止信号。
 
-参数说明：`processedInput` 是通过两层校验后的输入，但 Hook 仍可用 `hookUpdatedInput` 替换它；`toolUseID` 和 assistant message id 用来关联 Hook 与本次调用；`requestId`、`mcpServerType`、`mcpServerBaseUrl` 都可能是 `undefined`，因为普通本地工具不一定来自 MCP，某些调用也没有请求标识。`result.type` 的源码可见分支包括 `message`、`hookPermissionResult`、`hookUpdatedInput`、`preventContinuation`、`stopReason`、`additionalContext` 和 `stop`。
+参数说明：`processedInput` 是通过两层校验后的输入，但 Hook 仍可用 `hookUpdatedInput` 替换它；`toolUseID` 和 assistant message id 用来关联 Hook 与本次调用。普通本地工具会让 `mcpServerType`、`mcpServerBaseUrl` 保持 `undefined`，请求标识缺失时 `requestId` 也为 `undefined`；后续序列化据此省略 MCP 与请求来源字段。`result.type` 的源码可见分支包括 `message`、`hookPermissionResult`、`hookUpdatedInput`、`preventContinuation`、`stopReason`、`additionalContext` 和 `stop`。
 
-这段代码说明，Hook 不只是“运行一条脚本”。它可以影响三件不同的事：
+这段代码说明，Hook 可以同时影响三个执行维度：
 
 - 观察调用，并产生 progress 或 attachment；
 - 改写后续权限检查和实际调用使用的输入；
 - 提供 `allow`、`ask`、`deny` 意见，或者直接停止执行。
 
-但要注意，Hook 给出 `allow` 并不等于已经拿到最终执行权。`resolveHookPermissionDecision` 还会应用规则；deny 规则可以覆盖 Hook allow，ask 规则也可以强制进入宿主确认。这正是下一篇要继续拆解的部分。
+但要注意，Hook 给出的 `allow` 只是权限决策输入。`resolveHookPermissionDecision` 还会应用规则；deny 规则可以覆盖 Hook allow，ask 规则也可以强制进入宿主确认。这正是下一篇要继续拆解的部分。
 
 ## 权限结果只有 allow 才能越过副作用边界
 
@@ -189,15 +201,15 @@ if (permissionDecision.behavior !== 'allow') {
 }
 ```
 
-函数说明：`resolveHookPermissionDecision` 位于 `restored-src/src/services/tools/toolHooks.ts`；调用方随后用 `behavior !== 'allow'` 守住 `tool.call`。因此可以由源码直接确认：最终不是 allow，就不会进入这里的实际工具调用。
+函数说明：`resolveHookPermissionDecision` 位于 `restored-src/src/services/tools/toolHooks.ts`；调用方随后用 `behavior !== 'allow'` 守住 `tool.call`。因此可以由源码直接确认：只有最终行为为 `allow` 才会进入实际工具调用，`ask` 与 `deny` 都在边界前返回。
 
-参数说明：`hookPermissionResult` 可以是 `undefined`，表示 Hook 没有给权限意见；它的 `behavior` 可选值是 `'allow'`、`'ask'`、`'deny'`。`canUseTool` 负责把需要交互的部分交给当前宿主。权限返回的 `updatedInput` 也可以是 `undefined`；只有它存在时，执行器才用它覆盖现有输入。`permissionDecision.message` 在不同拒绝来源下可能缺失，执行器会结合 PreToolUse 的 stop reason 生成回退错误信息。
+参数说明：`hookPermissionResult` 可以是 `undefined`，此时权限引擎继续使用规则和宿主决定；它的 `behavior` 可选值是 `'allow'`、`'ask'`、`'deny'`。`canUseTool` 负责把需要交互的部分交给当前宿主。`updatedInput` 为对象时覆盖现有输入，为 `undefined` 时保留 `processedInput`。`permissionDecision.message` 在不同拒绝来源下可能缺失，执行器会结合 PreToolUse 的 stop reason 生成回退错误信息。
 
 这里必须区分 ask 的两个时刻。
 
-Hook 或规则产生的 ask，表示需要把问题交给宿主；宿主处理以后，`canUseTool` 可能返回 allow 或 deny。如果最终决策仍不是 allow，当前执行函数就把它当作未获执行许可，生成错误结果并返回。。
+Hook 或规则产生的 ask，表示需要把问题交给宿主；宿主处理以后，`canUseTool` 可能返回 allow 或 deny。最终 allow 进入调用，deny 则生成错误结果并返回。
 
-到这一步为止，程序可以记录日志、运行 Hook、等待用户，但还没有调用具体工具。真正的副作用边界就在下一行。
+到这一步为止，程序只记录日志、运行 Hook 和等待用户；下一行 `tool.call()` 才越过副作用边界。
 
 ## tool.call：从这里开始，世界可能已经改变
 
@@ -224,13 +236,13 @@ const result = await tool.call(
 
 函数说明：`Tool.call` 的契约定义在 `restored-src/src/Tool.ts`，实际调用位于 `checkPermissionsAndCallTool`。它返回 `Promise<ToolResult<Output>>`；`ToolResult` 至少有 `data`，还可以带 `newMessages`、`contextModifier` 和 `mcpMeta`。
 
-参数说明：第一个参数 `callInput` 是最终执行输入，可能来自模型，也可能被 Hook 或权限响应更新；第二个参数在原 `ToolUseContext` 上补入 `toolUseId` 和 `userModified`，其中 `userModified` 缺失时默认 `false`；第三个参数仍是 `canUseTool`，供需要嵌套授权的工具使用；第四个参数是父 assistant message；第五个 `onProgress` 在 Tool 接口中是可选参数。`newMessages`、`contextModifier` 和 `mcpMeta` 也都是可选值，缺失时相应后处理不会发生。
+参数说明：第一个参数 `callInput` 是最终执行输入，可能来自模型，也可能被 Hook 或权限响应更新；第二个参数在原 `ToolUseContext` 上补入 `toolUseId: toolUseID` 关联当前调用，并用 `userModified: permissionDecision.userModified ?? false` 记录用户是否改过输入；第三个参数 `canUseTool` 供嵌套授权使用，第四个参数是父 assistant message，第五个 `onProgress` 可选。进度对象的 `toolUseID` 标记来源调用，`data` 是工具特有进度载荷；二者被 `onToolProgress` 转交上层。返回的 `newMessages`、`contextModifier` 和 `mcpMeta` 均为可选值，省略时跳过相应后处理。
 
 为什么把这一行叫副作用边界？因为接口本身并不承诺 `call` 是纯函数。Read 可以访问磁盘，Bash 可以创建进程，MCP 可以访问外部服务，Edit 和 Write 会修改文件。即使 `tool.call` 最后抛出异常，也不能反推出“什么都没发生”：外部命令可能已经输出了一半，文件工具也可能在后续步骤失败前完成过某些操作。
 
 因此，执行器能统一错误消息，却不能替所有工具提供事务回滚。判断副作用是否完成，仍要看具体工具实现。
 
-## progress 是过程消息，不是最终结果
+## progress 与最终 tool_result 分开传递
 
 `tool.call` 接收的 progress 回调最终进入 `onToolProgress`。外层 `streamedCheckPermissionsAndCallTool` 使用一个流，把这些更新在 Promise 完成前送出去。
 
@@ -242,11 +254,11 @@ const result = await tool.call(
 2. 工具随后抛出异常；
 3. 执行器最终返回 `is_error: true` 的 `tool_result`。
 
-所以恢复会话时，真正维持模型协议配对的是 `tool_use` 与 `tool_result`，不是最后一条 progress。源码中的 transcript 链接逻辑也不会把 progress 当作后续消息的 parent。
+所以恢复会话时，`tool_use` 与 `tool_result` 维持模型协议配对；progress 只服务实时观察，transcript 链接逻辑也会把它排除在后续消息的 parent 之外。
 
 ## 原始返回值如何变成 tool_result
 
-工具成功返回的 `result.data` 不是直接塞回模型。每个工具必须用 `mapToolResultToToolResultBlockParam` 把自己的输出转换成 Anthropic API 能识别的 `ToolResultBlockParam`。
+工具成功返回的 `result.data` 先经 `mapToolResultToToolResultBlockParam` 转成 Anthropic API 可识别的 `ToolResultBlockParam`。
 
 ```ts
 const mappedToolResultBlock =
@@ -277,7 +289,7 @@ resultingMessages.push({
 
 函数说明：结果映射和 `addToolResult` 都位于 `restored-src/src/services/tools/toolExecution.ts`；`processToolResultBlock` 与 `processPreMappedToolResultBlock` 位于 `restored-src/src/utils/toolResultStorage.ts`。最终结果被包装成一条 user message，因为 API 协议中的 `tool_result` 由 user role 回传给模型。
 
-参数说明：映射函数的第一个参数是工具特有的输出，第二个参数是必须原样配对的 `toolUseID`。`preMappedBlock` 是可选值：普通工具在 Hook 不改输出时复用已映射结果；需要重新映射时传 `undefined`。`maxResultSizeChars` 是工具声明的结果持久化阈值；`Infinity` 表示硬性不把结果另存为可再次 Read 的文件。`toolUseResult` 是宿主侧保留的原始结果；对子 Agent，若 `preserveToolUseResults` 不是 `true`，它可以被设为 `undefined`，但面向模型的 `tool_result` 仍然存在。
+参数说明：映射函数的第一个参数是工具特有输出，第二个参数 `toolUseID` 必须原样配对。`mappedToolResultBlock` 是首次映射结果；`preMappedBlock` 存在时交给 `processPreMappedToolResultBlock` 按 `tool.name` 和 `maxResultSizeChars` 处理，否则 `processToolResultBlock` 根据工具、原始 `toolUseResult` 与调用 ID 重新映射。`contentBlocks` 以最终结果块开头，随后可追加授权反馈和图片。外层 `message` 是 user message；`content` 发给模型，`toolUseResult` 给宿主保留原始结果，但 Agent 且未开启 `preserveToolUseResults` 时省略；`mcpMeta` 只在非 Agent 路径保留，`sourceToolAssistantUUID` 指回发起调用的 assistant 节点。
 
 映射层有两个意义。
 
@@ -285,7 +297,7 @@ resultingMessages.push({
 
 空结果也有明确回退。`undefined`、`null`、空字符串、纯空白字符串、空数组，以及只包含空白 text block 的数组，都会被替换为 `(<tool> completed with no output)`。非文本块不被当作空结果。
 
-## 大结果会持久化，但不是写进 transcript 全文
+## 大结果持久化到独立文件并返回预览
 
 当映射后的内容超过阈值，`maybePersistLargeToolResult` 会把完整内容写到独立文件：
 
@@ -320,12 +332,12 @@ export async function persistToolResult(
 
 参数说明：`content` 必须非空，可以是字符串或内容块数组；数组里只要出现非 `text` block，就返回错误而不落盘，因为图片等内容需要原样发送给模型。`toolUseId` 是开放字符串，但来源是模型调用块的唯一 ID。写入使用 `flag: 'wx'`：文件不存在时创建，已存在时得到 `EEXIST`，源码把它视为此前已经持久化并继续生成预览；其他写入错误则回退到原始 `tool_result`。阈值覆盖只接受有限且大于 0 的数字；`null`、字符串、非有限数字和非正数都回退到工具声明值与全局默认值的较小者。
 
-写完以后，模型收到的不是完整正文，而是 `<persisted-output>` 包裹的说明、文件路径和前 2000 字节预览。这里实际上形成了两份不同的数据：
+写完以后，模型收到 `<persisted-output>` 包裹的说明、文件路径和前 2000 字节预览；完整正文留在持久化文件中。这里实际上形成了两份不同的数据：
 
 - `tool-results/<toolUseId>.txt|json` 保存完整大结果；
 - transcript 中的 `tool_result` 保存路径和预览。
 
-如果持久化失败，源码选择返回原始 block，而不是把工具成功误报成失败。这能保住语义，但也意味着超大结果可能重新进入消息上下文。
+如果持久化失败，源码返回原始 block，保留工具成功的业务语义；代价是超大结果可能重新进入消息上下文。
 
 ## 文件工具的持久化发生在 tool.call 内部
 
@@ -353,11 +365,11 @@ readFileState.set(absoluteFilePath, {
 
 函数说明：这段来自 `FileEditTool.call`，位于 `restored-src/src/tools/FileEditTool/FileEditTool.ts`。`FileWriteTool.call` 也采用相同的大顺序：可选地备份旧状态，检查陈旧写入，实际写盘，然后更新 `readFileState`。
 
-参数说明：`fileHistoryEnabled()` 返回布尔值，只有 `true` 才记录可回退历史；`updateFileHistoryState` 是更新内存快照状态的函数；`absoluteFilePath` 是展开后的实际路径；`parentMessage.uuid` 把备份关联到触发工具的 assistant message。`readFileState` 中的 `offset` 和 `limit` 在 Edit/Write 后显式设为 `undefined`，表示缓存对应完整文件状态，而不是某次分页 Read 的局部视图。
+参数说明：`fileHistoryEnabled()` 返回布尔值，只有 `true` 才记录可回退历史；`updateFileHistoryState` 更新内存快照，`absoluteFilePath` 是展开后的目标，`parentMessage.uuid` 把备份关联到触发工具的 assistant 消息。写入后，`readFileState.set()` 以该路径为键，`content` 保存完整 `updatedFile`，`timestamp` 重新读取修改时间；`offset` 与 `limit` 被清除，使后续校验把缓存视为完整文件状态。
 
 这段顺序给出了一个非常具体的副作用边界：`writeTextContent` 才是真正修改目标文件的操作。`fileHistoryTrackEdit` 在它之前备份旧内容，目的是支持后续 rewind；`readFileState.set` 在它之后更新并发修改检测所依赖的缓存。
 
-但备份并不是事务锁。源码注释明确指出，备份可以在后面的陈旧性检查失败时留下“未使用备份”。同样，若写盘成功后某个通知或结果映射失败，文件也不会因为最后出现错误消息就自动恢复。
+备份提供回滚材料，却不提供事务锁。源码注释明确指出，后续陈旧性检查失败时可能留下“未使用备份”。同样，写盘成功后若通知或结果映射失败，文件仍保持已写入状态，最终错误消息不会触发自动恢复。
 
 所以，“收到错误 tool_result”与“目标环境毫无变化”之间不能画等号。这是排查 Agent 副作用时最需要保留的判断。
 
@@ -415,7 +427,7 @@ await this.appendEntry(transcriptMessage)
 
 函数说明：`recordTranscript`、`Project.insertMessageChain` 和 `Project.appendEntry` 都位于 `restored-src/src/utils/sessionStorage.ts`。调用关系是 `recordTranscript → insertMessageChain → appendEntry → enqueueWrite`，最终把一条条 entry 追加到 session JSONL；子 Agent 则可走 `recordSidechainTranscript` 写入单独的 agent transcript。
 
-参数说明：`messages` 是待记录消息数组，清理函数会去掉不应持久化的字段或消息；`insertMessageChain` 的 `isSidechain` 默认 `false`，`agentId`、`startingParentUuid` 和 team info 都可以是 `undefined`。对于工具结果，`sourceToolAssistantUUID` 在创建消息时已设置；存在时它优先成为 `parentUuid`，确保 `tool_result` 指回产生对应 `tool_use` 的 assistant message。`appendEntry` 的 `sessionId` 默认取当前 session；重复 UUID 会被跳过。
+参数说明：`messages` 是待记录数组，`allMessages` 可提供完整上下文给清理函数；`teamInfo` 关联团队，`startingParentUuidHint` 提供起始父节点，二者省略时使用普通主链上下文。`cleanedMessages` 是可落盘投影，`sessionId` 取当前会话，`messageSet` 用于按 UUID 去重，`newMessages` 只收首次出现的消息；`startingParentUuid` 会在前导重复链节点上前移，`seenNewMessage` 标记是否已进入新段。存在新消息时，`insertMessageChain(newMessages, false, undefined, startingParentUuid, teamInfo)` 明确写主链；`lastRecorded` 选择最后一个链参与者，返回其 UUID，否则回退起始父节点或 `null`。工具结果的 `sourceToolAssistantUUID` 会在 `insertMessageChain` 中优先成为 `parentUuid`。
 
 这里可以回答一个常见疑问：为什么工具结果已经在内存消息数组里，还要保留 `sourceToolAssistantUUID`？
 
@@ -438,9 +450,9 @@ transcript 里记录的是消息协议结果，而 file history 记录的是文�
 | 结果持久化失败 | 已完成 | 通常回退原始结果 | session 目录与文件系统权限 |
 | transcript 写入失败 | 已完成 | 内存中可能已有结果 | session JSONL 写入链 |
 
-这张表也解释了为什么不能只看最终一句错误文本。前五类错误可以由执行器保证没有调用目标工具；后三类已经越过副作用边界，需要检查真实环境。
+这张表说明错误文本必须结合发生阶段阅读。前五类错误发生在 `tool.call` 之前，目标工具保持未调用状态；后三类已经越过副作用边界，需要检查真实环境。
 
-异常分支会用 `formatError` 统一生成 `is_error: true` 的 `tool_result`，并运行 `PostToolUseFailure` Hook。`AbortError` 会被识别为用户中断，普通错误还会进入日志和遥测。这里的“统一”是消息形状统一，不是副作用语义统一。
+异常分支会用 `formatError` 统一生成 `is_error: true` 的 `tool_result`，并运行 `PostToolUseFailure` Hook。`AbortError` 会被识别为用户中断，普通错误还会进入日志和遥测。统一只发生在消息形状层；副作用语义仍由异常发生在边界前还是边界后决定。
 
 ## 小结
 
@@ -454,9 +466,14 @@ transcript 里记录的是消息协议结果，而 file history 记录的是文�
 
 第四，`tool.call` 是实际副作用边界。progress 只是过程反馈，返回值还要映射为 `tool_result`；异常会被规范化，但已经发生的外部副作用不会因此自动回滚。
 
-第五，持久化不是单一文件：大结果进入 `tool-results/`，消息协议结果进入 transcript JSONL，文件工具的旧版本进入 file history，最新内容还会更新 `readFileState`。理解这几个位置，才能判断一次调用究竟是“没执行”“执行失败”“执行成功但结果没记住”，还是“结果记住了但文件已经发生变化”。
+第五，持久化分布在多个位置：大结果进入 `tool-results/`，消息协议结果进入 transcript JSONL，文件工具的旧版本进入 file history，最新内容还会更新 `readFileState`。理解这些位置，才能区分“边界前拒绝”“调用失败”“调用成功但持久化失败”和“结果已记录但文件随后变化”。
 
 ## 留给下一篇的问题
 
 工具在真正产生副作用前，权限引擎怎样把规则、模式、Hook 和用户/宿主响应合并成 allow、ask 或 deny？
 
+## 参考资料
+
+- [Anthropic 工具调用实现指南](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/implement-tool-use)
+
+- [Claude Code Hooks 参考](https://code.claude.com/docs/en/hooks)

@@ -9,6 +9,18 @@ image: "/images/posts/claude-code-source-reading-02/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **Agent turn**：一次模型决策及其产生的消息；一条用户请求可以跨越多个 turn。
+
+- **状态迁移**：模型事件、工具结果和停止条件共同把循环从一个可执行状态推进到下一个状态。
+
+- **循环不变量**：每个 `tool_use` 都要获得匹配结果，消息顺序和权限上下文在回环前保持可解释。
+
+![一次用户请求中的多轮状态迁移](/images/posts/claude-code-source-reading-02/02-turn-state-machine-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 上一篇的问题是：如果我们用 LangGraph 开发一个编程 Agent，它和 Claude Code 到底有什么区别。
@@ -28,13 +40,13 @@ imagePosition: "left"
 | 运行方式 | 适合自定义工作流、云端异步任务和长时间运行 | 优先服务终端、IDE 和 SDK 中的实时流式交互 |
 | 扩展方式 | 修改 graph、state、node 或 middleware | 通过 MCP、hooks、skills、plugins 和内部功能开关扩展 |
 
-两者确实都有“模型调用工具，工具返回结果，模型继续推理”这条循环。。
+两者确实都有“模型调用工具，工具返回结果，模型继续推理”这条循环。
 
 ### 为什么 Claude Code 不直接使用 LangGraph
 
-这里先说明证据边界。还原源码中没有 LangGraph 的依赖或引用，我们也没有 Anthropic 内部的技术选型记录。不过，从 `queryLoop` 的结构可以看出，自研这一层有几个直接的工程原因。
+这里先说明证据边界。还原源码的依赖和引用中找不到 LangGraph，Anthropic 也未公开内部技术选型记录。下面的工程原因来自 `queryLoop` 结构，而非官方选型声明。
 
-第一，Claude Code 最难的部分不是把两个节点连成环。
+第一，主要复杂度位于循环内部的产品语义。
 
 如果用 LangGraph 表示，Claude Code 的主干可能只有下面三个节点：
 
@@ -48,13 +60,13 @@ imagePosition: "left"
 
 `QueryEngine.submitMessage()` 和 `queryLoop()` 都使用 `AsyncGenerator`。模型 token、工具进度、权限结果、附件、取消和最终消息会沿同一条链路不断产出，REPL、IDE 和 SDK 可以立即消费。LangGraph 也支持 streaming，但 Claude Code 仍要把自己的消息类型、权限状态和取消语义接到图运行时上。自研循环可以直接使用这些内部对象，不需要先转换成通用 graph event。
 
-第三，权限在 Claude Code 中是执行约束，不只是流程分支。
+第三，权限在 Claude Code 中直接约束副作用能否发生。
 
 LangGraph 可以用 `interrupt()` 实现人工审批，但 Claude Code 还要处理 allow、ask、deny、hooks、工具输入修改、沙箱和不同 permission mode。权限检查必须发生在 `tool.call()` 之前，并把拒绝结果重新交给模型。即使采用 LangGraph，这套权限引擎仍然需要 Claude Code 自己维护。
 
 第四，自研循环让产品团队掌握完整的热路径。
 
-Claude Code 以 TypeScript/Node.js CLI 交付，又要同时服务 REPL、IDE、SDK 和远程入口。模型 API、thinking、tool use、上下文策略和功能开关都在快速变化。自己控制 query runtime，意味着这些变化不必先适配第三方框架的 state、checkpoint 和事件语义。这一点属于基于代码结构的工程判断，不是 Anthropic 官方公开的选型结论。
+Claude Code 以 TypeScript/Node.js CLI 交付，又要同时服务 REPL、IDE、SDK 和远程入口。模型 API、thinking、tool use、上下文策略和功能开关都在快速变化。自己控制 query runtime，可以直接调整 state、checkpoint 和事件语义。这一点属于基于代码结构的工程判断；Anthropic 的公开材料未披露框架选型过程。
 
 ### Open SWE 为什么适合 LangGraph
 
@@ -69,7 +81,7 @@ Claude Code 的核心场景则是用户坐在终端或 IDE 前，与一个持续
 - **LangGraph 编程 Agent 是“基于通用框架开发”**；Claude Code 是“为自身产品定制整套 query runtime”。
 - **LangGraph 擅长显式工作流、共享状态、暂停恢复和云端长任务**；Claude Code 更强调本地实时流、细粒度权限和模型工具热循环。
 - **Claude Code 技术上可以使用 LangGraph**，但 LangGraph 只能替换最外层的循环表达，无法替换工具、权限、上下文和交互逻辑。
-- **Claude Code 选择自研的合理解释**是：它的 graph 很简单，节点内部却高度定制；直接控制循环比接入通用图运行时更可控。这个判断来自源码结构，不是官方选型声明。
+- **Claude Code 选择自研的合理解释**是：它的 graph 很简单，节点内部却高度定制；直接控制循环比接入通用图运行时更可控。这个判断来自源码结构，证据范围限于代码架构。
 
 ## 先把一次请求画成一条时间线
 
@@ -83,7 +95,7 @@ Claude Code 的核心场景则是用户坐在终端或 IDE 前，与一个持续
 
 图里有两条出口。模型如果已经给出完整回答，就从 API stream 走向最终输出；如果返回 `tool_use`，Claude Code 就执行工具，把 `tool_result` 放回消息历史，再进入下一轮推理。
 
-这意味着“一次用户请求”不等于“一次模型 API 请求”。前者可以包含多次模型调用和多次工具执行，直到某个停止条件成立。
+这意味着一次用户请求可以展开成多次模型 API 调用和多次工具执行，直到某个停止条件成立。
 
 02 的任务是先建立这张端到端地图，不在每一站提前展开实现。后续文章会沿着同一条链路逐层拆开：
 
@@ -92,7 +104,7 @@ Claude Code 的核心场景则是用户坐在终端或 IDE 前，与一个持续
 | Host 与运行入口 | 不同入口最终把输入和能力交给查询内核 | 03 启动与初始化、04 多种运行入口 |
 | `QueryEngine` | 保存会话状态，并把内部事件转换给宿主 | 05 会话与无头调用 |
 | `queryLoop` | 用显式状态推进模型、工具与下一轮推理 | 06 Agent 循环 |
-| 消息与 API stream | 模型返回的是结构化事件流，不只是一段文本 | 07 消息模型、08 API 流式传输 |
+| 消息与 API stream | 模型返回包含文本、thinking、工具调用与控制状态的结构化事件流 | 07 消息模型、08 API 流式传输 |
 | 工具执行 | `tool_use` 要经过查找、编排、校验、权限与执行 | 09 工具契约、10 串并行编排、11 执行生命周期、12 权限引擎 |
 | 文件、上下文与恢复 | 工具状态、上下文长度和错误恢复分别有独立机制 | 14 文件与回滚、17 上下文压缩、19 错误恢复、20 会话恢复 |
 
@@ -100,7 +112,7 @@ Claude Code 的核心场景则是用户坐在终端或 IDE 前，与一个持续
 
 ## 第一站：Host 把能力交给 QueryEngine.ask
 
-不同 Host 接收输入的方式并不相同。交互式 REPL 从终端拿 prompt，无头模式可能从标准输入或 SDK 拿消息，远程模式还有自己的连接层。但它们进入请求内核时，需要提供的并不只是一段文字。
+不同 Host 接收输入的方式各异。交互式 REPL 从终端拿 prompt，无头模式可能从标准输入或 SDK 拿消息，远程模式还有自己的连接层。进入请求内核时，它们都要提供消息、会话状态、权限与工具上下文。
 
 `restored-src/src/QueryEngine.ts` 中的 `ask()` 会创建 `QueryEngine`。从构造参数可以看到，一轮请求同时带着工作目录、工具、命令、MCP 客户端、Agent 定义、权限回调、模型配置和读取文件状态。
 
@@ -119,13 +131,13 @@ try {
 }
 ```
 
-这段代码只需要记住两件事：`submitMessage()` 产生的是异步消息流；`finally` 会把本轮更新后的 read-file state 交还给 Host。它不是完整会话，也不会把所有读过的文件再次塞进模型上下文。
+`submitMessage()` 产生异步消息流；`prompt` 是本轮用户输入，`uuid` 绑定调用方提供的消息标识，`isMeta` 标记该消息是否属于元信息。生成器退出后，`finally` 无条件把更新后的 read-file state 交还给 Host。这份 state 是文件读取凭据缓存，不会把文件正文自动追加到模型上下文。
 
 Host 怎样启动、不同入口怎样汇入内核，会在 03、04 中展开。`QueryEngine` 怎样保存跨 turn 状态，会在 05 中展开。read-file state 如何支持 Read-before-Write、并发修改保护和回滚，则留到 14。
 
 ## 第二站：submitMessage 装配一次可运行的会话
 
-`QueryEngine.submitMessage()` 的职责不是简单转发 prompt。它会准备消息、system prompt、用户上下文、系统上下文和工具运行上下文，再调用 `query()`：
+`QueryEngine.submitMessage()` 会准备消息、system prompt、用户上下文、系统上下文和工具运行上下文，再调用 `query()`：
 
 ```ts
 for await (const message of query({
@@ -144,13 +156,13 @@ for await (const message of query({
 }
 ```
 
-这一步完成两个转换：用户输入被装配成模型可用的上下文，外部能力被收进循环可以直接使用的依赖。`wrappedCanUseTool` 最终面对 `allow`、`ask`、`deny` 三种权限结果；`maxTurns` 和 `taskBudget` 可以是调用方提供的限制，也可以是 `undefined`，后者只表示没有设置这一项限制。
+这一步完成两个转换：用户输入被装配成模型可用的上下文，外部能力被收进循环可以直接使用的依赖。`messages` 是本轮消息历史，`systemPrompt` 是系统提示块，`userContext` 和 `systemContext` 分别补入用户侧与运行时上下文；`canUseTool` 接收包装后的权限回调，最终面对 `allow`、`ask`、`deny` 三种结果；`toolUseContext` 携带工具池、取消、文件缓存和状态访问能力；`fallbackModel` 是主模型失败时的候选模型，`querySource: 'sdk'` 标记调用来源。`maxTurns` 与 `taskBudget` 传入数值时分别约束轮数和任务预算，省略时跳过对应限制。
 
 05 会专门解释 `submitMessage()`、SDK 事件转换和跨 turn 状态；system prompt 与项目上下文的具体组装留到 16。02 只确认它们在这里完成交接。
 
 ## 第三站：queryLoop 用显式状态推进每一轮
 
-`query()` 最终进入 `restored-src/src/query.ts` 的 `queryLoop()`。这里最值得先记住的不是某个恢复分支，而是外层结构：跨轮数据放进 `state`，然后由显式循环不断推进。
+`query()` 最终进入 `restored-src/src/query.ts` 的 `queryLoop()`。它把跨轮数据放进 `state`，再由显式循环不断推进。
 
 ```ts
 let state: State = {
@@ -169,11 +181,11 @@ while (true) {
 
 `messages` 决定模型当前能看到什么，`toolUseContext` 保存可调用能力，`turnCount` 支持轮次边界，`transition` 记录上一轮为何继续。工具执行结束后，循环会构造一份新状态，再进入下一轮。
 
-一次简单问答可能只跑一轮；一次改代码任务则可能在多轮之间读文件、编辑、测试，再根据结果调整方案。。
+一次简单问答可能只跑一轮；一次改代码任务则可能在多轮之间读文件、编辑、测试，再根据结果调整方案。
 
 06 会沿一次完整迭代解释继续与停止条件；17 解释上下文过长后的压缩；19 再集中处理模型错误、重试、取消和恢复。这里不提前枚举所有 `transition.reason`。
 
-## 第四站：模型响应是一条流，不是一次性字符串
+## 第四站：模型响应按事件流逐步到达
 
 每轮准备好消息以后，`queryLoop()` 通过 `deps.callModel()` 发起模型调用：
 
@@ -195,15 +207,15 @@ for await (const message of deps.callModel({
 }
 ```
 
-这里先保留三个结论：用户上下文会在请求前加入消息；工具定义和模型配置与消息一起进入调用；`AbortSignal` 会传到底层，因此取消能够影响正在进行的模型请求。
+`messages` 是拼入用户上下文后的消息序列；`systemPrompt` 是本轮完整系统提示；`thinkingConfig` 控制扩展思考配置；`tools` 提供模型可见的工具定义；`signal` 把取消传播到底层请求。`options.model` 指定当前模型，`fallbackModel` 提供降级候选，`querySource` 标记调用入口。`deps.callModel()` 返回异步生成器，因此上层可以边接收边处理。
 
 流里既可能出现文本增量，也可能形成包含 `tool_use` 的 assistant message。`queryLoop()` 会从 assistant message 的 `content` 中筛出 `type === 'tool_use'` 的块，收进 `toolUseBlocks`，并把 `needsFollowUp` 设为 `true`。
 
-因此，是否进入工具链，不是 Host 根据文本猜出来的，而是由模型响应中的结构化 `tool_use` 块决定。07 会解释这些消息和内容块怎样关联，08 会继续拆流式事件怎样组装成完整 assistant message，以及重试、回退和取消怎样穿过 API 层。
+结构化 `tool_use` 块决定是否进入工具链，Host 无需从文本猜测动作。07 会解释这些消息和内容块怎样关联，08 会继续拆流式事件怎样组装成完整 assistant message，以及重试、回退和取消怎样穿过 API 层。
 
 ## 第五站：tool_use 先被编排，再经过权限
 
-模型可以一次返回多个工具调用。`queryLoop()` 会把它们交给流式执行器或 `runTools()`；调度层依据每次调用的并发安全性决定串行还是并行，而不是无条件 `Promise.all`。
+模型可以一次返回多个工具调用。`queryLoop()` 会把它们交给流式执行器或 `runTools()`；调度层依据每次调用的并发安全性选择串行或并行。
 
 单个调用随后进入 `restored-src/src/services/tools/toolExecution.ts`，依次完成工具查找、输入校验、Hook 与权限判断。最重要的副作用边界是：只有允许分支才会进入 `tool.call()`。
 
@@ -239,7 +251,7 @@ const result = await tool.call(
 )
 ```
 
-`hookPermissionResult` 可以是 `allow`、`ask`、`deny`、`passthrough` 或 `undefined`；常规权限决策最终收敛为 `allow`、`ask`、`deny`。拒绝、取消和校验失败同样会形成可处理的结果，不会被伪装成执行成功。
+`hookPermissionResult` 可取 `allow`、`ask`、`deny`、`passthrough`，省略时直接进入常规权限判断；`resolveHookPermissionDecision()` 把它与 `tool`、`processedInput`、`toolUseContext`、`canUseTool`、`assistantMessage` 和 `toolUseID` 合并成最终决定。`resolved.decision` 收敛到常规权限语义，`resolved.input` 保留 Hook 或用户修改后的输入。调用阶段的 `callInput` 是最终参数；上下文中的 `toolUseId` 关联原请求，`userModified` 缺省为 `false`；进度回调再把 `progress.toolUseID` 与 `progress.data` 转交上层。拒绝、取消和校验失败会形成错误结果并在副作用前返回。
 
 09 会先解释工具契约与注册，10 专讲多个 `tool_use` 的串并行编排，11 追踪单次执行生命周期，12 再拆权限规则与询问流程。Hook 作为横切机制会在 18 单独展开。
 
@@ -262,23 +274,23 @@ const next: State = {
 state = next
 ```
 
-到这里，图中的回环就闭合了：`tool_result` 不是旁路日志，而是下一次推理的输入。模型可以据此输出最终答案，也可以再次请求工具。
+`next.messages` 依次拼接查询前消息、assistant 消息和全部工具结果，成为下一次推理的输入；`toolUseContext` 换成带本轮查询跟踪信息的版本，`turnCount` 更新为下一轮计数。其他压缩与恢复字段在真实 `State` 中继续透传。模型随后可以输出最终答案，也可以再次请求工具。
 
 07 会完整解释 `tool_use`、`tool_result` 与内部消息如何配对，11 会解释结果映射和持久化，06 则会从循环视角说明这批消息怎样形成下一轮状态。
 
-## 第七站：没有后续动作，循环才真正完成
+## 第七站：所有继续条件清空后完成本轮
 
-当流中没有新的 `tool_use` 时，`needsFollowUp` 保持为 `false`。循环随后处理 API 错误恢复、stop hook 等分支；没有分支要求继续时，才返回 `completed`。
+当流中未产生新的 `tool_use` 时，`needsFollowUp` 保持为 `false`。循环随后处理 API 错误恢复、stop hook 等分支；所有继续条件都未触发时返回 `completed`。
 
 不过，`completed` 只是停止原因之一。源码还明确处理了最大轮次、模型错误、流式取消、工具取消、预算限制、上下文上限和 Hook 阻止继续等边界。
 
-因此，外部看到“没有最终文本”时，不能只检查工具有没有报错。请求可能在模型流、权限、预算、取消或 stop hook 任一层结束。反过来，源码中存在某个恢复分支，也不代表生产环境一定启用了对应功能，或它在所有错误上都会成功。
+因此，请求以“无最终文本”状态结束时，需要依次检查模型流、权限、预算、取消和 stop hook，工具错误只是其中一层。源码中存在某个恢复分支，只能证明客户端具备该路径；生产环境是否启用以及恢复成功率仍取决于运行时配置与真实请求。
 
 这些终止条件会分散到后文解释：05 说明无头调用怎样形成最终 result，06 说明循环何时继续或结束，17 处理上下文上限，18 解释 Stop Hook，19 汇总错误、重试、取消与恢复。
 
 ## 小结
 
-Claude Code 的一次请求，本质上不是 prompt 进去、字符串出来，而是一段受状态和权限约束的执行循环。
+Claude Code 的一次请求是一段受状态和权限约束的执行循环：输入可以跨越多次模型调用和工具执行，最终以明确的停止原因收口。
 
 Host 把输入与运行能力交给 `QueryEngine.ask`，`submitMessage` 装配模型上下文，`queryLoop` 消费 API 流。普通回答可以直接结束；`tool_use` 则经过编排、校验和权限，再由工具产生 `tool_result`。结果回到消息历史以后，模型继续推理，直到完成或触发其他停止边界。
 
@@ -291,3 +303,9 @@ ReAct 是一种经典的 Agent 工作方式：模型先根据当前信息进行�
 从表面上看，Claude Code 的 `queryLoop` 也在重复“模型推理 → 工具调用 → 结果返回 → 继续推理”。
 
 那么，Claude Code 的这套 query runtime 究竟算不算 ReAct，它与经典 ReAct 又有什么区别？
+
+## 参考资料
+
+- [Claude Code 的工作方式](https://code.claude.com/docs/en/how-claude-code-works)
+
+- [Dive into Claude Code：生产级 Agent 的设计空间](https://arxiv.org/abs/2604.14228)

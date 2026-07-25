@@ -10,19 +10,31 @@ image: "/images/posts/claude-code-source-reading-23/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **Task handle**：任务 ID 把启动、观察、取消和结果回收连接成同一生命周期。
+
+- **持久输出**：长输出写入文件，内存状态仅保存路径、摘要和终态，降低会话压力。
+
+- **Rewake**：后台任务到达终态后发出通知，让空闲 Agent 把结果纳入下一轮判断。
+
+![后台任务状态、输出文件与 Agent 唤醒](/images/posts/claude-code-source-reading-23/23-task-rewake-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 上一篇留下的问题是：Skill 把一组指令按需展开以后，Claude Code 的 Task 运行时如何创建、调度、观察并收束长时间任务？
 
-答案先说：**Claude Code 没有用一个中央调度器包办所有长任务。它把“任务是什么”收进统一状态，把“任务怎么跑”留给不同实现，再用输出文件、通知队列和取消接口把生命周期接回来。**
+答案先说：**Claude Code 把“任务是什么”收进统一状态，把“任务怎么跑”交给不同实现，再用输出文件、通知队列和取消接口把生命周期接回来。**
 
 一个长时间 Bash 命令、一个本地 Agent、一个远程 Agent，执行方式完全不同。强行塞进同一个 `run()` 函数，只会得到一个满是分支的巨型调度器。2.1.88 选择的公共面更窄：运行中的实例进入 `AppState.tasks`；共同状态使用 `pending`、`running`、`completed`、`failed`、`killed`；每种任务自己负责启动、完成回调和终态通知；统一的 `TaskStop` 再按 `type` 找到对应的 `kill()`。
 
-前台与后台也不是两种任务类型。它们描述的是**结果由谁等待**。前台时，当前工具调用还在等结果，并持续显示进度；后台时，进程或 Agent 继续运行，当前调用先把 task ID 和输出文件交还给模型。之后任务完成，通过 `task-notification` 触发新一轮处理。`isBackgrounded` 可以在运行中从 `false` 变为 `true`，但底层任务不需要重启。
+前台与后台描述的是**结果由谁等待**。前台时，当前工具调用还在等结果，并持续显示进度；后台时，进程或 Agent 继续运行，当前调用先把 task ID 和输出文件交还给模型。之后任务完成，通过 `task-notification` 触发新一轮处理。`isBackgrounded` 可以在运行中从 `false` 变为 `true`，底层任务继续沿用同一个运行实例。
 
 这就是本篇的主线：创建状态，注册实例，执行者推进，输出落盘，终态入队，主循环回收。本文仍以仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原的 `restored-src/` 为边界。下面的源码只省略与当前结论无关的字段和 UI 分支。
 
-## 先分清两种叫 Task 的东西
+## 两种 Task 分别描述执行实例与协作事项
 
 源码里有两个很容易混淆的 “Task”。
 
@@ -49,7 +61,7 @@ imagePosition: "left"
 
 横向是生命周期：`pending/running → completed/failed/killed`。纵向是呈现与等待方式：`isBackgrounded=false/true`。把一个正在运行的前台任务切到后台，只改变纵向位置，不应重新创建进程，也不应再次发出 `task_started`。
 
-这张图还暴露了一个看似反直觉的事实：后台任务的主要结果载体不是一条无限增长的内存字符串，而是 output file。模型可以读取这个文件；旧的 `TaskOutput` 工具仍在，但源码已经明确标成 deprecated。
+这张图还暴露了一个关键事实：后台任务的主要结果载体是 output file，模型可以按需读取。旧的 `TaskOutput` 工具仍在，但源码已经明确标成 deprecated。
 
 ## 统一状态只规定生命周期，不规定执行算法
 
@@ -79,9 +91,9 @@ export function isTerminalTaskStatus(status: TaskStatus): boolean {
 
 **函数说明：** `isTerminalTaskStatus()` 是终态守卫。任务一旦进入 `completed`、`failed` 或 `killed`，框架就把它视为不再继续转换的实例，用于阻止向已结束任务继续注入消息，也用于决定何时回收状态。
 
-**参数说明：** `status` 只能取五个 `TaskStatus` 值。`pending` 表示已建立状态但尚未运行，`running` 表示执行中；`completed` 是正常完成，`failed` 是执行失败，`killed` 是被主动停止。这里没有 `undefined` 或 `null` 分支，调用者必须先取得合法任务状态。`TaskType` 列出的七个值是 2.1.88 静态源码可确认的集合，但 `local_workflow` 与 `monitor_mcp` 的实现还受构建期 feature 控制。
+**参数说明：** `status` 只能取五个 `TaskStatus` 值。`pending` 表示已建立状态但尚未运行，`running` 表示执行中；`completed` 是正常完成，`failed` 是执行失败，`killed` 是被主动停止。类型排除 `undefined` 与 `null`，调用者必须先取得合法任务状态。`TaskType` 列出的七个值是 2.1.88 静态源码可确认的集合，但 `local_workflow` 与 `monitor_mcp` 的实现还受构建期 feature 控制。
 
-统一的 `Task` 接口甚至没有 `spawn()`：
+统一的 `Task` 接口只保留取消契约：
 
 ```ts
 export type Task = {
@@ -93,7 +105,9 @@ export type Task = {
 
 **函数说明：** `Task` 是按类型取消运行实例的最小契约。各执行路径各自拥有创建函数，例如 shell 使用 `spawnShellTask()`，Agent 使用自己的注册与生命周期函数；公共接口只保留停止时真正需要的 `kill()`。
 
-**参数说明：** `taskId` 是运行实例的开放字符串标识，不是协作任务列表里的递增数字；`setAppState` 接收一个纯更新函数。`kill()` 返回 `Promise<void>`，不承诺所有任务使用相同的底层取消机制，也没有默认实现。
+**参数说明：** `taskId` 是运行实例的开放字符串标识，与协作任务列表里的递增数字分属不同命名空间；`setAppState` 接收一个纯更新函数。`kill()` 返回 `Promise<void>`，具体任务类型各自提供底层取消实现。
+
+**字段说明：** `name` 是实现的展示名称，`type` 必须取 `TaskType` 联合中的一种；二者用于在统一任务表中定位实现。
 
 这个设计很克制。任务框架负责一致的“壳”，具体 Task 负责自己的“发动机”。本地 Bash 可以杀进程，远程 Agent 可以发远端取消请求，Dream 可以终止自己的异步工作；上层不需要理解每种执行器的内部对象。
 
@@ -126,6 +140,8 @@ export function createTaskStateBase(
 
 **参数说明：** `id` 是已经生成的 task ID；`type` 必须是前述七种 `TaskType` 之一；`description` 是开放文本，用于 UI 和通知摘要；`toolUseId` 是 `string | undefined`，有值时把后台任务关联回发起它的 `tool_use`，省略时不写该关联。`endTime`、`totalPausedMs` 等字段此时为 `undefined`，只在相应生命周期发生后补齐。
 
+**字段说明：** `status` 初始为 `'pending'`，`startTime` 记录创建时间；`outputFile` 由 `getTaskOutputPath(id)` 派生，`outputOffset` 从 `0` 开始，`notified: false` 表示终态通知尚待消费。返回对象同时原样保存 `id`、`type`、`description` 与可选 `toolUseId`。
+
 默认的 `generateTaskId()` 用类型前缀加八位数字/小写字母随机字符。`local_bash` 使用兼容前缀 `b`，`local_agent` 使用 `a`，远程 Agent 使用 `r`。前缀让人和 UI 能快速识别类型；随机主体则避免容易猜测的输出文件名被用来抢占或构造符号链接攻击。
 
 状态建好后由 `registerTask()` 放入 `AppState.tasks`：
@@ -152,13 +168,15 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
 
 **函数说明：** `registerTask()` 既是注册入口，也是 SDK `task_started` 事件的边界。相同 ID 已存在时被视为 resume replacement：它保留面板和消息相关状态，并跳过第二次 started 事件。这样恢复一个 Agent 不会在消费者眼里变成两个任务。
 
-**参数说明：** `task` 是联合类型 `TaskState`，具体字段取决于 `type`；`setAppState` 负责原子替换状态。`prev.tasks[task.id]` 可能是 `undefined`，表示首次注册；有值时才走替换分支。`workflow_name`、`prompt` 等 SDK 字段从具体任务按需读取，缺少时为 `undefined`，不是空字符串或 `null`。
+**参数说明：** `task` 是联合类型 `TaskState`，具体字段取决于 `type`；`setAppState` 负责原子替换状态。`prev.tasks[task.id]` 可能是 `undefined`，表示首次注册；有值时才走替换分支。`workflow_name`、`prompt` 等 SDK 字段从具体任务按需读取，缺失时为 `undefined`。
+
+**字段说明：** replacement 分支从旧任务保留 `retain`、`startTime`、`messages`、`diskLoaded`、`pendingMessages`，其余字段取新 `task`；合并结果写入 `tasks[task.id]`。首次注册还发送 `type: 'system'`、`subtype: 'task_started'` 的 SDK 事件。
 
 ## 调度：前台等待与后台运行共用同一个执行实例
 
-这里的“调度”不是操作系统级 CPU 调度，也不是一个带优先级队列的 worker pool。源码呈现的是**分散式生命周期调度**：BashTool 决定何时执行命令、何时前台等待或转后台；AgentTool 决定何时运行 Agent；各 Task 实现把状态变化汇入公共表。
+这里的“调度”指**分散式生命周期调度**：BashTool 决定何时执行命令、何时前台等待或转后台；AgentTool 决定何时运行 Agent；各 Task 实现把状态变化汇入公共表。操作系统负责进程调度，源码这一层负责状态、输出与结果交付。
 
-以本地 shell 为例。`spawnShellTask()` 取得已有 `ShellCommand` 的 `taskId`，注册 running 状态，再调用 `shellCommand.background(taskId)`。它不是重新执行命令：
+以本地 shell 为例。`spawnShellTask()` 取得已有 `ShellCommand` 的 `taskId`，注册 running 状态，再调用 `shellCommand.background(taskId)`；原命令进程继续运行。
 
 ```ts
 export async function spawnShellTask(input, context): Promise<TaskHandle> {
@@ -183,11 +201,11 @@ export async function spawnShellTask(input, context): Promise<TaskHandle> {
 
 **函数说明：** `spawnShellTask()` 把一个已经开始执行的 `ShellCommand` 纳入统一任务运行时。注册之后，结果 Promise 在后台完成；回调根据 exit code 写入 `completed` 或 `failed`，若此前已经被停止则保持 `killed`，最后发送通知并清理内存输出对象。
 
-**参数说明：** `command` 是实际 shell 文本；`description` 是展示摘要；`shellCommand` 是已创建的进程包装对象；`toolUseId`、`agentId` 都允许 `undefined`，分别表示没有工具调用关联、由主线程而非某个 Agent 创建；`kind` 是 `'bash' | 'monitor' | undefined`，省略按普通 Bash 展示。返回的 `cleanup` 是可选清理句柄，不会杀掉已经交给后台继续运行的任务本身。
+**参数说明：** `command` 是实际 shell 文本；`description` 是展示摘要；`shellCommand` 是已创建的进程包装对象。提供 `toolUseId` 时，终态通知可以关联回发起调用；省略时跳过这项关联。提供 `agentId` 时任务归属对应 Agent，省略时归入主线程。`kind` 可取 `'bash'` 或 `'monitor'`，省略按普通 Bash 展示。返回的 `cleanup` 是可选清理句柄，不会杀掉已经交给后台继续运行的任务本身。
 
 如果命令最初在前台运行，系统可以先用 `registerForeground()` 写入 `isBackgrounded:false`，再由 Ctrl+B、自动后台计时或显式 `run_in_background` 路径原地切换。`backgroundExistingForegroundTask()` 特别避免重新注册，否则会重复发出 `task_started`，还可能泄漏第一次注册的 cleanup callback。
 
-因此，前台/后台不是状态机中的第六、第七个状态。一个任务完全可以同时满足 `status === 'running'` 且 `isBackgrounded === false`；切到后台后仍是 `running`，只是 `isBackgrounded === true`。
+因此，前台/后台是与 `TaskStatus` 正交的等待属性。一个任务可以同时满足 `status === 'running'` 且 `isBackgrounded === false`；切到后台后仍是 `running`，只是 `isBackgrounded === true`。
 
 `isBackgroundTask()` 把这个判定写得很明确：
 
@@ -199,13 +217,13 @@ export function isBackgroundTask(task: TaskState): task is BackgroundTaskState {
 }
 ```
 
-**函数说明：** `isBackgroundTask()` 判断一个任务是否应该进入后台任务指示器和后台等待逻辑。终态任务不再算“后台运行中”；显式标记为前台的任务也被排除。没有 `isBackgrounded` 字段的任务，只要仍是 `pending/running`，就按后台任务处理。
+**函数说明：** `isBackgroundTask()` 判断一个任务是否应该进入后台任务指示器和后台等待逻辑。终态任务会被排除，显式标记为前台的任务也会被排除。省略 `isBackgrounded` 字段的任务只要仍是 `pending/running`，就按后台任务处理。
 
-**参数说明：** `task` 是运行时任务联合类型，不接受 `null` 或 `undefined`。`status` 只有 `pending`、`running` 能返回 `true`；当具体类型包含 `isBackgrounded` 时，只有显式 `false` 会排除，`true` 会通过。字段不存在不是 `false` 的同义词，这是联合类型间的回退逻辑。
+**参数说明：** `task` 是运行时任务联合类型，类型排除 `null` 与 `undefined`。`status` 只有 `pending`、`running` 能返回 `true`；当具体类型包含 `isBackgrounded` 时，显式 `false` 会排除，`true` 会通过。字段缺失采用后台任务回退语义。
 
 ## 观察：状态放内存，大输出放文件
 
-长任务最棘手的不是“有没有一个 Promise”，而是输出可能持续数小时。如果每个 chunk 都追加到 React 状态或对话历史，内存和 token 都会一起膨胀。
+长任务的主要压力来自可能持续数小时的输出。如果每个 chunk 都追加到 React 状态或对话历史，内存和 token 都会一起膨胀。
 
 Claude Code 把状态与输出分开：`AppState.tasks` 保存小而可订阅的状态；`TaskOutput` 与 `DiskTaskOutput` 保存日志；任务状态中的 `outputFile` 指向当前会话的任务目录。Bash 的 file mode 甚至让 stdout/stderr 直接进入文件描述符，不先经过 JavaScript 字符串。
 
@@ -225,7 +243,7 @@ static startPolling(taskId: string): void {
 
 **函数说明：** `TaskOutput.startPolling()` 只把当前可见、且注册了进度回调的文件型输出加入共享轮询器。所有活跃实例复用一个 1 秒定时器；对应组件卸载时 `stopPolling()` 移除实例，集合为空就关闭定时器。这避免每个任务各建一个永久 timer。
 
-**参数说明：** `taskId` 是开放字符串，用于从内部 registry 取实例。找不到实例或 `onProgress` 为 `null` 时直接返回。轮询间隔在这段实现中固定为 `1000ms`，不是调用参数；`unref()` 表示该定时器不会单独阻止 Node/Bun 进程退出。轮询只读末尾 4096 字节用于显示，并不等于读取完整结果。
+**参数说明：** `taskId` 是开放字符串，用于从内部 registry 取实例。找不到实例或 `onProgress` 为 `null` 时跳过注册，因此不会启动无消费者的轮询。轮询间隔在这段实现中固定为 `1000ms`；`unref()` 使该定时器不再单独阻止 Node/Bun 进程退出。轮询只读末尾 4096 字节用于显示，完整结果仍保留在输出文件中。
 
 输出文件还有两层上限。任务输出共用 5GB 的粗粒度磁盘保护：pipe mode 的 `DiskTaskOutput` 超过后丢弃后续 chunk 并写入截断标记，Bash file mode 则由文件大小 watchdog 终止进程；通用读取默认只取文件尾部 8MB。`TaskOutput` 工具映射给模型时还通过 `TASK_MAX_OUTPUT_LENGTH` 控制字符数，源码默认 32,000，上限 160,000。
 
@@ -257,11 +275,11 @@ const inputSchema = z.strictObject({
 
 交互模式的队列处理器会把通知作为后续输入；print/headless 路径还会转换成 SDK `system` 事件，并继续让模型看到这条通知。也就是说，“后台”只是不阻塞原来的工具调用，不代表模型永远不再处理结果。
 
-这里还要注意通知的幂等性。`enqueueShellNotification()` 先原子检查并写入 `notified:true`；如果 `TaskStop` 已经消费了终态，就跳过重复通知。对 SDK 而言，注册发 `task_started`，执行中的 Agent/工作流可以发 `task_progress`，终态发 `task_notification`。这些是事件流，不是对 `AppState.tasks` 的完整快照。
+这里还要注意通知的幂等性。`enqueueShellNotification()` 先原子检查并写入 `notified:true`；如果 `TaskStop` 已经消费了终态，就跳过重复通知。对 SDK 而言，注册发 `task_started`，执行中的 Agent/工作流可以发 `task_progress`，终态发 `task_notification`。这些事件只描述状态变化，完整状态仍保存在 `AppState.tasks`。
 
 在非交互模式里，主循环在命令队列暂时为空后还会检查后台任务：只要仍有符合 `isBackgroundTask()` 的任务，就每 100ms 等待并再次排空队列。`in_process_teammate` 被显式排除，因为 teammate 的 `running` 是长生命周期常态；如果也等待它变成 completed，print 模式可能永远无法退出。
 
-这体现了调度边界：运行时等待的是“需要收束的后台工作”，不是所有状态为 running 的对象。
+这体现了调度边界：运行时只等待需要收束的后台工作。
 
 ## 取消：统一入口，按类型派发
 
@@ -285,11 +303,11 @@ export async function stopTask(taskId: string, context: StopTaskContext) {
 
 **函数说明：** `stopTask()` 是 LLM 调用的 `TaskStopTool` 与 SDK `stop_task` 控制请求共享的停止路径。它验证任务存在且仍在运行，然后根据 `task.type` 取得实现并调用 `kill()`。本地 Bash 会额外抑制常见的 exit 137 噪声，同时直接补发 SDK stopped 事件，保证消费者仍能看到任务闭合。
 
-**参数说明：** `taskId` 必须指向当前 `AppState.tasks` 中的运行实例；找不到、不是 `running`、类型没有可用实现时，错误码分别是 `'not_found'`、`'not_running'`、`'unsupported_type'`。`context` 只要求 `getAppState` 与 `setAppState`。`TaskStopTool` 的 `task_id`、兼容字段 `shell_id` 都是 `string | undefined`，优先使用 `task_id`；两者都省略会校验失败。虽然工具调用签名里还能拿到 `abortController`，这条 `call()` 路径没有把它传给 `stopTask()`。
+**参数说明：** `taskId` 必须指向当前 `AppState.tasks` 中的运行实例；零命中、状态偏离 `running`、类型缺少可用实现时，错误码分别是 `'not_found'`、`'not_running'`、`'unsupported_type'`。`context` 只要求 `getAppState` 与 `setAppState`。`TaskStopTool` 的 `task_id`、兼容字段 `shell_id` 都是 `string | undefined`，优先使用 `task_id`；两者都省略会校验失败。工具调用签名虽能取得 `abortController`，这条 `call()` 路径只把 `taskId` 与 `context` 传给 `stopTask()`。
 
-类型表由 `getAllTasks()` 组装。`LocalShellTask`、`LocalAgentTask`、`RemoteAgentTask`、`DreamTask` 固定进入数组；`LocalWorkflowTask` 与 `MonitorMcpTask` 只有对应构建 feature 为真才加载。`TaskType` 联合类型里还包含 `in_process_teammate`，但 `getAllTasks()` 没有为它注册可取消实现，因此通过这条统一入口停止它会落到 `unsupported_type`。这是静态源码显示的边界，不应脑补成所有 `TaskType` 都支持 `TaskStop`。
+类型表由 `getAllTasks()` 组装。`LocalShellTask`、`LocalAgentTask`、`RemoteAgentTask`、`DreamTask` 固定进入数组；`LocalWorkflowTask` 与 `MonitorMcpTask` 只有对应构建 feature 为真才加载。`TaskType` 联合类型里还包含 `in_process_teammate`，但 `getAllTasks()` 未为它注册可取消实现，因此通过这条统一入口停止它会落到 `unsupported_type`。静态源码只确认已注册类型支持 `TaskStop`。
 
-## 收束：notified 不是装饰字段
+## 收束：notified 控制终态消费
 
 一个任务进入终态，还不能立刻从 `AppState.tasks` 删除。否则通知还没被模型或 SDK 消费，状态和输出路径就丢了。`notified` 正是“终态是否已经交付”的确认位。
 
@@ -297,7 +315,7 @@ export async function stopTask(taskId: string, context: StopTaskContext) {
 
 输出对象与状态也分开清理。`evictTaskOutput()` 会先 flush 写队列，再从进程内 `Map` 删除 `DiskTaskOutput`，但不会删除磁盘文件；`cleanupTaskOutput()` 才会删除文件。这样终态后释放 JavaScript 内存的同时，通知里的 output file 仍可供 Read 回收。
 
-这套机制的核心不是“异步”三个字，而是把所有权拆清楚：
+这套机制的核心是把所有权拆清楚：
 
 - 执行器拥有启动方式和完成回调；
 - `AppState.tasks` 拥有可观察生命周期；
@@ -312,9 +330,14 @@ Claude Code 的 Task 运行时可以压成一句话：**统一状态，分散执
 
 `TaskStatus` 解决“任务走到哪一步”，`isBackgrounded` 解决“当前调用是否还要等”，二者是正交维度。`registerTask()` 把实例挂进 `AppState.tasks`，具体 Task 自己推进运行与终态；大输出落到按会话隔离的文件；完成通知重新进入模型队列；`TaskStop` 再通过最小 `kill()` 契约停止不同执行器。
 
-这样做的价值不是抽象得漂亮，而是避免长任务绑死一次 query loop：主线程可以继续处理别的输入，后台任务仍然可观察、可取消、可恢复结果，并且最终有明确的收束条件。
+这样做可以避免长任务绑死一次 query loop：主线程继续处理别的输入，后台任务仍然可观察、可取消、可恢复结果，并且最终有明确的收束条件。
 
 ## 留给下一篇的问题
 
 当一个任务需要独立上下文和专门能力时，Claude Code 如何创建 subagent、选择 Agent 定义，并在主线程与子线程之间传递结果？
 
+## 参考资料
+
+- [Claude Code 交互模式与任务列表](https://code.claude.com/docs/en/interactive-mode)
+
+- [Claude Code Commands](https://code.claude.com/docs/en/commands)

@@ -10,11 +10,23 @@ image: "/images/posts/claude-code-source-reading-18/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 本章先建立三个概念
+
+- **生命周期连接点**：工具、会话、权限和压缩在固定时刻发出事件，Hook 通过这些位置接入。
+
+- **Matcher**：事件名确定大类，matcher 再按工具名、触发原因或通知类型筛选具体调用。
+
+- **控制权等级**：不同事件允许观察、注入上下文、改写输入或阻断流程，能力由核心协议限定。
+
+![Hook 生命周期连接点与控制权等级](/images/posts/claude-code-source-reading-18/18-hook-control-levels-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+
 ## 回答上一篇的问题
 
 上一篇最后留下的问题是：上下文压缩解决了窗口限制以后，Claude Code 的 Hooks 如何在生命周期节点观察、改写、阻止或扩展一次运行？
 
-先说结论：Claude Code 没有让外部脚本随意钻进 Agent 循环，而是在一组明确的生命周期节点上，传入结构化 JSON，再接收结构化结果。
+先说结论：Claude Code 通过一组明确的生命周期节点接入外部逻辑，在事件边界传入结构化 JSON，再接收结构化结果。
 
 一次 Hook 的主路径可以概括为五步：
 
@@ -26,25 +38,25 @@ imagePosition: "left"
 
 所以，Hook 既能观察，也能改变后续控制流，但能力取决于所在事件。一个 PostToolUse Hook 看见工具结果，不代表它能让已经完成的本地文件写入自动回滚；一个异步 Hook 已经让主流程继续，也不能再用普通同步返回值改写那次工具输入。
 
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块都是短摘录，`// ...` 只标记被删去的埋点、UI 消息和无关分支，不是改写后的伪代码；还原路径不等于 Anthropic 内部仓库的原始目录。
+本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块都是短摘录，`// ...` 只标记被删去的埋点、UI 消息和无关分支；还原路径只用于定位本文引用的源码。
 
-## Hook 是生命周期协议，不是一个随处可调用的脚本目录
+## Hook 用生命周期协议接入运行时
 
 我们先看整条路径。
 
 ![Claude Code Hooks 生命周期、匹配、执行与反馈路径](/images/posts/claude-code-source-reading-18/18-hooks-lifecycle-handdrawn.png)
 
-这里先补三个基础概念。
+这里先说明三个概念怎样约束 Hook 的控制范围。
 
-**生命周期节点**是运行时已经知道“现在发生了什么”的边界。例如，`PreToolUse` 位于工具真正执行之前，`PostToolUse` 位于成功结果产生之后，`PreCompact` 位于摘要生成之前，`Stop` 位于 Agent 准备结束本轮时。Hook 不需要接管整个 query loop，只在这些边界接收一次通知。
+**生命周期节点**是运行时已经知道“现在发生了什么”的边界。例如，`PreToolUse` 位于工具真正执行之前，`PostToolUse` 位于成功结果产生之后，`PreCompact` 位于摘要生成之前，`Stop` 位于 Agent 准备结束本轮时。每个位置决定 Hook 可以观察或改变哪一段后续控制流。
 
-**匹配器（matcher）**决定某一类事件是否交给某组 Hook。它不是统一匹配任意对象：工具事件匹配 `tool_name`，压缩事件匹配 `manual / auto`，会话开始匹配 `startup / resume / clear / compact`。没有匹配字段的 Stop 事件，则不会在这一步按工具名筛选。
+**匹配器（matcher）**决定某一类事件是否交给某组 Hook。工具事件匹配 `tool_name`，压缩事件匹配 `manual / auto`，会话开始匹配 `startup / resume / clear / compact`；Stop 缺少对应查询字段，因此保留该事件的全部 matcher。
 
-**控制输出**是 Hook 对主流程的正式反馈。普通文本、退出码和 JSON 都可以成为输出，但只有被解析成约定字段后，才能稳定表达“拒绝工具”“改输入”“补上下文”或“不要继续”。因此，Hook 的本质不是 shell alias，而是一套跨 command、LLM、Agent、HTTP 和 SDK callback 的统一事件协议。
+**控制输出**是 Hook 对主流程的正式反馈。普通文本、退出码和 JSON 都可以成为输出，但只有被解析成约定字段后，才能稳定表达“拒绝工具”“改输入”“补上下文”或“不要继续”。这套统一事件协议横跨 command、LLM、Agent、HTTP 和 SDK callback。
 
 为什么要这样设计？因为权限、工具执行、压缩和停止分散在不同模块。若每个扩展都直接修改这些模块，安全检查与状态恢复很快会失去统一边界。生命周期协议把外部逻辑放在调用前后，再由核心运行时解释结果，扩展点与主控制流仍然可以分开演进。
 
-## 事件不是四个，源码列出了 27 个
+## 源码列出了 27 个生命周期事件
 
 `restored-src/src/entrypoints/sdk/coreTypes.ts` 把可配置事件写成一个字符串常量数组：
 
@@ -80,7 +92,7 @@ export const HOOK_EVENTS = [
 ] as const
 ```
 
-`HOOK_EVENTS` 没有函数参数，它用 `as const` 保留每个字符串字面量，后续 `HookEvent` 与 Zod 枚举都以这组值为边界。源码确认这里共有 27 个事件；不存在一个可以在配置里任意填写的开放事件名。
+`HOOK_EVENTS` 是常量数组，用 `as const` 保留每个字符串字面量，后续 `HookEvent` 与 Zod 枚举都以这组值为边界。源码确认配置事件名只能取这 27 个枚举值。
 
 从控制流看，可以把它们分成几类：输入边界、工具与权限边界、会话边界、压缩边界、Agent/团队任务边界，以及 MCP、配置、工作目录和文件监听边界。本文以最能说明机制的四条路径为主，不把 27 个事件逐个写成 API 清单。
 
@@ -118,11 +130,11 @@ return z.discriminatedUnion('type', [
 ])
 ```
 
-`HookCommandSchema()` 没有参数，返回以 `type` 为判别字段的联合类型。源码确认的可选值是：`'command'` 执行 shell 命令；`'prompt'` 让一次 LLM 调用判断；`'agent'` 启动带消息上下文的验证 Agent；`'http'` 把事件 JSON POST 到 URL。它们的核心输入分别是 `command`、`prompt`、`prompt` 和 `url`。
+`HookCommandSchema()` 是空参函数，返回以 `type` 为判别字段的联合类型。源码确认的可选值是：`'command'` 执行 shell 命令；`'prompt'` 让一次 LLM 调用判断；`'agent'` 启动带消息上下文的验证 Agent；`'http'` 把事件 JSON POST 到 URL。它们的核心输入分别是 `command`、`prompt`、`prompt` 和 `url`。
 
 四类都支持可选 `timeout`、`statusMessage`、`once`，并可用 `if` 做工具权限规则式过滤。`timeout` 必须是正数，单位为秒；省略后由各执行路径使用默认值。`once` 是可选布尔值。`command` 还支持 `shell: 'bash' | 'powershell'`，省略回退为 `bash`；以及 `async`、`asyncRewake` 两个可选布尔值。`prompt/agent` 省略时分别回退到快速小模型和 Haiku 路径。
 
-除这四类外，还有不会写入普通 settings 的 callback 与 function Hook。callback 由 SDK 或内部注册逻辑提供，function Hook 按 session 存储并接收消息历史。也就是说，配置文件看到的四类是持久化协议，不是运行时 Hook 来源的全集。
+运行时还会注册 callback 与 function Hook：callback 来自 SDK 或内部注册逻辑，function Hook 按 session 存储并接收消息历史。普通 settings 只覆盖 command、prompt、agent、http 四类持久化协议。
 
 ## 输入：先给公共会话坐标，再补事件字段
 
@@ -147,7 +159,9 @@ export function createBaseHookInput(
 }
 ```
 
-`createBaseHookInput(permissionMode?, sessionId?, agentInfo?)` 的三个参数都可为 `undefined`。`sessionId` 省略时回退到当前主 session；`agentInfo.agentType` 缺失时回退到主线程的 `--agent` 类型；`agentInfo.agentId` 不存在时输出 `undefined`。因此，应使用 `agent_id` 是否存在来区分“真正来自 subagent 的调用”，不能只看 `agent_type`。
+`createBaseHookInput(permissionMode?, sessionId?, agentInfo?)` 的三个参数都可省略。省略 `sessionId` 时回退到当前主 session；省略 `agentInfo.agentType` 时回退到主线程的 `--agent` 类型；省略 `agentInfo.agentId` 时，输出对象无法提供子 Agent 身份。因此，调用方应依据 `agent_id` 是否有值区分 subagent 调用，`agent_type` 仍可能来自主线程回退。
+
+**字段说明：** `session_id` 保存解析后的会话 ID，`transcript_path` 指向该会话的 transcript，`cwd` 是当前工作目录，`permission_mode` 透传可选权限模式；`agent_id` 标识具体子 Agent，`agent_type` 保存子 Agent 类型或主线程回退类型。局部变量 `resolvedSessionId` 与 `resolvedAgentType` 分别承接两个回退结果。
 
 公共字段让 Hook 知道当前 session、transcript、cwd 和权限模式，但事件还要补自己的有效载荷。以 `PreToolUse` 为例：
 
@@ -161,9 +175,9 @@ const hookInput: PreToolUseHookInput = {
 }
 ```
 
-这段代码位于 `executePreToolHooks()`。`permissionMode` 可为 `undefined`；第二个参数明确传 `undefined`，让 session ID 使用默认回退；`toolUseContext` 通过结构类型提供可选的 `agentId / agentType`。`toolName` 与 `toolUseID` 是开放字符串，来自本次 tool_use；`toolInput` 是泛型输入，不在这里重新假定字段集合。
+这段代码位于 `executePreToolHooks()`。`permissionMode` 可为 `undefined`；第二个参数明确传 `undefined`，让 session ID 使用默认回退；`toolUseContext` 通过结构类型提供可选的 `agentId / agentType`。输出中的 `hook_event_name` 固定为 `'PreToolUse'`，`tool_name` 取开放字符串 `toolName`，`tool_input` 透传泛型 `toolInput`，`tool_use_id` 取本次调用的开放字符串 `toolUseID`。
 
-其他事件遵循同一模式，但专属字段不同。`PostToolUse` 多一个 `tool_response`；`PostToolUseFailure` 带 `error` 和可选布尔值 `is_interrupt`；`PreCompact.trigger` 只有 `'manual' | 'auto'`，`custom_instructions` 则是 `string | null`，这里用 `null` 明确表达“没有自定义压缩指令”，而不是省略字段。`Stop.stop_hook_active` 是必填布尔值，用来告诉 Hook 当前是否已经处于 Stop Hook 驱动的续跑中。
+其他事件遵循同一模式，但专属字段不同。`PostToolUse` 多一个 `tool_response`；`PostToolUseFailure` 带 `error` 和可选布尔值 `is_interrupt`；`PreCompact.trigger` 只有 `'manual' | 'auto'`，`custom_instructions` 的类型是 `string | null`：字符串会把用户要求暴露给 Hook，`null` 让 Hook 按默认压缩要求执行，并保持事件 JSON 的字段形状稳定。`Stop.stop_hook_active` 是必填布尔值，用来告诉 Hook 当前是否已经处于 Stop Hook 驱动的续跑中。
 
 输入统一之后，command、HTTP 和 SDK callback 就能共享同一份协议，不必分别猜测当前 cwd 或自己解析 transcript 路径。
 
@@ -188,9 +202,9 @@ if (!managedOnly && appState !== undefined) {
 }
 ```
 
-`getHooksConfig(appState, sessionId, hookEvent)` 的 `appState` 可以是 `undefined`，此时为了兼容旧调用，不读取 session Hook；`sessionId` 用于隔离当前会话或 Agent；`hookEvent` 必须是前面的 27 个枚举之一。初始数组来自配置快照，没有该事件时通过 `?? []` 回退为空。随后加入已注册 callback/plugin Hook；若策略要求 managed-only，plugin Hook 会被跳过，session Hook 也全部跳过。
+`getHooksConfig(appState, sessionId, hookEvent)` 的 `appState` 可以省略；兼容旧调用时省略它会跳过 session Hook，只合并配置快照与已注册 Hook。`sessionId` 用于隔离当前会话或 Agent；`hookEvent` 必须是前面的 27 个枚举之一。配置快照缺少该事件时通过 `?? []` 从空候选集开始。随后加入已注册 callback/plugin Hook；若策略要求 managed-only，plugin Hook 会被跳过，session Hook 也全部跳过。
 
-这条来源合并很重要。SDK callback、插件、Skill/Agent frontmatter 和普通 settings 并不天然拥有同样的信任级别。。
+这条来源合并很重要。SDK callback、插件、Skill/Agent frontmatter 和普通 settings 并不天然拥有同样的信任级别。
 
 下一步，`getMatchingHooks()` 根据输入事件选择查询值：
 
@@ -218,11 +232,11 @@ const filteredMatchers = matchQuery
   : hookMatchers
 ```
 
-`getMatchingHooks(appState, sessionId, hookEvent, hookInput, tools?)` 前四个参数用于取得候选并解释事件；`tools` 可为 `undefined`，只有评估工具型 `if` 条件时才需要。工具事件使用 `tool_name`，压缩事件使用 `trigger`。`Stop` 没有设置 `matchQuery`，因此保留该事件下的全部 matcher；空字符串查询也会走同一条“不过滤”路径。
+`getMatchingHooks(appState, sessionId, hookEvent, hookInput, tools?)` 前四个参数用于取得候选并解释事件；`tools` 只参与工具型 `if` 条件的解析，省略时这类条件无法构造 permission matcher，相应 Hook 会被跳过。工具事件使用 `tool_name`，压缩事件使用 `trigger`。`Stop` 不设置 `matchQuery`，因此保留该事件下的全部 matcher；空字符串查询也走同一条不过滤路径。
 
 匹配后还会按来源上下文去重。command 的去重身份包含 shell、command 和 `if`；prompt/agent 用 prompt 与 `if`；HTTP 用 URL 与 `if`。同一 settings 来源中冲突时，`Map` 保留后合并的条目；插件与 Skill 会用各自 root 加命名空间，避免两个扩展恰好写了相同命令就误删一个。
 
-最后才评估 `if`。它使用类似 `Bash(git *)`、`Read(*.ts)` 的权限规则语法，并借助目标工具的 `preparePermissionMatcher()` 理解具体输入。对非工具事件，matcher 构造器返回 `undefined`；此时配置了 `if` 的 command/prompt/agent/http Hook 会被跳过，而不是把条件当作普通正则硬套。
+最后才评估 `if`。它使用类似 `Bash(git *)`、`Read(*.ts)` 的权限规则语法，并借助目标工具的 `preparePermissionMatcher()` 理解具体输入。对非工具事件，matcher 构造器返回 `undefined`，配置了 `if` 的 command/prompt/agent/http Hook 随即被跳过。
 
 ## 执行：同一事件的 Hook 并行，但结果仍由核心聚合
 
@@ -240,9 +254,9 @@ if (shouldSkipHookDueToTrust()) {
 }
 ```
 
-`executeHooks({...})` 接收对象参数。其中 `hookInput` 与 `toolUseID` 必填；`matchQuery`、`signal`、`toolUseContext`、`messages` 等可以是 `undefined`；`timeoutMs` 缺失时默认 `10 * 60 * 1000` 毫秒。全局禁用开关或 `CLAUDE_CODE_SIMPLE` 为真会直接跳过。交互模式下若 workspace trust 尚未接受，也会跳过全部 Hook；非交互 SDK 路径把信任视作隐式成立。
+`executeHooks({...})` 接收对象参数。其中 `hookInput` 与 `toolUseID` 必填；省略 `matchQuery` 时不按查询值裁剪 matcher，省略 `signal` 时只受内部超时控制，`toolUseContext` 和 `messages` 则只在对应 Hook 类型需要工具状态或历史时参与执行。`timeoutMs` 缺失时默认 `10 * 60 * 1000` 毫秒。全局禁用开关或 `CLAUDE_CODE_SIMPLE` 为真会直接跳过。交互模式下若 workspace trust 尚未接受，也会跳过全部 Hook；非交互 SDK 路径把信任视作隐式成立。
 
-这不是 UI 层的提醒，而是集中执行门。它避免 SessionEnd 或 SubagentStop 等看起来“不是工具调用”的事件绕过项目信任后执行外部命令。
+这是集中执行门。SessionEnd、SubagentStop 等非工具事件也必须通过 workspace trust 检查，才能执行外部命令。
 
 命中后，运行时为每个 Hook 创建独立异步生成器：
 
@@ -265,7 +279,7 @@ for await (const result of all(hookPromises)) {
 
 `matchingHooks` 是已去重、已过滤的列表；`hookIndex` 是该列表中的位置，用于进度与部分会话初始化逻辑。每个 Hook 显式设置正数 `timeout` 时，秒数乘 1000；省略则回退到事件调用方的 `timeoutMs`。外部 `signal` 与计时器通过 `createCombinedAbortSignal()` 合并，任一取消都能结束当前 Hook。
 
-`all(hookPromises)` 说明同一事件的 Hook 并行推进，主流程要等同步 Hook 聚合完成。这里的“并行”不等于不受控制：每个结果仍要回到聚合器，转成 progress、attachment、permission、additionalContext 或 stop 标志。
+`all(hookPromises)` 说明同一事件的 Hook 并行推进，主流程要等同步 Hook 聚合完成。每个结果仍要回到核心聚合器，转成 progress、attachment、permission、additionalContext 或 stop 标志。
 
 多个权限结果的优先级由源码固定为 `deny > ask > allow`。`passthrough` 不设置聚合权限行为。这样，即使一个 Hook 允许、另一个 Hook 拒绝，运行时也不会因为完成顺序不同而把拒绝覆盖掉。
 
@@ -297,6 +311,8 @@ z.object({
 
 同步 JSON 的这些字段都可省略。`continue` 省略等价于不要求停止，只有严格为 `false` 才设置 `preventContinuation`；`suppressOutput` 的文档默认是 `false`；`stopReason` 只在停止时提供原因。兼容字段 `decision` 只有 `'approve' | 'block'`，分别映射到 allow 与 deny；更精确的新协议放在 `hookSpecificOutput` 中，并用 `hookEventName` 校验返回事件与当前事件一致。
 
+`reason` 为兼容的 approve/block 决策提供解释文本，只有对应决策路径会消费；`systemMessage` 生成面向用户的系统提示，不替代权限结果或 `additionalContext`。`hookSpecificOutput` 省略时，运行时只解释这些公共字段；有值时再按当前事件的专属 Schema 解析，事件名不匹配会进入校验失败路径。
+
 `PreToolUse` 的 event-specific 输出支持：
 
 - `permissionDecision: 'allow' | 'deny' | 'ask'`，也可以省略，让普通权限流程继续。
@@ -306,7 +322,7 @@ z.object({
 
 `PostToolUse` 支持 `additionalContext` 与 `updatedMCPToolOutput`。后者类型是 `unknown`，只在目标是 MCP 工具时被工具执行层采用；普通本地工具的结果已经在 Hook 之前映射并加入消息，PostToolUse 不提供通用回滚接口。
 
-还有一个容易混淆的边界：`continue: false` 与 `permissionDecision: 'deny'` 不是同一件事。deny 拒绝当前工具；`continue: false` 请求事件调用方停止后续执行。两者可以同时出现，也可以只出现一个，最终语义由 PreToolUse、Stop 等调用位置分别处理。
+还有一个容易混淆的边界：`permissionDecision: 'deny'` 拒绝当前工具，`continue: false` 请求事件调用方停止后续执行。两字段可以独立出现，也可以同时出现，最终语义由 PreToolUse、Stop 等调用位置分别处理。
 
 ## 同步与异步：`async` 解决等待，`asyncRewake` 解决事后叫醒
 
@@ -316,7 +332,7 @@ z.object({
 
 `asyncRewake: true` 同样后台执行，但完成后若退出码为 2，会把阻断内容排入消息队列，叫醒主循环继续处理。普通 `async` 的完成结果只进入异步 Hook registry，不会重新打开已经过去的 PreToolUse 边界。
 
-因此，选择同步还是异步不是纯性能开关。需要 `allow / ask / deny`、`updatedInput` 或当场阻止的 Hook 必须同步等待；只做日志、通知、上报的 Hook 才适合异步。`asyncRewake` 适合“先让主流程走，后台发现问题后再要求 Agent 处理”的场景，但它不是事务回滚。
+因此，选择同步还是异步会改变控制能力。需要 `allow / ask / deny`、`updatedInput` 或当场阻止的 Hook 必须同步等待；只做日志、通知、上报的 Hook 才适合异步。`asyncRewake` 适合“先让主流程走，后台发现问题后再要求 Agent 处理”的场景，但无法提供事务回滚。
 
 ## 四个关键事件，分别能改变什么
 
@@ -324,27 +340,27 @@ z.object({
 
 `runPreToolUseHooks()` 位于 `checkPermissionsAndCallTool()` 的工具路径上。它把 Hook 结果转换为三类真正影响执行的值：`hookPermissionResult`、`hookUpdatedInput` 和 `preventContinuation`。
 
-permission 为 allow 或 ask 时，`updatedInput` 可以随决策一起传播；deny 时输入已没有意义，会被丢弃。若 Hook 只返回 `updatedInput`、没有返回 permission，运行时走 `hookUpdatedInput`，改完输入后继续正常权限判断。
+permission 为 allow 或 ask 时，`updatedInput` 可以随决策一起传播；deny 时输入会被丢弃。若 Hook 只返回 `updatedInput`，运行时走 `hookUpdatedInput`，改完输入后继续正常权限判断。
 
-这解释了 Hook 与权限引擎的关系：Hook 不是在权限检查结束后贴一个标签，而是权限决策来源之一。最终工具是否执行，还要结合聚合后的 Hook 结果与原有 `canUseTool` 路径，不能把“没有 Hook 拒绝”写成“自动允许”。
+这解释了 Hook 与权限引擎的关系：Hook 是权限决策来源之一。最终工具是否执行，还要结合聚合后的 Hook 结果与原有 `canUseTool` 路径；Hook 聚合结果为 passthrough 时，普通权限流程继续计算 allow、ask 或 deny。
 
 ### PostToolUse：结果已经产生，适合观察和补上下文
 
 成功工具调用完成后，执行层运行 PostToolUse。普通工具先把结果加入消息，再运行 Hook；MCP 工具则暂缓最终映射，让 `updatedMCPToolOutput` 有机会替换输出后再加入消息。
 
-因此，同一个 `updatedMCPToolOutput` 字段对普通 Read/Edit/Bash 不生效。这是源码明确的类型边界，也解释了为什么图中把 PostToolUse 标成 observe/context，而不是 rollback。
+因此，`updatedMCPToolOutput` 只对 MCP 工具生效；普通 Read/Edit/Bash 保持原结果。图中的 observe/context 图标表达的正是这个源码边界。
 
 工具抛错走的是 `PostToolUseFailure`，输入额外包含错误文本与可选的 `is_interrupt`。这为下一篇的错误分类留下了接口：Hook 能观察失败并补上下文，但错误是否重试、降级或终止，仍由工具执行和 query loop 的上层逻辑决定。
 
 ### PreCompact：成功 stdout 会变成摘要附加指令
 
-`executePreCompactHooks()` 接收的触发类型只有 `'manual' | 'auto'`，并把 `customInstructions: string | null` 传给 Hook。执行完成后，它只选取 `succeeded === true` 且非空的输出，用两个换行连接为 `newCustomInstructions`；没有成功输出时，该字段为 `undefined`。
+`executePreCompactHooks()` 接收的触发类型只有 `'manual' | 'auto'`，并把 `customInstructions: string | null` 传给 Hook。执行完成后，它只选取 `succeeded === true` 且非空的输出，用两个换行连接为 `newCustomInstructions`；筛选结果为空时，后续摘要 prompt 跳过 Hook 附加指令。
 
-上一篇看到 `compactConversation()` 会把这些内容和用户压缩指令合并。也就是说，PreCompact 不是直接修改旧消息数组，而是在摘要 Agent 开始前补充“摘要要保留什么”的指令。失败输出只进入用户展示信息，不会混入摘要要求。
+上一篇看到 `compactConversation()` 会把这些内容和用户压缩指令合并。PreCompact 在摘要 Agent 开始前补充“摘要要保留什么”的指令，旧消息数组保持不变。失败输出只进入用户展示信息，不会混入摘要要求。
 
-`PostCompact` 则拿到 `compact_summary`，适合审计或通知。它的返回结构只有可选 `userDisplayMessage`，没有再替换已经生成摘要的字段。
+`PostCompact` 则拿到 `compact_summary`，适合审计或通知。它的返回结构只含可选 `userDisplayMessage`，生成后的摘要保持不变。
 
-### Stop：阻断不是退出失败，而是给模型一次反馈
+### Stop：阻断反馈会驱动模型继续
 
 Stop Hook 在 Agent 准备结束时运行。输入中的 `stop_hook_active` 默认 `false`；当 Stop Hook 的阻断反馈驱动模型继续后，后续调用可以把它设为 `true`，让脚本识别自己是否处在 Hook 续跑链中。
 
@@ -366,7 +382,7 @@ command Hook 退出码 2 或 JSON block 会形成 blocking error。`handleStopHo
 
 Claude Code 的 Hooks 是一套以生命周期事件为入口、以结构化输入输出为契约的横切扩展机制。
 
-它先从配置快照、注册表和 session 状态合并候选，再按工具名、压缩触发类型等事件字段匹配；命中的 command、prompt、agent、http、callback 和 function Hook 进入共享执行器并行运行。核心运行时随后聚合权限、输入改写、附加上下文、停止信号和进度消息，而不是让外部扩展直接接管 Agent 循环。
+它先从配置快照、注册表和 session 状态合并候选，再按工具名、压缩触发类型等事件字段匹配；命中的 command、prompt、agent、http、callback 和 function Hook 进入共享执行器并行运行。核心运行时随后聚合权限、输入改写、附加上下文、停止信号和进度消息，query loop 的控制权始终归核心运行时。
 
 PreToolUse 能改变尚未发生的工具调用；PostToolUse 主要观察结果并补充上下文；PreCompact 影响摘要指令；Stop 的阻断反馈可以让模型继续一轮。同步 Hook 能当场参与决策，异步 Hook 则用等待能力换取主流程延迟，`asyncRewake` 再提供有限的事后唤醒。
 
@@ -376,3 +392,8 @@ PreToolUse 能改变尚未发生的工具调用；PostToolUse 主要观察结果
 
 当 Hook、工具、网络或模型调用失败时，Claude Code 如何分类错误、重试、恢复，并决定继续还是终止？
 
+## 参考资料
+
+- [Claude Code Hooks 参考](https://code.claude.com/docs/en/hooks)
+
+- [Claude Code Hooks 指南](https://code.claude.com/docs/en/hooks-guide)
