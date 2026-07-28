@@ -446,7 +446,7 @@ Windows 原生平台使用独立的 `PowerShellTool` 和 PowerShell AST 解析�
 
 ## 留给下一篇的问题
 
-Bash 之外，Read、Edit、Write、Notebook 等文件工具如何利用读取状态、快照与历史避免覆盖，并在失败后回滚？
+从当前版本看来，为什么很多 PowerShell 脚本要到执行时才报错？
 
 ## 参考资料
 
