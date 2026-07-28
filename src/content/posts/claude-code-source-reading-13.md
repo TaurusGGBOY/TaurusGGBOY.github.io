@@ -39,7 +39,7 @@ if (
 
 上面只保留控制分支，省略了日志、遥测、PowerShell 和安全检查。两个快速路径的共同点是：它们生成的仍然是标准 `PermissionDecision`，只是 `decisionReason` 标记为 `mode: 'auto'`，随后沿着普通执行链把 `updatedInput` 交给 `tool.call()`。
 
-如果快速路径没有命中，自动就体现为一次独立的 classifier 判断。`formatActionForClassifier()` 把工具名和输入整理成待判断的 action，`classifyYoloAction()` 再从 `context.messages` 构造精简 transcript，并把 action、工具编码和权限上下文交给分类模型。返回值里的 `shouldBlock` 决定结果：`false` 生成 `behavior: 'allow'`，`true` 记录 denial 状态并生成 `behavior: 'deny'`；连续拒绝达到限制时，源码还可能回到人工确认，让用户复核。
+如果快速路径没有命中，自动就体现为一次独立的 classifier 判断。这里的“分类模型”不是打包在本机、离线运行的规则模型：`classifyYoloAction()` 通过 `sideQuery()` 调用 Anthropic Messages API，把精简 transcript、action、工具编码和权限上下文发到云端模型。`getClassifierModel()` 只负责选择模型名——内部用户可由 `CLAUDE_CODE_AUTO_MODE_MODEL` 覆盖，功能配置可提供 `tengu_auto_mode_config.model`，否则回退到主循环模型；这些配置不改变它仍经 API 远程推理的事实。返回值里的 `shouldBlock` 决定结果：`false` 生成 `behavior: 'allow'`，`true` 记录 denial 状态并生成 `behavior: 'deny'`；连续拒绝达到限制时，源码还可能回到人工确认，让用户复核。
 
 因此，“自动”真正替换的是 `ask → allow/deny` 这一段决策，不是 `permission → tool.call` 的全部链路。不可由 classifier 放行的 safety check、`requiresUserInteraction()` 返回真的工具，以及功能未开启时的 PowerShell，都不会被这条自动路径静默批准。分类器 transcript 超过上下文时，交互模式会退回普通确认；无交互的 headless 路径则直接终止。分类器不可用时，还要根据 `tengu_iron_gate_closed` 的运行时开关决定 fail-closed 拒绝还是回退到普通权限处理。
 
@@ -438,7 +438,7 @@ Windows 原生平台使用独立的 `PowerShellTool` 和 PowerShell AST 解析�
 
 ## 小结
 
-回到开头的问题：为什么权限允许以后，Bash 还要继续解析、沙箱化并经过平台执行边界？因为 allow 只批准一次操作意图，后面的每一层仍在回答不同问题。
+回到上一篇的问题：`auto` 只替代了权限层对未决 `ask` 的处理方式，并没有把命令执行变成无条件放行。即使自动路径返回 `allow`，Bash 仍要继续解析、沙箱化并经过平台执行边界；`allow` 只批准一次操作意图，后面的每一层仍在回答不同问题。
 
 解析层尽量还原命令真实结构，权限层把结构映射到 allow、ask、deny，沙箱层限制进程能接触的资源，平台执行层处理 shell、cwd、环境、进程树、超时和取消，输出层再限制回填模型的内容规模。任何一层都不能单独提供完整安全。
 

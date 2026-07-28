@@ -1,7 +1,7 @@
 ---
-title: "Claude Code源码解读15：本地与网络检索如何协作"
+title: "Claude Code源码解读15：rewind 能回滚什么，不能回滚什么"
 published: 2026-07-24T16:47:02+08:00
-updated: 2026-07-24T16:47:02+08:00
+updated: 2026-07-28T17:30:00+08:00
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -10,293 +10,160 @@ image: "/images/posts/claude-code-source-reading-15/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **检索流水线**：候选发现、内容读取、相关性裁剪和证据回填是四个独立步骤。
-
-- **有界结果**：分页、截断与范围参数限制一次检索占用的上下文和执行时间。
-
-- **证据局部性**：模型应拿到与问题最接近的路径、行号和片段，以便继续验证。
-
-![本地与网络检索的有界流水线](/images/posts/claude-code-source-reading-15/15-retrieval-pipeline-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
-上一篇留下的问题是：当 Agent 不知道目标在哪里时，Glob、Grep、Read、WebSearch 与 WebFetch 等检索工具如何分层搜索并裁剪结果？
+上一篇留下的问题是：你知道 rewind 的时候哪些东西是无法回滚的吗？
 
-答案先说：**Claude Code 用多种检索工具逐层缩小未知范围，再把每一层的结果压成模型能够继续消费的 `tool_result`。**
+答案先说清楚：**rewind 不是整个 Agent 会话的 Undo，而是针对 File History 检查点的文件系统恢复。** 它只能处理已经被文件历史追踪、并且在目标消息检查点上留下备份的文件版本；对话内容、模型已经产生的推理、网络和数据库副作用、没有进入追踪流程的文件修改，都不在这条恢复链里。即使是被追踪的文件，恢复也按文件逐个执行，某个文件失败不会把已经恢复的其他文件重新撤销。
 
-本地路径最典型的顺序是 `Glob → Grep → Read`。`Glob` 根据文件名模式圈出候选文件，`Grep` 用正则在文件内容里定位命中，`Read` 最后读取确定文件的一段内容。网络路径则是 `WebSearch → WebFetch`：前者找候选页面与链接，后者抓取指定 URL，并按照 `prompt` 提取与当前任务相关的信息。
+因此，看到“rewind 成功”时，准确理解应该是“目标检查点对应的文件恢复流程完成”，而不是“系统回到了过去的完整世界”。
 
-这几种工具可以按已知信息自由组合。已经知道文件路径时可以直接 `Read`；只需要确认某个符号出现在哪些文件时，`Grep` 可以直接从 cwd 开始；用户给出了网页 URL，可以直接交给 `WebFetch`。这里的“分层”指各工具分别处理路径发现、内容定位、定点读取和网络提取，调用顺序由当前证据决定。
+## 本章先建立三个概念
 
-裁剪发生在每一层。`Glob` 默认最多返回 100 个路径；`Grep` 默认保留 250 行或条目，并支持 `offset` 翻页；`Read` 用 `offset`、`limit`、字节上限和 token 上限控制文件切片；`WebSearch` 把服务端搜索块整理为标题、URL 和文本；`WebFetch` 最多把 100,000 个字符交给二次模型处理。它们最后都经过各自的 `mapToolResultToToolResultBlockParam()`，变成查询循环能追加到消息历史的 `tool_result`。
+- **Checkpoint**：由 `messageId` 标识的一次文件历史检查点，保存的是文件备份索引，不是完整会话快照。
 
-因此，`No files found` 或 `No matches found` 只表示：**本次 path、pattern、ignore 规则、权限范围与分页窗口共同得到空结果。** 超时、截断、权限拒绝和网络失败属于独立状态，不能归入空结果。
+- **Tracked file**：进入 `fileHistoryTrackEdit()` 的文件才会加入 `trackedFiles`；文件历史按路径记录版本，原本不存在的文件用 `backupFileName: null` 表示。
 
-本文继续限定在 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码。下面的代码均来自 `restored-src/`，只省略与本段结论无关的字段与分支。
+- **Best effort**：`applySnapshot()` 按文件循环恢复并逐个捕获异常，没有跨文件事务；备份、权限、目录和磁盘状态都可能让结果停在中间。
 
-## 先建立一张检索地图
+![rewind 可恢复范围与不可恢复边界](/images/posts/claude-code-source-reading-15/15-rewind-boundaries-handdrawn.png)
 
-模型面对代码库时，成本最高的做法是从根目录开始读取所有文件。Claude Code 的工具划分，本质上是在回答三个不同问题：
+这张图把“能恢复的文件状态”和“无法由 checkpoint 覆盖的外部世界”分开。后文沿着 `messageId → applySnapshot()` 这条调用链，解释每个边界具体在哪里。
 
-| 层级 | 工具 | 要回答的问题 | 主要裁剪方式 |
-|---|---|---|---|
-| 路径发现 | `Glob` | 目标文件可能在哪里 | glob pattern、搜索目录、100 条默认上限 |
-| 内容定位 | `Grep` | 哪些文件、哪些行包含目标 | regex、文件类型、输出模式、250 条默认上限、offset |
-| 定点读取 | `Read` | 目标文件的具体内容是什么 | 行 offset/limit、字节与 token 上限、文件类型分支 |
-| 网络发现 | `WebSearch` | 哪些公开页面可能相关 | query、域名 allow/block、单次最多 8 次服务端搜索 |
-| 网络提取 | `WebFetch` | 指定页面里与任务相关的内容是什么 | URL 校验、内容大小、HTML 转 Markdown、二次模型提取 |
+本文继续限定在 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码。下面的片段只保留证明当前结论所需的分支，不把合并后的示意代码当作完整源码。
 
-![Claude Code 本地与网络分层检索流程手绘图](/images/posts/claude-code-source-reading-15/15-search-retrieval-handdrawn.png)
+## rewind 实际执行了什么
 
-图里的回箭头很重要。第一次搜索通常只会产生下一次搜索的线索。模型看到文件名以后可以改用更窄的 `Grep`，看到命中行以后再 `Read` 相邻范围；网页搜索同样可能先返回文档入口，再由 `WebFetch` 读取具体页面。检索在 query loop 中反复产生观察结果，每次结果都为下一次更窄的检索提供线索。
-
-## Glob 先找路径，不读取文件内容
-
-`restored-src/src/tools/GlobTool/GlobTool.ts` 的输入很小：必填 `pattern`，可选 `path`。调用方省略 `path` 时，`GlobTool.getPath()` 把搜索根回退到 `getCwd()`。
+入口是 `restored-src/src/utils/fileHistory.ts` 的 `fileHistoryRewind()`：
 
 ```ts
-async call(input, { abortController, getAppState, globLimits }) {
-  const start = Date.now()
-  const appState = getAppState()
-  const limit = globLimits?.maxResults ?? 100
-  const { files, truncated } = await glob(
-    input.pattern,
-    GlobTool.getPath(input),
-    { limit, offset: 0 },
-    abortController.signal,
-    appState.toolPermissionContext,
+export async function fileHistoryRewind(
+  updateFileHistoryState,
+  messageId: UUID,
+): Promise<void> {
+  if (!fileHistoryEnabled()) return
+
+  let captured: FileHistoryState | undefined
+  updateFileHistoryState(state => {
+    captured = state
+    return state
+  })
+  if (!captured) return
+
+  const targetSnapshot = captured.snapshots.findLast(
+    snapshot => snapshot.messageId === messageId,
   )
-  const filenames = files.map(toRelativePath)
-  const output: Output = {
-    filenames,
-    durationMs: Date.now() - start,
-    numFiles: filenames.length,
-    truncated,
+  if (!targetSnapshot) {
+    throw new Error('The selected snapshot was not found')
   }
-  return {
-    data: output,
-  }
+
+  await applySnapshot(captured, targetSnapshot)
 }
 ```
 
-**函数说明：** `GlobTool.call()` 调用 `utils/glob.ts` 中的 `glob()` 枚举匹配路径，再把 cwd 内的绝对路径转成相对路径，以减少消息里的 token。返回值同时保留 `truncated`，因此模型能判断路径列表是否完整。
+这段代码有四个关键事实：
 
-**参数说明：** `input.pattern` 是必填 glob 字符串，例如 `**/*.ts`，候选值开放；`input.path` 是 `string | undefined`，省略时回退 cwd。`abortController.signal` 允许上游取消搜索。`globLimits?.maxResults` 是 `number | undefined`，缺省值为 `100`；`offset` 固定为 `0`，所以 `Glob` 的公开输入只覆盖首个窗口。`toolPermissionContext` 提供文件读取规则与忽略模式。
+1. `fileHistoryEnabled()` 为假时，rewind 直接返回，不会补做备份或恢复。
+2. `updateFileHistoryState` 在这里用 no-op updater 捕获当前状态；rewind 本身不修改内存里的历史索引。
+3. `findLast` 按 `messageId` 找目标检查点。找不到 snapshot 是失败，不会“尽量恢复到最近一次”。
+4. 真正的磁盘操作由 `applySnapshot()` 执行，传入的是当前状态与一个目标 snapshot。
 
-**字段说明：** `start` 记录计时起点，`appState` 提供当前应用状态，`limit` 保存本次结果上限；底层返回的 `files` 是候选路径，`truncated` 标记上限之后是否仍有候选。输出把路径转换为 `filenames`，用 `durationMs` 记录耗时、`numFiles` 记录返回数量，并将整个 `output` 放入 `data`。
+交互式 REPL 的消息选择器和 print/SDK 的 `handleRewindFiles()` 都会进入这条链。后者可以先调用 `fileHistoryGetDiffStats()` 做 dry-run 预览，但预览和真实恢复之间磁盘仍可能变化，所以 dry-run 不是锁，也不是事务预提交。
 
-真正的文件枚举由 `restored-src/src/utils/glob.ts` 完成。绝对 glob 会先通过 `extractGlobBaseDirectory()` 拆成静态根目录和相对 pattern，再交给 ripgrep 的 `--files`。源码传入 `--sort=modified`，注释明确写的是按修改时间从旧到新排列。随后才执行 `slice(offset, offset + limit)`。
+## 哪些文件状态可以被恢复
 
-Glob 对 ignore 的处理有一个容易忽略的默认值：
+### 1. 文件工具在修改前留下的版本
 
-- `CLAUDE_CODE_GLOB_NO_IGNORE` 默认按 `true` 处理，因此默认添加 `--no-ignore`，不会遵守 `.gitignore`；显式设为假值才让 ripgrep 恢复 ignore 文件行为。
-- `CLAUDE_CODE_GLOB_HIDDEN` 默认按 `true` 处理，因此默认包含隐藏文件；显式设为假值才不加 `--hidden`。
-- 权限上下文里的文件读取 ignore pattern 仍会转换成排除 glob；孤立的插件缓存版本目录也会被排除。
+`fileHistoryTrackEdit(updateFileHistoryState, filePath, messageId)` 只在历史开关开启、当前检查点存在且该文件尚未被该检查点追踪时创建备份。源码能确认的直接调用者包括：
 
-Glob 的可见集合同时取决于 pattern、搜索根、两个环境变量、权限 ignore 与插件缓存排除。空数组只证明这个组合产出 0 条路径。
+- `FileEditTool.call()`；
+- `FileWriteTool.call()`；
+- `NotebookEditTool.call()`；
+- `BashTool` 的 `_simulatedSedEdit` 预览写入路径。
 
-在调用前，`GlobTool.validateInput()` 还会检查显式 `path` 是否存在且为目录。Windows UNC 路径会跳过这次预先 `stat`，以规避验证阶段触发 NTLM 凭据泄漏；后续仍进入共享权限流程。目录缺失返回 `errorCode: 1`，路径存在但类型为非目录时返回 `errorCode: 2`。
+普通 `BashTool.call()` 执行 shell 命令时不会因为命令字符串里可能修改了文件，就自动为任意路径建立 file-history 备份；`PowerShellTool` 也不在 `fileHistoryTrackEdit()` 的调用者中。这里的边界不是“文件最后有没有变化”，而是“这次变化是否经过了历史追踪入口”。
 
-## Grep 在内容里定位，并把排序与分页说清楚
+### 2. 目标检查点上的文件内容与权限
 
-`Glob` 只看路径。需要寻找函数名、错误文本或调用痕迹时，`GrepTool` 才进入文件内容。它在 `restored-src/src/tools/GrepTool/GrepTool.ts` 中组装参数，再调用 `restored-src/src/utils/ripgrep.ts` 的 `ripGrep()` 执行正则搜索。
+`createBackup()` 为文件生成版本备份，备份名由路径和版本组成，保存到会话的 `~/.claude/file-history/<sessionId>/` 目录。`restoreBackup()` 用 `copyFile()` 把备份内容复制回目标路径，再用备份的 mode 调用 `chmod()`。因此，对一个有效备份来说，rewind 能恢复文件内容和备份记录的文件权限；它不是重新执行当时的 Edit，也不会重新构造一次模型调用。
 
-```ts
-function applyHeadLimit<T>(
-  items: T[],
-  limit: number | undefined,
-  offset: number = 0,
-): { items: T[]; appliedLimit: number | undefined } {
-  if (limit === 0) {
-    return { items: items.slice(offset), appliedLimit: undefined }
-  }
-  const effectiveLimit = limit ?? DEFAULT_HEAD_LIMIT
-  const sliced = items.slice(offset, offset + effectiveLimit)
-  const wasTruncated = items.length - offset > effectiveLimit
-  return {
-    items: sliced,
-    appliedLimit: wasTruncated ? effectiveLimit : undefined,
-  }
-}
-```
+### 3. 检查点时不存在的、后来被新建的文件
 
-**函数说明：** `applyHeadLimit()` 是 `GrepTool.call()` 三种输出模式共用的分页函数。它先跳过 offset，再截取当前窗口；只有窗口之后确实还有结果时，才回传 `appliedLimit` 提醒模型继续翻页。常量 `DEFAULT_HEAD_LIMIT` 在同一文件中固定为 `250`。
+如果目标检查点时文件不存在，`createBackup()` 记录 `backupFileName: null`。`applySnapshot()` 看到这个标记时会尝试 `unlink(filePath)`：文件已经不存在时，`ENOENT` 被视为目标状态已经满足；删除成功时，路径加入 `filesChanged`。
 
-**参数说明：** `items` 是 ripgrep 返回的行或文件条目数组；`limit` 是 `number | undefined`，`undefined` 使用 250，显式 `0` 表示跳过条数上限；`offset` 是数字，默认 `0`。输入 schema 用 `semanticNumber` 接收 `head_limit` 和 `offset`，两者按开放数值处理。
+所以“新文件能否回滚”的准确答案是：如果它进入了追踪集合，并且目标 snapshot 记录了它原本不存在，rewind 会尝试删除它；如果它从未被追踪，rewind 根本不知道它属于哪次修改。
 
-`GrepTool.call()` 还负责把其他结构化输入翻译成 ripgrep 参数。`pattern` 是必填 ripgrep 正则；`path` 为文件、目录或 `undefined`，省略时使用 cwd；`glob` 与 `type` 都是可选字符串过滤器。`output_mode` 只能是 `content`、`files_with_matches`、`count`，默认 `files_with_matches`。`-n` 默认 `true`，但只影响 `content`；`-i` 默认 `false`；`multiline` 默认 `false`，设为 `true` 时加入 `-U --multiline-dotall`。工具始终添加 `--hidden` 和 `--max-columns 500`。
+## 哪些东西无法由 rewind 回滚
 
-三种 `output_mode` 分别服务于三个检索阶段：
+### 1. 对话和模型状态
 
-- `files_with_matches` 返回匹配文件名。正常运行时先按 mtime 从新到旧排序，相同时间再按文件名排序；测试环境直接按文件名排序。
-- `content` 返回实际命中行，可以使用 `-A`、`-B`、`-C` 或 `context`。`context` 优先于 `-C`；两者均省略时才分别使用 `-B` 与 `-A`。
-- `count` 返回 `文件:数量`，并计算当前返回窗口里的总命中数与文件数。
+`FileHistorySnapshot` 只有 `messageId`、`trackedFileBackups` 和时间戳。它没有保存完整消息历史、模型 hidden state、token 消耗、工具调用结果或已经发出的回答。rewind 通过消息 ID 选择文件目标版本，不会把模型上下文倒带，也不会让模型“忘记”已经观察到的内容。
 
-`GrepTool` 默认执行 `applyHeadLimit(results, undefined, 0)`，有效上限为 250。只有真的还有更多条目时，输出里才出现 `appliedLimit`；只传了非零 `offset` 时则会出现 `appliedOffset`。模型可以增加 `offset` 继续读下一页。显式 `head_limit: 0` 会取消这一层限制，工具的 20,000 字符持久化阈值、ripgrep 20 MB stdout buffer 和上下文容量仍会约束总成本。
+### 2. 文件之外的副作用
 
-Grep 保留 ripgrep 自己的 ignore 规则，参数中省略 `--no-ignore`。同时，它会显式排除 `.git`、`.svn`、`.hg`、`.bzr`、`.jj`、`.sl`，再叠加权限上下文中的读取 ignore pattern 和插件缓存排除。因此，可见范围始终受 ignore 与权限配置约束。
+Shell、PowerShell、Python 或其他程序可能已经完成了网络请求、数据库写入、进程启动、包安装、Git 提交、发送消息等操作。`applySnapshot()` 只调用 `unlink()`、`copyFile()`、`mkdir()` 和 `chmod()` 一类文件系统操作；它没有这些外部系统的反向操作，因此这些副作用无法由 file history 自动撤销。
 
-`ripGrep()` 对退出状态做了专门区分：退出码 `1` 才是正常的无匹配；`ENOENT`、`EACCES`、`EPERM` 会抛出；EAGAIN 会以单线程 `-j 1` 重试一次。默认超时在 WSL 为 60 秒，其他平台为 20 秒，可由 `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS` 的正整数秒覆盖。超时且结果为空时抛出 `RipgrepTimeoutError`，明确提醒模型缩小路径或 pattern，从状态上区分搜索未完成与零命中。如果异常发生前已有完整行，部分错误路径会返回这些行，因此读者仍要把它理解成一次有执行边界的观察。
+即使命令同时改了某个被追踪文件，rewind 也只尝试恢复那个文件版本，不会根据文件内容推断并撤销命令的其他影响。
 
-## Read 读取确定范围，并阻止一个文件吞掉上下文
+### 3. 没有进入追踪集合的文件修改
 
-搜索最终需要落到内容。`FileReadTool` 同时处理文本、`image`、`notebook`、`pdf`、PDF 页图片 `parts`，以及重复读取命中的 `file_unchanged`。本篇聚焦最常见的文本路径。
+`applySnapshot()` 的循环对象是 `state.trackedFiles`，不是当前工作区扫描结果。未经过 `fileHistoryTrackEdit()` 的路径不在循环里：它可能仍然存在、被删除或被外部程序改过，rewind 都不会主动发现并补建历史。
 
-```ts
-const defaults = getDefaultFileReadingLimits()
-const maxSizeBytes =
-  fileReadingLimits?.maxSizeBytes ?? defaults.maxSizeBytes
-const maxTokens =
-  fileReadingLimits?.maxTokens ?? defaults.maxTokens
-```
+这也解释了一个常见误区：不能把 rewind 当作“扫描整个仓库并恢复到某个时间点”。它没有 Git 那样的工作区镜像，也没有对所有路径做内容差分。
 
-**函数说明：** 这段源码位于 `FileReadTool.call()`。函数优先采用 `ToolUseContext` 的宿主覆盖值，缺省时读取 `getDefaultFileReadingLimits()`；随后还会规范化路径、检查相同范围去重，并进入 `callInner()` 按文件类型读取。
+### 4. 检查点之外的目录与环境状态
 
-**参数说明：** `file_path` 是必填绝对路径字符串；`offset` 是非负整数，默认 `1`，文本读取时表示从第 1 行开始，显式 `0` 也会映射到底层第 0 行索引；`limit` 是正整数，省略时跳过显式行数切片，但字节与 token 上限仍然生效；`pages` 是 PDF 专用的可选页码字符串，支持 `"3"`、`"1-5"` 这类单页和闭区间，一次最多 20 页。宿主省略 `fileReadingLimits` 时，函数采用默认字节与 token 限制。
+备份记录的是文件路径和文件备份，目录本身不是独立的 snapshot 对象。恢复时如果目标父目录不存在，`restoreBackup()` 会按需 `mkdir(..., { recursive: true })`，但它不会恢复目录的历史权限、目录时间、符号链接拓扑、环境变量、当前 cwd 或外部挂载状态。
 
-`restored-src/src/tools/FileReadTool/limits.ts` 给出的硬编码回退是：总文件大小 256 KB，输出最多 25,000 token。`maxTokens` 的优先级是环境变量 `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`、GrowthBook 配置、25,000；无效值都会回退。
+同理，文件工具的读取缓存、权限询问结果、沙箱状态和终端显示状态不属于 `FileHistorySnapshot`。它们不会因为文件内容恢复而自动回到检查点。
 
-文本路径的 `callInner()` 调用 `readFileInRange()`。提供 `limit` 时按行切片；省略时，总文件大小上限会先挡住过大的文件。返回内容还会做 token 估算，接近阈值时调用 token count API 精确计算，超过上限抛出 `MaxFileReadTokenExceededError`。这也是为什么大文件应该先 Grep，再用 `offset + limit` 读取局部。
+### 5. 已被淘汰或从未成功写入的备份
 
-读取成功后，工具会把内容、mtime、offset 和 limit 写入 `readFileState`。下一次读取完全相同范围且 mtime 未变时，可以返回 `file_unchanged` stub，避免把同一段内容再次塞进上下文。功能开关 `tengu_read_dedup_killswitch` 默认为 `false`，也就是去重默认启用。
+`fileHistoryMakeSnapshot()` 把 snapshot 保存在内存数组中，并限制最多保留 `MAX_SNAPSHOTS`（当前源码为 100）个；更早的检查点会被截掉。备份 I/O 失败时，源码记录错误，当前工具调用仍可能继续，这意味着某个文件可能有历史记录但没有可用的备份文件。
 
-`Read` 同样先经过 `checkReadPermissionForTool()`。显式 deny 路径在输入校验阶段就会返回错误，危险设备文件也会被拒绝。路径在 cwd 之外时，权限上下文和内部可读路径共同给出 allow、ask 或 deny；只读属性只影响副作用分类，不扩大可读目录。
+`fileHistoryRewind()` 找不到目标 snapshot 会直接失败；`applySnapshot()` 无法解析备份名、备份文件丢失或目标目录无权限时，会记录单文件失败并继续处理其他 tracked file。历史不存在或备份缺失时，系统没有另一个隐含副本可以兜底。
 
-## 本地搜索的边界由 cwd、ignore 和权限共同决定
+## 为什么恢复后可能仍然不是“原样现场”
 
-把三种本地工具放在一起看，可以得到一个更准确的范围公式：
+回滚不是三方合并。`applySnapshot()` 对已有文件先判断它是否与目标备份不同，不同就直接调用 `restoreBackup()` 覆盖目标。于是：
 
-`可见结果 = 搜索根 ∩ pattern/type/glob ∩ ignore 后剩余路径 ∩ 权限可读范围 ∩ 本页与大小限制`
+- 检查点之后用户手工写入的修改可能被覆盖；
+- 另一个进程在恢复过程中继续写入，可能让最终磁盘内容再次偏离备份；
+- 一个文件恢复失败时，其他文件已经完成的恢复不会自动撤销；
+- 新文件删除失败时，它会继续留在工作区。
 
-cwd 只是省略 `path` 时的默认根。显式绝对路径可以指向 cwd 外部，此时会进入 `checkReadPermissionForTool()`：deny 规则优先拒绝，ask 规则要求确认，allow 规则或受认可的内部只读路径才能继续。上一章讨论的权限与沙箱边界，在检索工具这里仍然有效。
+源码通过日志和 `tengu_file_history_rewind_restore_file_failed` 事件记录单文件失败，但没有跨文件补偿事务。`tengu_file_history_rewind_success` 记录的是恢复流程的统计结果，不等于所有目标文件都成功变成检查点内容。
 
-ignore 由多层规则组成：Glob 与 Grep 使用不同的 ripgrep 参数，权限系统还会生成自己的 ignore pattern。因此，排查漏搜时要同时记录工具、cwd、path、环境变量和权限配置。
+## 把“能否回滚”拆成五个问题
 
-排序更不能混为一谈。Glob 的底层列表按修改时间从旧到新；Grep 的 `files_with_matches` 在工具层重排为从新到旧；`content` 和 `count` 则保留 ripgrep 返回顺序再分页。Claude Code 选择这些顺序，是为了让路径发现稳定、让最近修改的命中文件优先进入有限窗口。
+遇到一个具体文件或副作用，可以按这个顺序判断：
 
-## WebSearch 找候选来源，不直接抓页面
+1. **它是文件系统状态吗？** 网络、数据库、进程和消息发送先排除在外。
+2. **修改是否进入了 `fileHistoryTrackEdit()`？** 只看“文件被改过”不够。
+3. **目标 `messageId` 是否仍有 snapshot？** 最多 100 个 snapshot 的保留边界要考虑。
+4. **该 snapshot 是否有对应 backup？** `null` 表示当时不存在，不是备份文件损坏。
+5. **批量恢复是否每个文件都成功？** 查看 diff 预览、日志和失败事件，不能只看总流程返回。
 
-`WebSearchTool` 与本地 Grep 的实现差异很大。它构造 Anthropic API 的 `web_search_20250305` server tool，再发起一条独立的模型流。
-
-```ts
-function makeToolSchema(input: Input): BetaWebSearchTool20250305 {
-  return {
-    type: 'web_search_20250305',
-    name: 'web_search',
-    allowed_domains: input.allowed_domains,
-    blocked_domains: input.blocked_domains,
-    max_uses: 8,
-  }
-}
-```
-
-**函数说明：** `makeToolSchema()` 把 Claude Code 的输入转换为服务端 web search schema。`WebSearchTool.call()` 把该 schema 放进 `extraToolSchemas`，再启动一条专用模型流，收集 `server_tool_use`、`web_search_tool_result` 与文本块，最后交给 `makeOutputFromSearchResponse()` 整理。
-
-**参数说明：** `query` 是长度至少为 2 的必填字符串；`allowed_domains` 与 `blocked_domains` 均为 `string[] | undefined`，分别表示只包含指定域名和排除指定域名，域名字符串属于开放输入，静态源码不枚举清单。两个数组都为非空时校验失败；空数组或 `undefined` 不增加对应过滤。`max_uses` 固定为 `8`，指这次服务端工具调用中允许的搜索次数上限。`tools: []` 表示这条二次模型流不加载普通客户端工具，`extraToolSchemas` 只注入当前 web search schema。
-
-**字段说明：** 服务端 schema 的 `type` 固定为 `'web_search_20250305'`，`name` 固定为 `'web_search'`；`allowed_domains` 与 `blocked_domains` 原样取 `input` 对应字段。
-
-具体使用哪个模型受 `tengu_plum_vx3` 控制。该开关在此处的默认回退是 `false`：假值使用主循环模型和当前 thinking 配置；真值使用 small fast model、禁用 thinking，并强制 `toolChoice` 为 `web_search`。
-
-搜索流到达时，工具会持续发出 `query_update` 和 `search_results_received` 进度事件。最终输出只保留搜索文本以及每条命中的 `title`、`url`；错误块会转成 `Web search error: <error_code>`。映射成 `tool_result` 时，末尾还会提醒主模型在最终回答中用 Markdown 链接列出来源。
-
-`allowed_domains` 只负责结果过滤。搜索结果的标题、摘要和链接来自外部服务与页面，仍可能过时、错误或带有恶意内容。`WebSearchTool` 提供候选来源，事实校验由主模型通过来源比较与清楚引用完成。
-
-工具是否出现还取决于 provider 与模型。2.1.88 的 `isEnabled()` 对 first-party 和 Foundry 返回 `true`，Vertex 仅对源码列出的 Claude 4 系列名称返回 `true`，其他 provider 返回 `false`。这只是客户端启用条件，不代表当前账号、地区、网络和服务端一定可用。
-
-## WebFetch 把指定 URL 变成与问题相关的内容
-
-拿到链接后，`WebFetchTool` 才负责抓页面。它的输入只有 `url` 和 `prompt`：前者告诉工具去哪里，后者告诉二次模型从页面里提取什么。`prompt` 必填，工具始终按提取要求处理页面。
-
-```ts
-const isPreapproved = isPreapprovedUrl(url)
-
-let result: string
-if (
-  isPreapproved &&
-  contentType.includes('text/markdown') &&
-  content.length < MAX_MARKDOWN_LENGTH
-) {
-  result = content
-} else {
-  result = await applyPromptToMarkdown(
-    prompt,
-    content,
-    abortController.signal,
-    isNonInteractiveSession,
-    isPreapproved,
-  )
-}
-```
-
-**函数说明：** `WebFetchTool.call()` 先让 `getURLMarkdownContent()` 完成 URL 校验、域名预检、HTTP 请求、重定向控制、内容转换与缓存；只有预批准域名返回的小型 Markdown 才直接返回原文，其余内容交给 `applyPromptToMarkdown()` 使用 small fast model 提取。
-
-**参数说明：** `url` 是必填、可被 `URL` 解析的完整字符串；`prompt` 是必填开放字符串，用来描述要提取的信息。`abortController.signal` 同时控制网络请求与二次模型请求。`isNonInteractiveSession` 是布尔值，透传给二次模型调用；它不改变页面内容本身。`MAX_MARKDOWN_LENGTH` 固定为 100,000 字符，超过时只把前 100,000 字符和截断提示交给二次模型。
-
-这里有四道网络边界。
-
-第一道是 URL。`validateURL()` 拒绝超过 2,000 字符、带 username/password、无法解析或 hostname 少于两个点分段的地址；HTTP 会在请求前升级为 HTTPS。
-
-第二道是域名权限。预批准 host 可以直接 allow；其他域名把权限规则写成 `domain:<hostname>`，依次检查 deny、ask、allow，规则未命中时默认 ask。每个重定向目标仍需独立授权。
-
-第三道是域名预检。`skipWebFetchPreflight` 为 `false` 或 `undefined` 时，会向 Anthropic 的 domain info 接口查询是否允许抓取，超时为 10 秒；值为 `true` 时跳过这一步，源码注释把它定位为受限企业网络的选项。跳过预检只省略这次检查，不会关闭工具权限、HTTP 限制或代理出口策略。
-
-第四道是实际请求。单次 fetch 超时 60 秒，响应上限 10 MB，同 host 或仅增删 `www` 的同协议、同端口重定向最多跟随 10 跳。跳到不同 host 时，工具返回 redirect 信息，让模型使用新 URL 再发起一次 WebFetch，从而重新经过目标域名权限。出口代理如果以 `403` 和 `X-Proxy-Error: blocked-by-allowlist` 拒绝，会抛出带域名的 `EGRESS_BLOCKED` 错误。
-
-响应内容也不会原样无条件回流。HTML 通过 Turndown 转为 Markdown；二进制内容会尝试持久化到磁盘，并在结果中附上保存路径；URL 内容缓存使用 15 分钟 TTL 和 50 MB 总量，域名允许预检另有 5 分钟缓存。对于未预批准域名，二次模型 prompt 还限制单一来源逐字引用不超过 125 个字符。这里的 `prompt` 是“从已经抓到的内容里提取什么”，不能让工具绕过认证：源码的工具说明明确提示，私有或需要登录的 URL 会失败，应优先使用具备认证能力的 MCP 工具。
-
-外部页面必须按不可信输入处理。域名 allow、HTTPS、blocklist 和重定向检查只决定连接资格；页面事实与 prompt injection 仍需独立判断。`applyPromptToMarkdown()` 会把页面 Markdown 与提取要求一起交给二次模型；静态源码只显示连接与提取流程，未提供通用 sanitizer 保证。因此，页面返回的命令、配置建议和事实仍要由主 Agent 结合用户任务、权限规则与其他证据判断。
-
-## 失败必须作为独立状态回到 Agent
-
-五种工具最终都要回到同一套工具执行生命周期。`restored-src/src/services/tools/toolExecution.ts` 的 `checkPermissionsAndCallTool()` 在调用成功后执行工具自己的 `mapToolResultToToolResultBlockParam()`；`restored-src/src/utils/toolResultStorage.ts` 的 `processToolResultBlock()` 还会对过大的普通文本结果执行持久化处理。得到的块形如：
-
-```ts
-return {
-  tool_use_id: toolUseID,
-  type: 'tool_result',
-  content: result,
-}
-```
-
-**函数说明：** 片段是 `WebFetchTool.mapToolResultToToolResultBlockParam()` 的完整返回结构。Glob、Grep、Read 与 WebSearch 也实现同名映射函数，把各自内部输出转换成 Anthropic 消息协议里的 `tool_result`。共享执行器随后把它追加为用户侧工具结果消息，query loop 才能基于这次观察继续推理。
-
-**参数说明：** `toolUseID` 是当前 `tool_use` 的开放字符串标识，必须原样关联请求与结果；`result` 根据工具而变化，可能是文件列表、带行号文本、搜索链接、网页提取结果或结构化内容。失败路径不会都进入这个成功片段：权限拒绝、验证错误、取消、网络错误和执行异常会由共享执行器生成对应的错误结果或终止事件。
-
-**字段说明：** `tool_use_id` 原样取 `toolUseID`，`type` 固定为 `'tool_result'`，`content` 原样取 `result`。
-
-不同工具对“空”与“失败”做了有意区分：
-
-- Glob 的空数组映射成 `No files found`，截断时追加更具体的 path/pattern 提示。
-- Grep 的退出码 1 才映射成空匹配；无结果、分页信息和 count 摘要进入不同文案。
-- Read 对空文件和 offset 超过文件长度给出不同 system reminder；文件不存在会尝试建议 cwd 下的相似路径。
-- WebSearch 把服务端错误码保留在结果数组中；链接数组为空与调用失败使用不同状态。
-- WebFetch 的无效 URL、域名拒绝、预检失败、超时、出口代理拦截和取消都会抛错；二次模型返回空内容时才回退为 `No response from model`。
-
-主模型拿到 `tool_result` 后，可以缩小 pattern、翻到下一页、读取另一个范围、改用其他来源，或者向用户说明当前边界。这里才是分层搜索真正闭环的地方：工具负责产生可解释的观察，query loop 负责决定下一步。
+这五问把“无法回滚”从一句模糊的产品印象，落到了追踪集合、备份版本和具体副作用上。
 
 ## 小结
 
-Claude Code 的检索能力可以概括成三条原则。
+Claude Code 的 rewind 能回滚的是“文件历史在某个消息检查点上记录的文件版本”：包括被追踪文件的内容、备份权限，以及目标点不存在的新文件删除动作。它不能回滚对话与模型上下文、命令带来的网络和数据库副作用、未追踪路径、目录和环境状态，也不能突破历史保留、备份 I/O 和逐文件失败的边界。
 
-第一，先缩范围，再读内容。Glob 发现路径，Grep 定位命中，Read 读取确定片段；WebSearch 发现来源，WebFetch 提取指定页面。工具之间允许跳步，但职责边界清楚。
-
-第二，限制本身也是结果。100 个路径、250 条 grep 结果、Read 的字节/token 上限、WebSearch 的 8 次搜索和 WebFetch 的 100,000 字符，都必须连同截断、offset 或错误状态一起解释。空结果从来只对本次搜索窗口成立。
-
-第三，搜索范围由运行环境决定。cwd、ignore、权限、provider、域名规则、代理和网络状态都会改变可见结果。
-
-从 query loop 的角度看，检索工具的共同价值只有一个：把一个过大的未知空间，压缩成下一轮模型可以继续判断的观察结果。
+最重要的一句话是：**rewind 是文件历史恢复，不是世界状态回滚。** 把它当作 best-effort 的多文件恢复工具，才不会在看到“成功”提示后误以为所有外部状态都已经回到过去。
 
 ## 留给下一篇的问题
 
-搜索结果和项目文件找齐以后，Claude Code 如何把 CLAUDE.md、cwd、git 状态、工具与用户配置组装成 system prompt 和本轮上下文？
+当同一个文件跨多个用户消息反复修改时，版本号与最新 snapshot 如何决定实际恢复哪一份备份？
 
 ## 参考资料
 
-- [Claude Code 工具参考](https://code.claude.com/docs/en/tools-reference)
+- `restored-src/src/utils/fileHistory.ts`
 
-- [Claude Code 上下文窗口](https://code.claude.com/docs/en/context-window)
+- `restored-src/src/tools/FileEditTool/FileEditTool.ts`
+
+- `restored-src/src/tools/FileWriteTool/FileWriteTool.ts`
+
+- `restored-src/src/tools/NotebookEditTool/NotebookEditTool.ts`
+
+- `restored-src/src/tools/BashTool/BashTool.tsx`
