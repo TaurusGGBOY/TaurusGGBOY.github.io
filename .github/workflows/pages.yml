@@ -17,6 +17,16 @@ concurrency:
 jobs:
   build:
     runs-on: [self-hosted, Linux, X64, aliyun]
+    env:
+      # The runner's IPv6 path is unavailable and registry.npmjs.org is unstable
+      # from this network. Keep the workaround scoped to this build job.
+      NODE_OPTIONS: --dns-result-order=ipv4first
+      npm_config_registry: https://registry.npmmirror.com/
+      npm_config_fetch_retries: "5"
+      npm_config_fetch_retry_factor: "2"
+      npm_config_fetch_retry_mintimeout: "2000"
+      npm_config_fetch_retry_maxtimeout: "15000"
+      npm_config_fetch_timeout: "120000"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,7 +44,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --prefer-offline
 
       - name: Check
         run: pnpm check
@@ -48,8 +58,17 @@ jobs:
       - name: Verify dist artifact
         run: pnpm verify:dist
 
-      - name: Install Chromium
-        run: pnpm exec playwright install chromium
+      - name: Ensure Chromium is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(pnpm exec playwright install --dry-run chromium | awk -F': ' '/Install location:/ { path=$2; sub(/^[[:space:]]+/, "", path); sub(/[[:space:]]+$/, "", path); print path; exit }')"
+          if [[ -n "${expected}" && -d "${expected}" ]]; then
+            echo "Reusing preinstalled Chromium at ${expected}"
+          else
+            echo "Chromium is missing; installing it once"
+            pnpm exec playwright install chromium
+          fi
 
       - name: End-to-end smoke tests
         run: pnpm exec playwright test --workers=1
