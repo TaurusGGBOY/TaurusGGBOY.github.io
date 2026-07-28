@@ -473,6 +473,36 @@ Tool orchestration 在保持副作用顺序的前提下，释放工具明确声�
 
 `WebSearch` 是 Claude Code 的内置网络检索工具。它接收查询词，还可以用 `allowed_domains` 或 `blocked_domains` 限定结果来源；真正执行时，会再发起一轮带服务端 `web_search` 工具的模型请求。
 
+这里还要先把 `validateInput` 说清楚。它既不发起搜索，也不决定调用属于哪个并发批次。分组阶段会先从当前工具池查找工具，再通过 `inputSchema.safeParse` 和 `isConcurrencySafe` 判断并发安全性；等单工具执行器 `checkPermissionsAndCallTool` 接手以后，它会重新运行一次 `safeParse`，通过后才在 PreToolUse、权限判断和 `tool.call` 之前调用 `WebSearchTool.validateInput()`：
+
+```ts
+async validateInput(input) {
+  const { query, allowed_domains, blocked_domains } = input
+  if (!query.length) {
+    return {
+      result: false,
+      message: 'Error: Missing query',
+      errorCode: 1,
+    }
+  }
+  if (allowed_domains?.length && blocked_domains?.length) {
+    return {
+      result: false,
+      message:
+        'Error: Cannot specify both allowed_domains and blocked_domains in the same request',
+      errorCode: 2,
+    }
+  }
+  return { result: true }
+}
+```
+
+这段函数只做两项值级检查：`query` 长度为 `0` 时返回错误码 `1`；`allowed_domains` 与 `blocked_domains` 同时为非空数组时返回错误码 `2`。两个域名参数都可以是 `undefined` 或空数组，也可以只让其中一个非空；函数不会继续校验数组内字符串是不是合法域名。
+
+标准执行路径还有一个细节：`WebSearch` 的 `inputSchema` 已经要求 `query` 是长度至少为 `2` 的字符串，所以空字符串和单字符查询会先被 `safeParse` 拒绝，在这条路径里不会到达 `!query.length` 分支。相比之下，“两个域名数组同时非空”符合 Schema 的结构要求，只会在 `validateInput` 这一层被拒绝。
+
+一旦返回 `{ result: false }`，执行器会生成 `is_error: true` 的 `tool_result` 并结束这次调用，不再进入 PreToolUse、权限判断或 `tool.call`，因此也不会发起网络请求。也就是说，“调度时被判定为并发安全”和“最终通过值校验并真正搜索”是两件事。
+
 **你认为 `WebSearch` 在任何情况下都可以并发执行吗？**
 
 ## 参考资料
