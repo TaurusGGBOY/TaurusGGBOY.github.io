@@ -10,6 +10,41 @@ image: "/images/posts/claude-code-source-reading-12/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 回答上一篇的问题
+
+上一篇留下的问题是：**如果任务要求识别一张其内容超过当前上下文容量的图片，这次 `tool_use` 会不会失败、又会在哪一层失败？**
+
+先给结论：**不一定，而且即使最终失败，也不一定是这次 `tool_use` 本身失败。要先区分 Read 的单图预算、图片硬限制和整段对话的上下文窗口。**
+
+当模型调用 `Read` 读取图片时，`FileReadTool.validateInput` 并不检查图片能否装进当前上下文。Schema、`validateInput`、PreToolUse 和权限都通过以后，程序才在 `tool.call` 内进入 `readImageWithTokenBudget()`：
+
+```ts
+const data = await readImageWithTokenBudget(resolvedFilePath, maxTokens)
+
+// readImageWithTokenBudget 内部
+const estimatedTokens = Math.ceil(result.file.base64.length * 0.125)
+if (estimatedTokens > maxTokens) {
+  const compressed = await compressImageBufferWithTokenLimit(
+    imageBuffer,
+    maxTokens,
+    detectedMediaType,
+  )
+  // ... 返回压缩后的 image 结果
+}
+```
+
+`maxTokens` 优先读取 `ToolUseContext.fileReadingLimits?.maxTokens`，否则使用默认读取上限；2.1.88 的硬编码默认值是 `25000`，还可能被正数环境变量或功能配置覆盖。这个值是 **Read 单次输出预算**，不是根据“当前上下文还剩多少 token”动态计算的余额。代码会先做常规缩放与降采样；处理后的图片结果仍超过该预算时，才尝试按 token 上限压缩。该压缩抛错后还有 `400 × 400`、JPEG quality `20` 的兜底；兜底也异常时，源码会记录错误并退回原图。因此这个预算是尽力约束，“压缩失败”本身不等于工具调用失败，真正的拒绝可能延后到模型请求。
+
+第一种真正的失败发生在 `tool.call` 内。空图片会让 `readImageWithTokenBudget()` 直接抛错，未被内部兜底的读取异常也会向外传播。`maybeResizeAndDownsampleImageBuffer()` 的异常分支还会判断原图能否安全直通：base64 估算超过 5 MB，或者从 PNG 文件头识别到尺寸超过 `2000 × 2000` 时，会抛出 `ImageResizeError`；其他普通处理异常在满足直通条件时可以退回原图。外层执行器把最终向外抛出的异常规范化成 `is_error: true` 的 `tool_result`。这时失败已经越过权限边界，属于工具执行失败，不是 Schema、`validateInput` 或权限失败。
+
+第二种情况才是问题里说的“超过当前上下文”。如果 Read 已经成功，`mapToolResultToToolResultBlockParam()` 会把 base64 图片映射成带原 `tool_use_id` 的 `tool_result`。随后 query loop 才把历史消息、assistant 的 `tool_use` 和这份图片结果拼起来，发起下一轮模型请求。若它们的总量超过上下文窗口，**这次 Read `tool_use` 已经成功；失败点在下一轮模型请求的上下文检查或 Claude API 响应，而不是工具执行链。**
+
+在本轮没有现成压缩结果，且 reactive compact / context collapse 没有接管恢复等条件同时成立时，本地 blocking-limit 预检可以在请求前生成内容为 `Prompt is too long` 的 assistant 错误消息，并以 `blocking_limit` 结束。请求已经发出时，API 也可能返回 `prompt is too long` 或图片媒体限制错误。启用相应功能后，API prompt-too-long 可以先尝试 context collapse，再尝试 reactive compact；媒体限制错误则跳过 collapse，交给 reactive compact 的 strip-retry。可见的常规摘要流路径会用 `stripImagesFromMessages()` 把图片 / 文档块替换成 `[image]` / `[document]`，但 reactive compact 模块本体没有出现在还原源码中，不能断言每条构建路径都会这样处理。恢复成功就不会把错误暴露为最终失败；恢复仍失败，API 上下文错误才以 `prompt_too_long` 结束，媒体错误则以 `image_error` 结束。
+
+所以最准确的回答是：**大图通常先被处理；空文件、未兜底的读取异常或 `ImageResizeError` 会在 `tool.call` 内失败，token-budget 压缩异常却可能只退回原图；Read 成功后才让总上下文超限，错误发生在下一轮模型请求，而且 query loop 还可能先自动恢复。权限 allow 只表示允许尝试工具，不保证工具产出的内容一定能被下一轮模型完整接收。**
+
+这个例子先划清了失败边界。接下来回到本章主题：在抵达 `tool.call` 之前，权限引擎怎样决定一次调用能不能越过这条边界？
+
 ## 本章先建立三个概念
 
 - **策略优先级格**：deny、ask、allow 及来源优先级共同形成有序决策，而非单一布尔开关。
@@ -22,21 +57,13 @@ imagePosition: "left"
 
 这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
 
-## 回答上一篇的问题
-
-上一篇留下的问题是：工具在真正产生副作用前，权限引擎怎样把规则、模式、Hook 和用户/宿主响应合并成 `allow`、`ask` 或 `deny`？
-
-先说答案：**这些来源按一条有明确阻断顺序的流水线合并，deny、ask、工具检查和 allow 各有固定位置。**
-
-模型输入先经过 Schema 和工具业务校验，随后运行 `PreToolUse` Hook。Hook 可以拒绝、要求询问或改写输入；其 `allow` 结果仍要继续经过 deny、ask、路径/命令约束和 bypass-immune safety check。
-
-前置检查通过后，permission mode 和 allow 规则才可能产出 `allow`。结果仍为 `ask` 时，`canUseTool` 把决定交给交互式 REPL、SDK 宿主或自定义 permission prompt tool；宿主可以允许、拒绝、修改输入或提交权限更新。只有最终 `allow` 抵达 `tool.call()`，缺少交互者的 ask 路径会收口为拒绝结果。
-
-所以这条链路可以先记成一句话：**先让强约束阻断，再让模式与规则放行，最后才把无法自动决定的部分交给人或宿主。**
-
 ## 权限引擎逐次判断具体工具输入
 
 本文仍然只讨论 `@anthropic-ai/claude-code@2.1.88` source map 还原出的可见源码。还原目录便于追踪符号和调用关系，但不能视为 Anthropic 内部仓库的原始目录，也不能把功能开关后的分支当成所有用户都会运行的默认行为。
+
+先说本章主线：**规则、模式、Hook 和宿主响应按一条有明确阻断顺序的流水线合并，deny、ask、工具检查和 allow 各有固定位置。** 模型输入先经过 Schema 和工具业务校验，随后运行 `PreToolUse` Hook。Hook 可以拒绝、要求询问或改写输入；其 `allow` 结果仍要继续经过 deny、ask、路径 / 命令约束和 bypass-immune safety check。前置检查通过后，permission mode 和 allow 规则才可能产出 `allow`；仍为 `ask` 时，`canUseTool` 再把决定交给交互式 REPL、SDK 宿主或自定义 permission prompt tool。
+
+所以这条链路可以先记成一句话：**先让强约束阻断，再让模式与规则放行，最后才把无法自动决定的部分交给人或宿主。**
 
 权限判断的输入至少包含四样东西：工具、这一次的输入、当前 `ToolPermissionContext`，以及能够承接询问的 `canUseTool`。因此，同一个 Bash 工具执行 `git status` 和执行发布命令，或者同一个 Edit 工具写项目文件和写 `.claude/settings.json`，都可能得到不同结果。
 

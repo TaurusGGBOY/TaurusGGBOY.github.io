@@ -168,6 +168,43 @@ function partitionToolCalls(
 
 这意味着无效输入不会因为“看起来像读取命令”而提前并发执行。真正的输入校验和错误结果会在单工具执行阶段完成；这里的 `safeParse` 只是调度前的保守分类。
 
+## 调度阶段的 safeParse 不等于执行阶段的 validateInput
+
+这里正好可以把通用工具契约里的 `validateInput` 说清楚。
+
+`inputSchema.safeParse` 先执行工具声明的静态 Schema 约束：除了必填字段、类型和对象结构，也包括 Schema 已声明的长度、数值范围、正则或 refine。可选的 `validateInput` 是第二道工具自定义语义校验，负责回答“这组已经解析成功的值，在当前运行上下文里能不能继续”：它可以检查跨字段关系、路径规则、运行时状态，也可以补充没有写进 Schema 的纯值规则。例如 `FileReadTool.validateInput` 会检查 PDF 页码范围、路径 deny 规则、不能读取的二进制扩展名和特殊设备路径。
+
+`restored-src/src/Tool.ts` 把它定义成一个可选异步方法。下面合并展示 `ValidationResult` 与 `Tool` 中的相关片段，二者之间省略了其他字段：
+
+```ts
+export type ValidationResult =
+  | { result: true }
+  | {
+      result: false
+      message: string
+      errorCode: number
+    }
+
+// Tool<Input, Output> 契约中的可选方法
+validateInput?(
+  input: z.infer<Input>,
+  context: ToolUseContext,
+): Promise<ValidationResult>
+```
+
+第一个参数 `input` 已经通过该工具的 Schema，类型由 `Input` 推导；第二个参数 `context` 是当前 `ToolUseContext`，因此校验可以读取运行时状态。返回值只有两个分支：成功必须是 `{ result: true }`；失败必须同时给出 `message: string` 和 `errorCode: number`。通用接口没有规定错误码枚举，具体数字及含义由各工具实现，静态源码无法统一穷举。
+
+可选的是方法本身，而不是失败字段。工具没有实现 `validateInput` 时，执行器的可选链得到 `undefined` 并继续向下，不会凭空补出 `{ result: true }`。实现了该方法时，只有显式返回 `result === false` 才会拦住调用：`message` 进入调试日志、分析事件和带原 `tool_use_id` 的 `is_error: true` 工具结果；`errorCode` 只作为 `tengu_tool_use_error` 分析事件的字段记录。随后不会再运行 PreToolUse、权限判断或 `tool.call`。
+
+于是两条顺序应该分开记：
+
+```text
+调度分组：safeParse → isConcurrencySafe
+单次执行：重新 safeParse → validateInput（若有）→ PreToolUse → 权限决策 → tool.call
+```
+
+`partitionToolCalls` 不会调用 `validateInput`。一次调用可以先被归入并发安全批次，随后在自己的执行链里因值级或上下文校验失败；这只说明它获得了怎样的调度位置，不代表它已经越过校验并真正执行。
+
 ## isReadOnly 与 isConcurrencySafe 分别描述副作用和调度
 
 “只读”通常意味着“适合并发”，但源码把它们保留成两个能力。以 Bash 工具为例：
@@ -461,7 +498,7 @@ state = next
 
 多个工具调用的调度可以压缩成五条规则：
 
-1. 先解析本次输入，再调用工具的 `isConcurrencySafe(input)`；找不到工具、解析失败或判断异常都按不安全处理。
+1. 调度阶段先解析本次输入，再调用工具的 `isConcurrencySafe(input)`；找不到工具、解析失败或判断异常都按不安全处理，`validateInput` 留到单次执行阶段。
 2. 只合并相邻的安全调用，不跨越任何不安全调用重排。
 3. 安全批次受并发上限约束，默认上限是 10；不安全调用各自形成串行屏障。
 4. progress 和结果按完成速度流出，但并发产生的上下文修改在批次结束后按原 `tool_use` 顺序应用。
@@ -472,36 +509,6 @@ Tool orchestration 在保持副作用顺序的前提下，释放工具明确声�
 ## 留给下一篇的问题
 
 `WebSearch` 是 Claude Code 的内置网络检索工具。它接收查询词，还可以用 `allowed_domains` 或 `blocked_domains` 限定结果来源；真正执行时，会再发起一轮带服务端 `web_search` 工具的模型请求。
-
-这里还要先把 `validateInput` 说清楚。它既不发起搜索，也不决定调用属于哪个并发批次。分组阶段会先从当前工具池查找工具，再通过 `inputSchema.safeParse` 和 `isConcurrencySafe` 判断并发安全性；等单工具执行器 `checkPermissionsAndCallTool` 接手以后，它会重新运行一次 `safeParse`，通过后才在 PreToolUse、权限判断和 `tool.call` 之前调用 `WebSearchTool.validateInput()`：
-
-```ts
-async validateInput(input) {
-  const { query, allowed_domains, blocked_domains } = input
-  if (!query.length) {
-    return {
-      result: false,
-      message: 'Error: Missing query',
-      errorCode: 1,
-    }
-  }
-  if (allowed_domains?.length && blocked_domains?.length) {
-    return {
-      result: false,
-      message:
-        'Error: Cannot specify both allowed_domains and blocked_domains in the same request',
-      errorCode: 2,
-    }
-  }
-  return { result: true }
-}
-```
-
-这段函数只做两项值级检查：`query` 长度为 `0` 时返回错误码 `1`；`allowed_domains` 与 `blocked_domains` 同时为非空数组时返回错误码 `2`。两个域名参数都可以是 `undefined` 或空数组，也可以只让其中一个非空；函数不会继续校验数组内字符串是不是合法域名。
-
-标准执行路径还有一个细节：`WebSearch` 的 `inputSchema` 已经要求 `query` 是长度至少为 `2` 的字符串，所以空字符串和单字符查询会先被 `safeParse` 拒绝，在这条路径里不会到达 `!query.length` 分支。相比之下，“两个域名数组同时非空”符合 Schema 的结构要求，只会在 `validateInput` 这一层被拒绝。
-
-一旦返回 `{ result: false }`，执行器会生成 `is_error: true` 的 `tool_result` 并结束这次调用，不再进入 PreToolUse、权限判断或 `tool.call`，因此也不会发起网络请求。也就是说，“调度时被判定为并发安全”和“最终通过值校验并真正搜索”是两件事。
 
 **你认为 `WebSearch` 在任何情况下都可以并发执行吗？**
 
