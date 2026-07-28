@@ -17,6 +17,9 @@ concurrency:
 jobs:
   build:
     runs-on: [self-hosted, Linux, X64, aliyun]
+    defaults:
+      run:
+        working-directory: site
     env:
       # The runner's IPv6 path is unavailable and registry.npmjs.org is unstable
       # from this network. Keep the workaround scoped to this build job.
@@ -31,8 +34,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # The persistent runner keeps a dependency tree whose historical
-          # ownership may prevent `git clean -ffdx` from removing it.
+          # Isolate this checkout from the runner's legacy root workspace,
+          # which contains a dependency tree with incompatible ownership.
+          path: site
           clean: false
 
       - name: Setup pnpm
@@ -46,6 +50,7 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
@@ -80,7 +85,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: site/dist
 
   deploy:
     environment:
