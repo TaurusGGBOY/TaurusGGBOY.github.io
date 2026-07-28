@@ -9,18 +9,6 @@ image: "/images/posts/claude-code-source-reading-10/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **冲突域**：两次调用是否可并发取决于它们访问的资源与副作用范围，而非工具名称本身。
-
-- **可交换性**：执行顺序变化仍产生等价结果的调用具备并行基础。
-
-- **稳定合并**：执行可以按完成速度流出，回填模型上下文时仍按原始调用顺序配对。
-
-![工具调用如何按冲突域组成并发批次](/images/posts/claude-code-source-reading-10/10-conflict-batches-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：**你知道 Claude Code 自带哪些 tool 吗？**
@@ -95,6 +83,18 @@ return allowedTools.filter((_, i) => isEnabled[i])
 `permissionContext` 包含权限模式和规则。`CLAUDE_CODE_SIMPLE` 会走特殊分支：普通情况下只保留 `Bash`、`Read`、`Edit`；REPL 模式同时生效时可能只把 `REPLTool` 暴露给模型，原语工具由 REPL 内部间接使用。
 
 因此，后面讨论的 `tool_use` 调度直接读取当前会话筛选完成的 `toolUseContext.options.tools`。同一个 `Read` 是否存在、同一个工具是否启用，都会影响模型能否调用它，以及调度器后面能否找到它。
+
+## 本章先建立三个概念
+
+- **冲突域**：两次调用是否可并发取决于它们访问的资源与副作用范围，而非工具名称本身。
+
+- **可交换性**：执行顺序变化仍产生等价结果的调用具备并行基础。
+
+- **稳定合并**：执行可以按完成速度流出，回填模型上下文时仍按原始调用顺序配对。
+
+![工具调用如何按冲突域组成并发批次](/images/posts/claude-code-source-reading-10/10-conflict-batches-detail-handdrawn.png)
+
+这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
 
 ## 回到多个 tool_use：它们怎样串并行
 
@@ -471,7 +471,9 @@ Tool orchestration 在保持副作用顺序的前提下，释放工具明确声�
 
 ## 留给下一篇的问题
 
-一个工具被选中以后，它如何依次经过输入校验、权限检查、实际调用、结果转换与持久化？
+`WebSearch` 是 Claude Code 的内置网络检索工具。它接收查询词，还可以用 `allowed_domains` 或 `blocked_domains` 限定结果来源；真正执行时，会再发起一轮带服务端 `web_search` 工具的模型请求。
+
+**你认为 `WebSearch` 在任何情况下都可以并发执行吗？**
 
 ## 参考资料
 

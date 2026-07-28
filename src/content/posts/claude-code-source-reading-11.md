@@ -10,6 +10,33 @@ image: "/images/posts/claude-code-source-reading-11/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 回答上一篇的问题
+
+上一篇留下的问题是：**你认为 `WebSearch` 在任何情况下都可以并发执行吗？**
+
+这个问题要分成“工具怎样声明”和“调用是否真的同时运行”两层看。
+
+先看工具声明。`restored-src/src/tools/WebSearchTool/WebSearchTool.ts` 中的 `WebSearchTool` 没有根据输入继续分支，而是把两个能力都固定为 `true`：
+
+```ts
+isConcurrencySafe() {
+  return true
+},
+isReadOnly() {
+  return true
+},
+```
+
+这意味着，只要调度器能在当前工具池里找到 `WebSearch`，并且输入通过 Zod 结构校验，这次调用就会被标记为并发安全。它的 `query` 必须是至少 2 个字符的字符串；`allowed_domains` 和 `blocked_domains` 都是可选字符串数组，分别表示只保留和排除哪些域名，省略时不施加对应限制。
+
+但“并发安全”不等于“无条件并发执行”。`partitionToolCalls` 只会合并同一次模型响应里相邻的安全调用；不安全调用会形成串行屏障，安全批次还受 `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY` 的槽位上限约束。单个安全调用没有并行对象，上限设为 `1` 时批内调用也不会重叠。找不到工具、结构校验失败，或者并发判断抛错时，这次调用也会先按不安全处理。
+
+还有一层更容易忽略：分组发生在完整执行生命周期之前。`allowed_domains` 和 `blocked_domains` 同时为非空数组时，输入仍能通过结构校验，也会被归入安全批次，但后面的 `validateInput` 会拒绝它。进入批次的 `WebSearch` 还要继续经过 `validateInput`、PreToolUse 和权限决策；只有这些前置关卡放行并真正进入 `tool.call`，才会发起那轮模型请求。
+
+所以准确答案是：**当前源码中的 `WebSearch` 对所有结构合法的输入都声明并发安全，但这不保证每一次调用都会在运行时与其他调用并发，更不保证它一定越过校验和权限进入网络请求。**
+
+下面就沿单个工具调用继续看：它完成调度后，还要经过哪些关卡。
+
 ## 本章先建立三个概念
 
 - **副作用边界**：`tool.call` 之前的步骤负责解释与授权，越过边界后外部世界可能已经改变。
@@ -21,18 +48,6 @@ imagePosition: "left"
 ![工具生命周期中的副作用边界与执行证据](/images/posts/claude-code-source-reading-11/11-side-effect-boundary-detail-handdrawn.png)
 
 这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
-## 回答上一篇的问题
-
-上一篇留下的问题是：一个工具被选中以后，它如何依次经过输入校验、权限检查、实际调用、结果转换与持久化？
-
-先说结论：一次工具调用是一条带多道提前出口的执行流水线，`tool.call(input)` 只位于副作用边界之后。
-
-模型返回的 `tool_use` 先由 `runToolUse` 查找工具。找到以后，`checkPermissionsAndCallTool` 先做 Zod 结构校验，再调用工具自己的 `validateInput` 做语义校验；随后运行 `PreToolUse` Hook，并把 Hook 的意见、权限规则和宿主响应收敛成权限决策。只有最终结果为 `allow`，程序才会越过副作用边界，真正调用 `tool.call`。
-
-调用过程中产生的 progress 主要用于实时反馈；调用结束后，原始返回值会经过工具自己的映射函数变成 `tool_result`。结果过大时，正文会另存到 session 的 `tool-results/` 目录，消息中只保留路径和预览。最后，用户消息形式的 `tool_result` 随消息链写入 transcript JSONL。对于 Edit、Write 这类文件工具，文件历史备份、实际写盘和 `readFileState` 更新则发生在 `tool.call` 内部。
-
-这条链上至少有三种完成状态：工具代码执行完成、模型可见结果构造完成、会话记录持久化完成。排障时必须分别确认。
 
 ## 先画出一条工具执行流水线
 
