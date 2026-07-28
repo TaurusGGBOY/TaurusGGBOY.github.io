@@ -1,7 +1,7 @@
 ---
-title: "Claude Code源码解读16：项目上下文如何组装并注入"
+title: "Claude Code源码解读16：WebSearch 到底用哪个模型"
 published: 2026-07-24T16:47:03+08:00
-updated: 2026-07-24T16:47:03+08:00
+updated: 2026-07-28T18:00:00+08:00
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -10,409 +10,203 @@ image: "/images/posts/claude-code-source-reading-16/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **上下文平面**：system prompt、项目指令与消息历史通过不同通道进入同一次模型请求。
-
-- **提示词分层**：稳定规则、动态环境和任务消息按更新频率分层，便于复用与定位来源。
-
-- **缓存边界**：前缀顺序和内容变化决定 prompt cache 的命中范围，分块结构直接影响成本。
-
-![系统提示词、项目上下文与消息历史三条通道](/images/posts/claude-code-source-reading-16/16-context-planes-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
-上一篇最后留下的问题是：搜索结果和项目文件找齐以后，Claude Code 如何把 CLAUDE.md、cwd、git 状态、工具与用户配置组装成 system prompt 和本轮上下文？
+上一篇留下的问题是：你知道 Claude Code 会用你默认的模型进行 WebSearch 吗？
 
-先说结论：它把上下文分成 system prompt、user context 和 system context 三条通道。
+答案不是简单的“是”或“不是”。在当前还原源码里，WebSearch 有一个默认分支和一个功能开关分支：`tengu_plum_vx3` 为假时，搜索流使用当前主循环的 `context.options.mainLoopModel`；为真时，搜索流切到 `getSmallFastModel()`，也就是 `ANTHROPIC_SMALL_FAST_MODEL` 指定的模型，未指定时再回退到默认 Haiku。
 
-第一条是 **system prompt**。固定行为规范、当前模型、cwd、平台、Shell、已启用工具带来的使用指引，以及语言、output style 等设置，会被组装成一个字符串数组。第二条是 **user context**。CLAUDE.md、rules 和当前日期会被包装成一条 `isMeta: true` 的 user message，放到本轮历史最前面。第三条是 **system context**。会话开始时的 git 分支、工作区状态和最近提交，会被追加到 system prompt 尾部。
+因此更准确的说法是：**默认情况下 WebSearch 会沿用当前主循环模型，但它不是永远绑定默认模型；运行时功能开关可以把它切到小而快的模型。** 这两个分支都不是本地离线搜索，最终都通过 `queryModelWithStreaming()` 发起独立的模型请求，并把服务端 `web_search_20250305` 工具注入这条请求。
 
-工具还要单独看。工具名称会影响 system prompt 中的使用说明，但真正的工具描述与输入 Schema 通过 API 的 `tools` 字段传入，并不靠自然语言 prompt 冒充工具契约。
+## 本章先建立三个概念
 
-因此，一次请求的核心形态是：
+- **能力检查**：`isEnabled()` 判断当前 provider 和主循环模型是否支持 WebSearch；它回答“能不能出现这个工具”，不回答“实际搜索用哪个模型”。
 
-```text
-system = 默认行为规范 + 环境信息 + 用户设置 + git 快照
-messages = CLAUDE.md/currentDate 元消息 + 对话历史 + 本轮输入
-tools = 当前工具集合对应的 API Schema
-```
+- **模型选择**：`WebSearchTool.call()` 根据 `tengu_plum_vx3` 选择 `mainLoopModel` 或 `getSmallFastModel()`；选择发生在真正调用工具时。
 
-这段最小模型是本文对三条真实组装路径的概括。`system`、`messages`、`tools` 是最终模型调用中彼此独立的字段；后文会逐条回到还原源码验证它们。
+- **服务端工具**：Claude Code 不在本地实现搜索引擎，而是把 `web_search_20250305` 放进独立模型流的 `extraToolSchemas`，由 API 返回 `server_tool_use` 和搜索结果块。
 
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块都是短摘录，省略了与当前结论无关的日志、埋点和实验分支；还原路径只用于定位本文引用的源码。
+![WebSearch 模型选择的两条执行路径](/images/posts/claude-code-source-reading-16/16-websearch-model-selection-handdrawn.png)
 
-## 一次模型请求，其实有三条上下文通道
+这张图把“是否支持”与“使用哪个模型”拆成两处。后文沿着 `WebSearchTool.isEnabled() → WebSearchTool.call()` 追踪，避免把 capability、模型回退和服务端工具混成一个概念。
 
-我们先把主线画出来。
+本文继续以 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码为边界。下面的片段只保留证明模型分流所需的字段，不是完整源码。
 
-![Claude Code system prompt 与项目上下文组装流程](/images/posts/claude-code-source-reading-16/16-system-prompt-context-handdrawn.png)
+## 第一个误区：isEnabled 不负责选模型
 
-这里先明确三条通道各自承担的协议职责。
-
-**System prompt** 承载稳定的身份、行为边界和环境说明。源码用 `SystemPrompt` 这个品牌类型表示 `readonly string[]`，使稳定前缀、动态区块与缓存边界保持可追踪。
-
-**Message context** 承载对话历史。CLAUDE.md 在这条实现中被包装成 meta user message，通过 `<system-reminder>` 标明其按需使用的上下文属性。
-
-**Tool schema** 是模型能够调用什么工具的机器可读契约，包括名称、描述和输入 JSON Schema。自然语言 prompt 负责使用策略，Schema 负责输入结构，两者分别进入请求。
-
-为什么要分开？最直接的原因是职责不同：稳定 prompt 可以命中缓存，CLAUDE.md 可以作为会话上下文独立注入，工具 Schema 则必须满足 API 的结构化协议。若全部揉成一个字符串，任何 git 状态或工具变化都可能让稳定前缀失去缓存价值，模型也无法得到可靠的输入约束。
-
-## 第一步：先并行准备三份原料
-
-`restored-src/src/utils/queryContext.ts` 的 `fetchSystemPromptParts` 是最清楚的入口：
+`restored-src/src/tools/WebSearchTool/WebSearchTool.ts` 的 `isEnabled()` 首先取得 provider 和 `getMainLoopModel()`：
 
 ```ts
-export async function fetchSystemPromptParts({
-  tools,
-  mainLoopModel,
-  additionalWorkingDirectories,
-  mcpClients,
-  customSystemPrompt,
-}: {
-  tools: Tools
-  mainLoopModel: string
-  additionalWorkingDirectories: string[]
-  mcpClients: MCPServerConnection[]
-  customSystemPrompt: string | undefined
-}): Promise<{
-  defaultSystemPrompt: string[]
-  userContext: { [k: string]: string }
-  systemContext: { [k: string]: string }
-}> {
-  const [defaultSystemPrompt, userContext, systemContext] = await Promise.all([
-    customSystemPrompt !== undefined
-      ? Promise.resolve([])
-      : getSystemPrompt(
-          tools,
-          mainLoopModel,
-          additionalWorkingDirectories,
-          mcpClients,
-        ),
-    getUserContext(),
-    customSystemPrompt !== undefined ? Promise.resolve({}) : getSystemContext(),
-  ])
-  return { defaultSystemPrompt, userContext, systemContext }
-}
-```
-
-`fetchSystemPromptParts` 同时准备默认 prompt、user context 和 system context。`tools` 是本轮可用工具数组；`mainLoopModel` 是主循环模型 ID；`additionalWorkingDirectories` 是额外工作目录，允许空数组；`mcpClients` 是当前 MCP 连接数组，也允许为空。`customSystemPrompt` 只有 `string` 和 `undefined` 两种静态类型：`undefined` 构造 `defaultSystemPrompt` 与 `systemContext`；任意字符串（包括空字符串）都让这两个字段分别返回空数组与空对象。`userContext` 始终读取。
-
-三项使用 `Promise.all` 并行获取，因为它们在这一步彼此独立。返回对象仍按 `defaultSystemPrompt`、`userContext`、`systemContext` 三个命名字段组装，并行只让文件读取、环境探测和 git 查询重叠执行。
-
-这里已经出现第一个重要边界：`customSystemPrompt` 采用替换语义，并让这条 QueryEngine 路径同时跳过默认 system context。调用方若只想补充指令，应该走后面介绍的 `appendSystemPrompt`。
-
-## 第二步：默认 system prompt 先稳定、后动态
-
-默认 prompt 的入口是 `restored-src/src/constants/prompts.ts` 中的 `getSystemPrompt`：
-
-```ts
-export async function getSystemPrompt(
-  tools: Tools,
-  model: string,
-  additionalWorkingDirectories?: string[],
-  mcpClients?: MCPServerConnection[],
-): Promise<string[]> {
-  if (isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE)) {
-    return [
-      `You are Claude Code, Anthropic's official CLI for Claude.\n\nCWD: ${getCwd()}\nDate: ${getSessionStartDate()}`,
-    ]
-  }
-
-  const cwd = getCwd()
-  const [skillToolCommands, outputStyleConfig, envInfo] = await Promise.all([
-    getSkillToolCommands(cwd),
-    getOutputStyleConfig(),
-    computeSimpleEnvInfo(model, additionalWorkingDirectories),
-  ])
-  const settings = getInitialSettings()
-  const enabledTools = new Set(tools.map(_ => _.name))
-```
-
-`getSystemPrompt` 返回 `Promise<string[]>`，每个元素是一块 prompt。`tools` 和 `model` 必填；`additionalWorkingDirectories`、`mcpClients` 都可为 `undefined`，调用方也常传空数组。环境变量 `CLAUDE_CODE_SIMPLE` 经 `isEnvTruthy` 判断为真时，函数直接返回只含身份、cwd 和会话日期的一块简化 prompt，不再执行后续完整组装。
-
-普通路径会并行读取 Skill 命令、output style 和环境信息。`getInitialSettings()` 提供语言等初始设置；`enabledTools` 只保存当前工具名称，用来决定 prompt 里是否出现某些工具使用指引。运行时只读取组装函数需要的配置字段，并据此选择 prompt 分块。
-
-`computeSimpleEnvInfo` 会生成 `# Environment` 区块。它明确写入 primary working directory、是否是 git 仓库、额外工作目录、平台、Shell、OS 版本、模型与知识截止时间等信息。`additionalWorkingDirectories` 为 `undefined` 或空数组时，对应段落不会出现；无法识别知识截止时间时，返回值是 `null`，也会被过滤。
-
-最终数组把静态区块放在前面，动态区块放在后面：
-
-```ts
-return [
-  getSimpleIntroSection(outputStyleConfig),
-  getSimpleSystemSection(),
-  outputStyleConfig === null ||
-  outputStyleConfig.keepCodingInstructions === true
-    ? getSimpleDoingTasksSection()
-    : null,
-  getActionsSection(),
-  getUsingYourToolsSection(enabledTools),
-  getSimpleToneAndStyleSection(),
-  getOutputEfficiencySection(),
-  ...(shouldUseGlobalCacheScope() ? [SYSTEM_PROMPT_DYNAMIC_BOUNDARY] : []),
-  ...resolvedDynamicSections,
-].filter(s => s !== null)
-```
-
-这段 `getSystemPrompt` 返回逻辑中，`outputStyleConfig` 可以是对象或 `null`。`null` 走默认 coding instructions，`keepCodingInstructions === true` 同样保留该区块，明确为 `false` 时跳过。`shouldUseGlobalCacheScope()` 为真才插入动态边界标记。数组最后只过滤严格等于 `null` 的元素，因此空字符串仍会保留并参与后续数组顺序。
-
-工具在这一层只影响 `getUsingYourToolsSection(enabledTools)` 等自然语言区块。例如 Read、Edit、Task 是否可用，会改变给模型的操作建议。实际工具 Schema 仍会在 `callModel` 时通过 `tools` 参数单独传入。这个分工很重要：prompt 解释策略，Schema 约束结构。
-
-## 为什么 prompt 要保留为“分块数组”
-
-动态区块按 section 的缓存属性选择复用或重算。`restored-src/src/constants/systemPromptSections.ts` 定义了两种 section：
-
-```ts
-export function systemPromptSection(
-  name: string,
-  compute: ComputeFn,
-): SystemPromptSection {
-  return { name, compute, cacheBreak: false }
-}
-
-export function DANGEROUS_uncachedSystemPromptSection(
-  name: string,
-  compute: ComputeFn,
-  _reason: string,
-): SystemPromptSection {
-  return { name, compute, cacheBreak: true }
-}
-```
-
-`systemPromptSection` 的 `name` 是缓存键，`compute` 返回 `string | null | Promise<string | null>`，`cacheBreak` 固定为 `false`。`DANGEROUS_uncachedSystemPromptSection` 把 `cacheBreak` 固定为 `true`，第三个 `_reason` 是必须提供的说明字符串，但函数运行时不使用它；它用于迫使调用者解释为什么值得破坏缓存。两个函数的返回联合只包含 `string | null`。
-
-解析时，普通区块优先复用缓存，易变区块重新计算：
-
-```ts
-export async function resolveSystemPromptSections(
-  sections: SystemPromptSection[],
-): Promise<(string | null)[]> {
-  const cache = getSystemPromptSectionCache()
-
-  return Promise.all(
-    sections.map(async s => {
-      if (!s.cacheBreak && cache.has(s.name)) {
-        return cache.get(s.name) ?? null
-      }
-      const value = await s.compute()
-      setSystemPromptSectionCacheEntry(s.name, value)
-      return value
-    }),
-  )
-}
-```
-
-`resolveSystemPromptSections` 的唯一参数 `sections` 是有序的 `SystemPromptSection[]`，返回同顺序的 `string | null` 数组。`cacheBreak: false` 且缓存已有名字时，直接复用；缓存值为 `undefined` 时通过 `?? null` 回退。`cacheBreak: true` 会每次执行 `compute()`，随后仍把结果写入缓存，但下一次不会读取这份缓存。
-
-分块既能表达稳定前缀与动态尾部的边界，也能让 `/clear`、`/compact` 等动作集中清理 section 状态。
-
-## 第三步：CLAUDE.md 按层级发现，但走 user context
-
-CLAUDE.md 的发现逻辑在 `restored-src/src/utils/claudemd.ts`。初始加载采用累积语义：先收集 Managed、User，再从文件系统根方向走到 cwd，加载 Project 和 Local。
-
-`getMemoryFiles(forceIncludeExternal = false)` 的参数是布尔值，省略时默认 `false`。`true` 会允许外部 include；默认路径还会查看项目配置中的 `hasClaudeMdExternalIncludesApproved`，未批准时回退为 `false`。User 文件允许外部 include，Project/Local 则受上述批准状态与 `claudeMdExcludes` 等规则约束。
-
-对 Project 层，每一级目录会尝试三类位置：`CLAUDE.md`、`.claude/CLAUDE.md` 和 `.claude/rules/*.md`；Local 层读取 `CLAUDE.local.md`。User、Project、Local 是否启用，还分别受 `userSettings`、`projectSettings`、`localSettings` setting source 控制。额外工作目录只有在 `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` 被判定为真时才自动加载对应 CLAUDE.md；源码注释明确说明该开关默认关闭。
-
-真正把它们变成 user context 的是 `restored-src/src/context.ts`：
-
-```ts
-const shouldDisableClaudeMd =
-  isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS) ||
-  (isBareMode() && getAdditionalDirectoriesForClaudeMd().length === 0)
-// Await the async I/O (readFile/readdir directory walk) so the event
-// loop yields naturally at the first fs.readFile.
-const claudeMd = shouldDisableClaudeMd
-  ? null
-  : getClaudeMds(filterInjectedMemoryFiles(await getMemoryFiles()))
-// Cache for the auto-mode classifier (yoloClassifier.ts reads this
-// instead of importing claudemd.ts directly, which would create a
-// cycle through permissions/filesystem → permissions → yoloClassifier).
-setCachedClaudeMdContent(claudeMd || null)
-```
-
-这段代码位于无参数的 `getUserContext` 内，外层由 `memoize` 在会话期间复用结果。`CLAUDE_CODE_DISABLE_CLAUDE_MDS` 为真时硬关闭自动加载；bare mode 在省略显式额外目录时跳过发现，显式 `--add-dir` 仍会保留。`claudeMd` 可以是字符串或 `null`，随后函数只在它非空时加入返回对象；`currentDate` 则始终存在。
-
-`getClaudeMds` 会保留文件来源。它把每份内容写成 `Contents of <path>...`，并标明 Project 是提交进代码库的项目指令、Local 是未提交的私有项目指令、User 是全局私有指令。多份指令共同进入上下文；发生冲突时，静态源码只确认来源说明与排列顺序，最终行为还取决于模型判断。
-
-接下来，`prependUserContext` 把这个对象变成真正的消息：
-
-```ts
-export function prependUserContext(
-  messages: Message[],
-  context: { [k: string]: string },
-): Message[] {
-  if (process.env.NODE_ENV === 'test') {
-    return messages
-  }
-
-  if (Object.entries(context).length === 0) {
-    return messages
-  }
-
-  return [
-    createUserMessage({
-      content: `<system-reminder>\nAs you answer the user's questions, you can use the following context:\n${Object.entries(
-        context,
-      )
-        .map(([key, value]) => `# ${key}\n${value}`)
-        .join('\n')}\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n`,
-      isMeta: true,
-    }),
-    ...messages,
-  ]
-}
-```
-
-`prependUserContext` 的 `messages` 是压缩处理后的本轮消息数组，`context` 是任意字符串键值对象。测试环境直接返回原数组；空对象也跳过消息注入。普通路径创建一条 `isMeta: true` 的 user message，`content` 保存 `<system-reminder>` 与按 `# key` 展开的字段，随后把这条消息放到历史最前面。函数返回新数组并保持原数组不变；参数类型排除 `null`。
-
-所以“CLAUDE.md 在 system prompt 里”只是宽泛说法。按这个版本的实际请求结构，它属于模型上下文，具体位于 `messages`；API 的 `system` 字段只接收 `systemPrompt`。
-
-## 第四步：git 状态是一次会话快照
-
-同一个 `restored-src/src/context.ts` 还定义了 system context：
-
-```ts
-const startTime = Date.now()
-logForDiagnosticsNoPII('info', 'system_context_started')
-
-// Skip git status in CCR (unnecessary overhead on resume) or when git instructions are disabled
-const gitStatus =
-  isEnvTruthy(process.env.CLAUDE_CODE_REMOTE) ||
-  !shouldIncludeGitInstructions()
-    ? null
-    : await getGitStatus()
-
-// Include system prompt injection if set (for cache breaking, ant-only)
-const injection = feature('BREAK_CACHE_COMMAND')
-  ? getSystemPromptInjection()
-  : null
-```
-
-这段代码位于无参数的 `getSystemContext` 内，外层也使用 `memoize`。`startTime` 只用于诊断耗时。远程模式 `CLAUDE_CODE_REMOTE` 为真，或 `shouldIncludeGitInstructions()` 为假时，`gitStatus` 为 `null`；非 git 目录、命令失败也会让 `getGitStatus()` 返回 `null`。`injection` 只在编译期 feature `BREAK_CACHE_COMMAND` 存在时读取，后续还要是非空字符串才加入返回对象。
-
-`getGitStatus` 并行读取当前分支、主分支、`git status --short`、最近 5 条提交和 `git config user.name`。status 最多保留 2,000 个字符，超过时加截断说明。生成文本第一句就明确指出：这是会话开始时的 snapshot，不会随对话更新。
-
-这项设计有一个很实际的后果。模型知道用户开始会话时有哪些未提交改动，因此能避免把陌生修改误当成自己的；但工具执行几轮以后，这份 git status 可能已经过时。需要精确判断当前状态时，仍应重新运行 git 命令，不能把 system context 当实时订阅。
-
-system context 的追加函数很简单：
-
-```ts
-export function appendSystemContext(
-  systemPrompt: SystemPrompt,
-  context: { [k: string]: string },
-): string[] {
-  return [
-    ...systemPrompt,
-    Object.entries(context)
-      .map(([key, value]) => `${key}: ${value}`)
-      .join('\n'),
-  ].filter(Boolean)
-}
-```
-
-`appendSystemContext` 的 `systemPrompt` 是品牌化的只读字符串数组，`context` 是字符串键值对象。对象为空时 `join()` 得到空字符串，最后由 `filter(Boolean)` 删除；非空时，gitStatus 等字段合并成一个尾部区块。与 `getSystemPrompt` 的 `.filter(s => s !== null)` 不同，这里会过滤所有假值字符串。
-
-## 第五步：default、custom、append 先决定最终 prompt
-
-不同宿主共享原料，但最终选择规则并不完全相同。QueryEngine 的无头路径在 `restored-src/src/QueryEngine.ts` 中这样组装：
-
-```ts
-const systemPrompt = asSystemPrompt([
-  ...(customPrompt !== undefined ? [customPrompt] : defaultSystemPrompt),
-  ...(memoryMechanicsPrompt ? [memoryMechanicsPrompt] : []),
-  ...(appendSystemPrompt ? [appendSystemPrompt] : []),
-])
-```
-
-这里 `customSystemPrompt` 经过类型收窄后只剩字符串或 `undefined`；字符串会替换 `defaultSystemPrompt`。`memoryMechanicsPrompt` 是字符串或 `null`，仅在 SDK 同时提供 custom prompt 并显式配置 `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` 时加载；非空才追加。`appendSystemPrompt` 是字符串或 `undefined`，只有非空字符串会进入数组。`asSystemPrompt` 只做 TypeScript 品牌转换，不拼接、不过滤，也不复制数组。
-
-交互式 REPL 还会调用 `buildEffectiveSystemPrompt`，处理 `overrideSystemPrompt?: string | null`、主线程 Agent、Coordinator 和 proactive/KAIROS 等分支。常规优先级是 agent prompt 高于 custom prompt，custom prompt 高于 default prompt，最后再追加 append prompt；truthy 的 `overrideSystemPrompt` 则直接返回单块覆盖结果。空字符串、`null`、`undefined` 都不会触发 override 分支。
-
-因此，讨论“自定义 system prompt”时必须先说明入口。无头 QueryEngine 以 `customPrompt !== undefined` 判断，交互式覆盖逻辑中还有 truthy 判断和 Agent 特殊路径。源码可以确认这些静态优先级，无法仅凭一个 CLI 参数名推断所有运行模式的最终数组。
-
-## 第六步：queryLoop 在调用前才把三条通道放到一起
-
-最终汇合发生在 `restored-src/src/query.ts`：
-
-```ts
-messages: prependUserContext(messagesForQuery, userContext),
-systemPrompt: fullSystemPrompt,
-thinkingConfig: toolUseContext.options.thinkingConfig,
-tools: toolUseContext.options.tools,
-signal: toolUseContext.abortController.signal,
-```
-
-这五行是 `queryLoop` 传给 `deps.callModel` 的连续字段。`messages` 由压缩后的 `messagesForQuery` 加 user context 得到；`systemPrompt` 是前一步通过 `appendSystemContext` 得到的 `fullSystemPrompt`；`tools` 直接取当前 `toolUseContext.options.tools`。`thinkingConfig` 的源码联合类型只有三种：`{ type: 'adaptive' }`、`{ type: 'enabled'; budgetTokens: number }` 和 `{ type: 'disabled' }`；`enabled` 才要求数字预算。`signal` 是取消信号。紧随其后的 `options` 中，`toolChoice: undefined` 让模型自由选择工具；`isNonInteractiveSession` 是布尔值，用于区分无头和交互宿主的行为。
-
-这段调用也回答了“本轮上下文”究竟是什么：它由 `systemPrompt`、经过处理的消息历史、工具集合和模型选项共同组成。前面第 15 篇得到的搜索结果，如果已经作为 `tool_result` 进入历史，就位于 `messagesForQuery`；其他通道保持原有归属。
-
-## 项目指令还会在深入子目录时动态补充
-
-初始 user context 只覆盖启动时按 cwd 发现的指令。若 Read 后来访问 cwd 下更深的目录，该目录里的 CLAUDE.md 和条件 rules 还需要按路径补充。
-
-FileRead 完成后会把绝对路径加入 `nestedMemoryAttachmentTriggers`。随后 `restored-src/src/utils/attachments.ts` 消费这些触发器：
-
-```ts
-async function getNestedMemoryAttachments(
-  toolUseContext: ToolUseContext,
-): Promise<Attachment[]> {
-  if (
-    !toolUseContext.nestedMemoryAttachmentTriggers ||
-    toolUseContext.nestedMemoryAttachmentTriggers.size === 0
-  ) {
-    return []
-  }
-
-  const appState = toolUseContext.getAppState()
-  const attachments: Attachment[] = []
-  for (const filePath of toolUseContext.nestedMemoryAttachmentTriggers) {
-    const nestedAttachments = await getNestedMemoryAttachmentsForFile(
-      filePath,
-      toolUseContext,
-      appState,
+isEnabled() {
+  const provider = getAPIProvider()
+  const model = getMainLoopModel()
+
+  if (provider === 'firstParty') return true
+
+  if (provider === 'vertex') {
+    return (
+      model.includes('claude-opus-4') ||
+      model.includes('claude-sonnet-4') ||
+      model.includes('claude-haiku-4')
     )
-    attachments.push(...nestedAttachments)
   }
-  toolUseContext.nestedMemoryAttachmentTriggers.clear()
-  return attachments
+
+  if (provider === 'foundry') return true
+  return false
 }
 ```
 
-`getNestedMemoryAttachments` 的 `toolUseContext` 持有触发路径集合、已加载路径、读取缓存和 AppState 访问器。集合缺失或为空时返回空数组，避免等待状态读取；有值时逐路径加载附件，最后清空触发器。返回值始终是 `Attachment[]`，失败路径由更下层捕获后也可能得到空数组。
+这个函数的返回值只有布尔值。`firstParty` 和 `foundry` 直接返回 `true`；`vertex` 只接受源码列出的 Claude 4 系列名称；其他 provider 返回 `false`。这里的 `model` 只用于 Vertex 的能力判断，函数没有调用 `getSmallFastModel()`，也没有读取 `tengu_plum_vx3`。
 
-下层会先确认目标在允许的 working path 内，再依次处理 Managed/User 条件规则、从 cwd 到目标目录的 CLAUDE.md 与 rules，以及 cwd 层级的条件规则。`loadedNestedMemoryPaths` 是不淘汰的 Set，用于阻止同一文件因 Read 缓存 LRU 淘汰而反复注入。
+所以，工具已经出现在模型工具列表中，并不意味着搜索一定会使用 `getMainLoopModel()`；能力检查和调用时模型选择是两次独立判断。
 
-这就是“动态注入”的准确含义：实际访问路径触发新的 attachment，同时保持初始 system prompt 稳定。深层目录规则只在相关文件进入工作集后出现，从而避免无关项目指令提前占用窗口。
+## 真正的分流点在 WebSearchTool.call
 
-## 三个容易误判的边界
+进入 `WebSearchTool.call()` 后，源码先把用户的 `query` 包装成一条简短 user message，再生成服务端搜索 schema：
 
-第一，**配置字段只有被组装函数读取时才会注入。** 例如 language、output style、setting sources 会改变 prompt。
+```ts
+const userMessage = createUserMessage({
+  content: 'Perform a web search for the query: ' + query,
+})
+const toolSchema = makeToolSchema(input)
 
-第二，**cwd 信息和 git 状态的时效不同**。环境区块在默认 prompt 中说明当前工作目录，git status 则明确是会话开始快照。两者都被 memoize 或 section cache 约束，运行中切目录、切 worktree、修改设置后是否立刻反映，必须继续追调用方何时清缓存或重建会话。
+const useHaiku = getFeatureValue_CACHED_MAY_BE_STALE(
+  'tengu_plum_vx3',
+  false,
+)
+```
 
-第三，**最终请求受运行时装配影响**。feature flag、构建裁剪、provider 缓存作用域、MCP 连接、Agent 定义、custom/append prompt 和压缩结果都会改变最终请求。本文能够证明的是默认控制流、优先级和回退值；具体机器上的请求仍需结合运行时配置验证。
+`getFeatureValue_CACHED_MAY_BE_STALE('tengu_plum_vx3', false)` 的第二个参数明确给出静态默认值 `false`。但它是运行时功能配置，源码只能确认缺省回退，不足以推断线上某个账号最终拿到的开关值或分支比例。
+
+接下来，搜索流通过 `queryModelWithStreaming()` 创建：
+
+```ts
+const queryStream = queryModelWithStreaming({
+  messages: [userMessage],
+  systemPrompt: asSystemPrompt([
+    'You are an assistant for performing a web search tool use',
+  ]),
+  thinkingConfig: useHaiku
+    ? { type: 'disabled' as const }
+    : context.options.thinkingConfig,
+  tools: [],
+  signal: context.abortController.signal,
+  options: {
+    model: useHaiku ? getSmallFastModel() : context.options.mainLoopModel,
+    toolChoice: useHaiku
+      ? { type: 'tool', name: 'web_search' }
+      : undefined,
+    extraToolSchemas: [toolSchema],
+    querySource: 'web_search_tool',
+  },
+})
+```
+
+这就是问题的证据核心：
+
+- `useHaiku === false` 时，`model` 取 `context.options.mainLoopModel`，`thinkingConfig` 沿用主循环上下文，`toolChoice` 不强制指定。
+- `useHaiku === true` 时，`model` 取 `getSmallFastModel()`，`thinkingConfig` 固定为 disabled，并强制 `toolChoice` 为 `web_search`。
+- 两条路径都传 `tools: []`，普通客户端工具不会被带进这条搜索流；搜索 schema 通过 `extraToolSchemas: [toolSchema]` 单独注入。
+
+这里的 `context.options.mainLoopModel` 是当前调用上下文传入的主循环模型，不应直接等同于“产品永远默认的某个型号”。用户选择、provider 适配和运行时配置都可能影响它；静态源码能确认的是这个字段的来源位置和分支选择。
+
+## 默认分支：沿用当前主循环模型
+
+当 `tengu_plum_vx3` 使用默认假值时，WebSearch 不再额外调用模型选择函数，而是直接读取 `context.options.mainLoopModel`。这意味着：
+
+1. 用户或宿主如果切换了主循环模型，WebSearch 的默认分支也会跟着使用新的上下文模型。
+2. 主循环的 thinking 配置会透传到搜索流，而不是在 WebSearch 内部硬编码另一套思考预算。
+3. 搜索仍然是独立的一次模型流。它使用一条新的 user message 和短 system prompt，不是把搜索请求直接拼到主循环本次响应里。
+
+这里的“沿用”只描述模型字段，不表示主循环和搜索共享同一段消息历史。`WebSearchTool.call()` 只把当前 query 包成 `Perform a web search...`，再额外传入 `agents`、`mcpTools`、权限上下文和其他调用选项。
+
+## 开关分支：切到 small fast model
+
+`getSmallFastModel()` 的实现很短：
+
+```ts
+export function getSmallFastModel(): ModelName {
+  return process.env.ANTHROPIC_SMALL_FAST_MODEL || getDefaultHaikuModel()
+}
+```
+
+因此开关分支的可见取值是：
+
+- `ANTHROPIC_SMALL_FAST_MODEL` 有值时使用该环境变量指定的模型名；这是开放字符串，源码不枚举所有候选值。
+- 环境变量为空或未设置时使用 `getDefaultHaikuModel()`。
+
+同时，WebSearch 把 thinking 关闭并强制选择 `web_search`。这不是简单地把“默认模型名”替换成 Haiku，而是同时改变了该次搜索请求的推理配置与 tool choice。至于实际延迟、质量和成本，静态源码没有提供运行时统计，不能从分支代码直接推断。
+
+## `web_search_20250305` 到底在哪里执行
+
+`makeToolSchema(input)` 返回的结构是：
+
+```ts
+{
+  type: 'web_search_20250305',
+  name: 'web_search',
+  allowed_domains: input.allowed_domains,
+  blocked_domains: input.blocked_domains,
+  max_uses: 8,
+}
+```
+
+`allowed_domains` 和 `blocked_domains` 原样来自工具输入；两个字段都是可选的开放字符串数组。`max_uses` 在源码中固定为 `8`，代表这条服务端搜索调用允许的搜索次数上限。
+
+注意 `WebSearchTool.call()` 本身没有 `fetch`、爬虫或搜索引擎客户端实现。它消费 `queryModelWithStreaming()` 产生的事件：
+
+- `server_tool_use` 开始时记录工具调用 ID；
+- `input_json_delta` 中逐步解析 query，用于进度事件；
+- `web_search_tool_result` 到达时记录结果数量与实际 query；
+- 最终由 `makeOutputFromSearchResponse()` 把文本块、标题和 URL 整理成工具输出。
+
+所以模型选择发生在“请求 WebSearch 服务端工具的那条 API 流”上，而不是本地另起一个搜索模型进程。`tool_result` 回到主循环后，主模型才继续生成后续回答。
+
+## 三个名字不要混淆
+
+| 名字 | 出现位置 | 作用 |
+|---|---|---|
+| `getMainLoopModel()` | `isEnabled()` 与其他主循环初始化路径 | 获取当前主循环模型，用于能力判断或主循环配置 |
+| `context.options.mainLoopModel` | `WebSearchTool.call()` | WebSearch 默认分支实际使用的模型字段 |
+| `getSmallFastModel()` | `WebSearchTool.call()` 的 `useHaiku` 分支 | 使用环境变量或默认 Haiku 的搜索模型 |
+
+把第一行看到的 `getMainLoopModel()` 当作 WebSearch 的最终模型，是最容易产生的误读。源码真正决定搜索请求模型的表达式只有：
+
+```ts
+useHaiku ? getSmallFastModel() : context.options.mainLoopModel
+```
+
+而 `useHaiku` 的静态默认值是 `false`，运行时是否被功能配置改写，属于外部状态。
+
+## 最终答案：默认使用，但不是始终使用
+
+现在可以精确回答上一篇的问题：
+
+- **问“默认情况下是不是默认模型？”** 是。`tengu_plum_vx3` 默认回退为 `false`，WebSearch 使用当前主循环模型。
+- **问“是不是永远使用默认模型？”** 不是。功能开关为真时，改用 `getSmallFastModel()`，优先读 `ANTHROPIC_SMALL_FAST_MODEL`，否则回退到默认 Haiku。
+- **问“WebSearch 是否本地执行？”** 不是。两条路径都通过 `queryModelWithStreaming()` 调用 API，把服务端 web search schema 注入独立模型流。
+- **问“isEnabled 返回 true 是否说明最终模型？”** 不是。它只说明 provider/model 组合具备 WebSearch 能力。
+
+这几个答案必须同时成立，才不会把“默认回退”“运行时分流”“服务端工具”和“能力检查”混成一句模糊的“WebSearch 用默认模型”。
 
 ## 小结
 
-Claude Code 的项目上下文组装可以归纳成四步。
+Claude Code 的 WebSearch 模型选择可以压缩成一行：
 
-第一，`fetchSystemPromptParts` 并行准备默认 system prompt、user context 和 system context。custom prompt 会替换默认 prompt，并在 QueryEngine 路径跳过默认 git context。
+`useHaiku ? getSmallFastModel() : context.options.mainLoopModel`
 
-第二，`getSystemPrompt` 把稳定行为规范放在前面，把 auto-memory 使用说明、环境、语言、output style、MCP 指令等动态 section 放在后面；普通 section 缓存，明确标记为 `cacheBreak` 的 section 才每轮重算。
+前半句由 `tengu_plum_vx3` 决定，默认值是 `false`；后半句沿用当前主循环模型。`getSmallFastModel()` 又有自己的回退：环境变量 `ANTHROPIC_SMALL_FAST_MODEL` 优先，否则使用默认 Haiku。
 
-第三，CLAUDE.md 按 Managed、User、Project、Local 等来源发现，初始内容通过 meta user message 进入 `messages`；git 分支、status 和最近提交通过 system context 追加到 `system`；深层目录规则则由文件访问触发 attachment。
-
-第四，query loop 在模型调用前才把这些通道汇合，并把工具集合作为独立 `tools` 参数发送。这样既保留了 prompt 缓存的稳定前缀，也保留了消息、环境快照和结构化工具契约各自的边界。
+因此，读源码时要把三个边界分开：`isEnabled()` 决定工具能否启用，`call()` 决定本次搜索使用哪个模型，`extraToolSchemas` 决定 API 如何执行服务端 WebSearch。默认模型只是一个分支的回退值，不是所有情况下的硬绑定。
 
 ## 留给下一篇的问题
 
-当对话历史、工具结果和项目上下文不断增长并逼近模型窗口时，Claude Code 如何判断何时压缩、保留什么、又怎样继续会话？
+WebSearch 选定模型之后，为什么 WebFetch 还要再启动一次模型来提取页面内容？
 
 ## 参考资料
 
-- [Claude Code 项目记忆](https://code.claude.com/docs/en/memory)
+- `restored-src/src/tools/WebSearchTool/WebSearchTool.ts`
 
-- [Claude Code Prompt Caching](https://code.claude.com/docs/en/prompt-caching)
+- `restored-src/src/utils/model/model.ts`
+
+- `restored-src/src/utils/betas.ts`
