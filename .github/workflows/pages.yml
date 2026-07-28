@@ -16,13 +16,12 @@ concurrency:
 
 jobs:
   build:
-    runs-on: [self-hosted, Linux, X64, aliyun]
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: site
     env:
-      # The runner's IPv6 path is unavailable and registry.npmjs.org is unstable
-      # from this network. Keep the workaround scoped to this build job.
+      # Keep install networking conservative across hosted and fallback runners.
       NODE_OPTIONS: --dns-result-order=ipv4first
       npm_config_registry: https://registry.npmmirror.com/
       npm_config_fetch_retries: "5"
@@ -91,7 +90,7 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: [self-hosted, Linux, X64, aliyun]
+    runs-on: ubuntu-latest
     needs: build
     steps:
       - name: Deploy to GitHub Pages
