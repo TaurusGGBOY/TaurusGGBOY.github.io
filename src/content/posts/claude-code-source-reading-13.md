@@ -10,6 +10,41 @@ image: "/images/posts/claude-code-source-reading-13/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 回答上一篇的问题
+
+上一篇留下的问题是：当 permission mode 为 `auto` 时，“自动”具体体现在哪里？
+
+先给结论：`auto` 不是把所有工具直接放行，而是把权限链里原本需要交给人的 `ask`，交给一组源码明确的自动决策路径。已经命中 deny 或 allow 的结果不会重新进入这条路径；只有 `hasPermissionsToUseToolInner()` 返回 `ask` 时，外层 `hasPermissionsToUseTool()` 才会继续检查 `auto`。
+
+入口条件是 `TRANSCRIPT_CLASSIFIER` 功能开启，并且当前 mode 是 `auto`；源码还允许处于 `plan` mode、但会话已经激活 auto 状态时进入同一分支。自动首先体现为两个无需调用分类器的快速路径：系统会用 `acceptEdits` mode 重新检查一次工具权限，如果该工具在这个模式下本来就能放行，就直接返回 `allow`；随后再检查 `SAFE_YOLO_ALLOWLISTED_TOOLS`，白名单中的安全工具也直接返回 `allow`。
+
+下面把 `hasPermissionsToUseTool()` 中的关键控制分支合并展示，省略 `appState` 获取、日志和异常处理；它不是一段可直接复制的完整源码：
+
+```ts
+const mode = appState.toolPermissionContext.mode
+if (
+  feature('TRANSCRIPT_CLASSIFIER') &&
+  (mode === 'auto' || (mode === 'plan' && isAutoModeActive()))
+) {
+  const acceptEditsResult = await tool.checkPermissions(/* mode: acceptEdits */)
+  if (acceptEditsResult.behavior === 'allow') {
+    return { behavior: 'allow', updatedInput: acceptEditsResult.updatedInput ?? input }
+  }
+
+  if (isAutoModeAllowlistedTool(tool.name)) {
+    return { behavior: 'allow', updatedInput: input }
+  }
+}
+```
+
+上面只保留控制分支，省略了日志、遥测、PowerShell 和安全检查。两个快速路径的共同点是：它们生成的仍然是标准 `PermissionDecision`，只是 `decisionReason` 标记为 `mode: 'auto'`，随后沿着普通执行链把 `updatedInput` 交给 `tool.call()`。
+
+如果快速路径没有命中，自动就体现为一次独立的 classifier 判断。`formatActionForClassifier()` 把工具名和输入整理成待判断的 action，`classifyYoloAction()` 再从 `context.messages` 构造精简 transcript，并把 action、工具编码和权限上下文交给分类模型。返回值里的 `shouldBlock` 决定结果：`false` 生成 `behavior: 'allow'`，`true` 记录 denial 状态并生成 `behavior: 'deny'`；连续拒绝达到限制时，源码还可能回到人工确认，让用户复核。
+
+因此，“自动”真正替换的是 `ask → allow/deny` 这一段决策，不是 `permission → tool.call` 的全部链路。不可由 classifier 放行的 safety check、`requiresUserInteraction()` 返回真的工具，以及功能未开启时的 PowerShell，都不会被这条自动路径静默批准。分类器 transcript 超过上下文时，交互模式会退回普通确认；无交互的 headless 路径则直接终止。分类器不可用时，还要根据 `tengu_iron_gate_closed` 的运行时开关决定 fail-closed 拒绝还是回退到普通权限处理。
+
+也就是说，`auto` 只改变“谁来处理未决的 ask”，不改变 Bash 后面还要经过的命令解析、沙箱和平台执行边界。下面先固定这三个概念，再沿一条 Bash 输入追踪它们如何协作。
+
 ## 本章先建立三个概念
 
 - **命令图**：复合 shell 输入需要拆成子命令、重定向和管道，权限判断才能覆盖真实操作。
@@ -21,25 +56,6 @@ imagePosition: "left"
 ![从命令解析到操作系统沙箱的安全链](/images/posts/claude-code-source-reading-13/13-command-sandbox-detail-handdrawn.png)
 
 这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
-## 回答上一篇的问题
-
-上一篇留下的问题是：权限已经允许以后，Bash 命令为什么仍需要解析、沙箱和平台安全边界，它们分别拦什么？
-
-答案是，`allow` 只代表当前权限规则同意尝试这次工具调用；命令理解与操作系统隔离分别由解析层和沙箱层完成。
-
-解析层识别子命令、重定向、命令替换、动态执行和无法静态判断的结构。权限层再决定这些操作在当前规则、路径和模式下应当 `allow`、`ask` 还是 `deny`。沙箱层负责限制已经启动的进程能访问哪些文件和网络资源。最后，平台执行层处理 shell、工作目录、环境变量、超时、信号和进程树。
-
-也就是说，这几层拦截的是不同问题：
-
-
-| 层次 | 拦截对象 | 常见误读 |
-| 命令解析 | 隐藏子命令、重定向、替换、无法静态分析的结构 | 用户是否允许执行 |
-| Permission | 与规则、路径和运行模式冲突的操作 | 进程运行时一定无法越界 |
-| Sandbox | 文件系统、网络等运行时访问 | 项目目录内的操作一定无害 |
-| 平台执行 | 无效 cwd、缺失 shell、超时、取消、进程错误 | 命令语义已经被完整理解 |
-
-因此，Bash 安全由一串职责独立的边界组成，解析、权限、沙箱和平台执行都要给出自己的判断。
 
 ## 从一条 Bash 输入开始
 

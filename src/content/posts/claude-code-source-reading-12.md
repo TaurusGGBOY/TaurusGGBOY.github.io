@@ -222,6 +222,31 @@ async function hasPermissionsToUseToolInner(
 
 外层 `hasPermissionsToUseTool()` 还会做模式收尾：`dontAsk` 把残留的 ask 转成 deny；`auto` 只有 `TRANSCRIPT_CLASSIFIER` 功能开启时才进入运行时模式集合，并可能把 ask 交给分类器。分类器的实际可用性、模型响应和功能开关属于运行时事实，本文不把它描述成通用默认防线。
 
+## updatedInput 如何从权限判决流到 tool.call
+
+权限判决不只回答“能不能执行”，还可以携带一个经过 Hook、工具检查或宿主确认修改后的 `updatedInput`。它的类型是 `Input | undefined`：有值时代表后续执行应使用的新对象，`undefined` 则表示保留当前已经处理过的输入。
+
+这个字段有几种来源。工具自己的 `checkPermissions()` 可以在放行时返回 `updatedInput`；例如文件权限检查在 `acceptEdits` 或命中 allow 规则时会把当前 `input` 原样带回。PreToolUse Hook 也可以返回新的输入：有 `allow` / `ask` 判决时放进 `PermissionResult`，只有修改输入而不直接裁决时，则以 `hookUpdatedInput` 事件先改写 `processedInput`，再进入正常权限链。宿主 `canUseTool` 返回的 allow 结果同样可以带回 `updatedInput`，用于承接用户或 SDK 对参数的确认与修正。
+
+通用权限层不会假设每个 `PermissionResult` 变体都有这个字段。`bypassPermissions` 或工具级 allow 需要把工具检查结果包装成最终 allow 时，会调用 `getUpdatedInputOrFallback()`：只有对象里确实有 `updatedInput` 且值不是 `undefined` 才采用它，否则回退到原始 `input`。因此，`undefined` 是“沿用已有输入”，不是“把输入变成空对象”。SDK permission prompt 的 allow Schema 要求一个 record；移动端为满足 Schema 传回的 `{}`，还会在兼容分支中被解释为“使用原始输入”。
+
+Hook 的合并逻辑还会再做一次边界检查：`resolveHookPermissionDecision()` 先用 `hookPermissionResult.updatedInput ?? input` 形成 `hookInput`，然后仍让 deny/ask 规则、`requiresUserInteraction` 和 `requireCanUseTool` 参与裁决。也就是说，Hook 改了输入，并不等于 Hook 能绕过后续权限规则。
+
+最终落点在 `checkPermissionsAndCallTool()`：权限决定返回后，只有 `permissionDecision.updatedInput !== undefined` 时才覆盖 `processedInput`；随后它把这个对象收敛为 `callInput`，再传入 `tool.call()`。如果没有新的 `updatedInput`，就继续使用 Hook 或前置 backfill 已经处理过的输入。文件工具还有一个兼容分支：当 backfill 只是展开了 `file_path`，执行器会保留模型原始路径用于结果文本，其他 Hook 或权限修改则继续传到 `tool.call()`。
+
+```ts
+const hookInput = hookPermissionResult.updatedInput ?? input
+
+// 权限判决之后
+if (permissionDecision.updatedInput !== undefined) {
+  processedInput = permissionDecision.updatedInput
+}
+
+const result = await tool.call(callInput, toolUseContext, ...)
+```
+
+所以，`updatedInput` 不是一个附加日志字段，而是“权限链允许执行哪一份输入”的数据通道。它可以让 Hook、规则检查或宿主在副作用发生前修正参数，但最终仍要经过统一的 allow/ask/deny 判决；只有 allow 分支会把它带到 `tool.call()`。
+
 ## permission mode 改变未决请求的处理方式
 
 `restored-src/src/types/permissions.ts` 的 `EXTERNAL_PERMISSION_MODES` 与 `INTERNAL_PERMISSION_MODES` 给出了模式边界；`restored-src/src/utils/permissions/PermissionMode.ts` 负责校验、解析和展示。对外可配置模式是 `default`、`acceptEdits`、`bypassPermissions`、`dontAsk`、`plan`。内部联合类型还包含 `auto` 和 `bubble`：`auto` 是否进入可配置集合取决于编译功能开关，`bubble` 不在 `PERMISSION_MODES` 的运行时校验数组中。
@@ -557,7 +582,7 @@ Claude Code 的权限系统是一条在副作用前反复收窄的决策链。
 
 ## 留给下一篇的问题
 
-权限已经允许以后，Bash 命令为什么仍需要解析、沙箱和平台安全边界，它们分别拦什么？
+当 permission mode 为 `auto` 时，“自动”具体体现在哪里？
 
 ## 参考资料
 
