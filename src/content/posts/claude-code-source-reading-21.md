@@ -24,23 +24,23 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：作为用户，你应该什么时候使用 `branch`，什么时候使用 `fork`？
+上一篇留下的问题是：你知道 Claude Code 中 `/branch`、`/fork` 和 `/new` 的区别吗？
 
-先把结论说清楚：在 Claude Code 里，`branch` 不是 Git branch，`fork` 也不是 GitHub 仓库 fork。两者最终都做同一件事——从已有会话复制出一份新的 transcript，分配新的 session ID，让原会话保持不变；差别主要在入口和进程边界。
+先给结论：在 `@anthropic-ai/claude-code@2.1.88` 的默认外部构建里，`/branch` 和 `/fork` 是同一条“复制当前会话并切换过去”的路径；`/new` 则是 `/clear` 的别名，创建一个没有旧对话上下文的新会话。因此，默认语义下前两者复制历史，`/new` 不复制历史；如果启用 `FORK_SUBAGENT`，`/fork` 会切换成另一条后台子代理路径。
 
-如果你已经在交互式 REPL 里，并且刚走到一个需要比较方案的决策点，优先用 `/branch [name]`。它从当前对话点复制主链，立即切换到新会话；你可以在新会话里试重构、替换实现或验证另一种排查路径，原来的上下文仍可通过 `/resume` 找回。这种方式适合“先保留现场，再在同一终端继续探索”。
+| 命令 | 2.1.88 中的实现 | 对话历史与 session ID | 适合什么时候用 |
+| --- | --- | --- | --- |
+| `/branch [name]` | `local-jsx` 命令调用 `createFork()`，复制当前 transcript 的主链并切换到新会话 | 原会话保留；新会话获得新的 session ID，并带有 `forkedFrom` 来源记录 | 想保留当前上下文，尝试另一种实现或排查路径 |
+| `/fork` | 默认是 `/branch` 的 alias；命令行的 `--fork-session` 也是“恢复历史但使用新 session ID”的入口 | 默认 alias 情况下与 `/branch` 相同；不会删除原会话 | 从另一个终端、脚本或恢复入口派生一条独立会话 |
+| `/new` | `clear` 命令的 alias，实际执行 `clearConversation()` | 清空当前消息、缓存、计划和会话元数据，生成新的 session ID；旧 transcript 仍可用 `/resume` 找回，但不会复制到新会话 | 当前任务已经结束，想从干净上下文开始新任务 |
 
-如果你要从另一个终端、脚本或程序中派生会话，则使用 `claude --continue --fork-session`、`claude --resume <session-id> --fork-session`，或 SDK 的 `forkSession: true`。这里的 fork 是更通用的会话复制机制：调用方明确提供来源 session，得到独立的 session ID，适合并行运行多个尝试、批量自动化，或在启动新进程时复用已有上下文。
+`/branch` 的关键是“复制后切换”。源码先读取当前 JSONL，只保留主对话消息，然后为每条复制记录写入新的 `sessionId`、重建 `parentUuid`，并附上 `forkedFrom`；原 transcript 文件不改。`--fork-session` 走的是另一入口：恢复流程加载旧历史，但保留启动时的 fresh session ID，后续消息再写入新 transcript。两者的结果相似，创建时机和来源记录不同。
 
-因此可以按三个问题选择：
+`/new` 的关键则是“不要带历史”。源码把 `clear` 定义为一个 `local` 命令，并声明 `aliases: ['reset', 'new']`。`clearConversation()` 会清空消息、文件状态和计划缓存，清理会话元数据，调用 `regenerateSessionId({ setCurrentAsParent: true })`，再执行 `SessionStart('clear')` Hook。它没有复制旧 JSONL，也不会回滚已经执行的工具、文件修改或网络副作用；“新”只是新的对话坐标，不是新的工作目录。
 
-1. **还在当前 REPL、只想从此刻试另一条路？** 用 `branch`（`/branch`）。
-2. **需要新进程、另一个终端或程序化调用？** 用 `fork`（`--fork-session` / `forkSession`）。
-3. **只是继续原来的工作？** 用 `--continue` 或 `--resume`，不要额外复制会话。
+还要留意 `/fork` 的版本/构建边界。`branch/index.ts` 中的定义是：当 `FORK_SUBAGENT` 没打开时，`aliases` 为 `['fork']`；打开该 feature 后，alias 被移除，`commands.ts` 才会装配独立的 `forkCmd`。对应的 `AgentTool/forkSubagent.ts` 会让 `/fork <directive>` 走后台 forked subagent，子代理继承父会话上下文并把结果回传，而不是把当前 REPL 切换到一份新 transcript。也就是说，不能脱离版本和 feature gate，直接把 `/fork` 固定解释成唯一含义。
 
-还有一个必须提前设定的边界：session fork 只复制对话历史，不复制工作目录，也不会撤销已经执行的 Bash、网络请求、部署或其他外部副作用。要让两条实现真正同时改动而互不覆盖，还需要 Git worktree、独立目录或 checkpoint；`branch`/`fork` 解决的是“上下文分叉”，不是“文件系统分叉”。
-
-从 2.1.88 的实现看，`/branch` 对应 `createFork()`：它立即复制主链 JSONL，并给复制记录附上 `forkedFrom`；`--fork-session` 则在恢复流程里保留 fresh session ID，后续由正常写入路径落到新 transcript。理解这层关系后，`branch` 可以看成一个交互式 fork 入口，而不是与 fork 并列的另一种会话类型。
+最后再划一条边界：会话分叉不等于 Git 分支或 worktree 隔离。`/branch`、默认语义下的 `/fork` 只复制消息历史，当前工作目录和已经产生的外部副作用仍在原现场；需要同时尝试会改文件的方案时，还要配合 Git worktree、独立目录或 checkpoint。`/new` 更不会帮你隔离文件，它只是把模型看到的对话上下文清空。
 
 本文继续限定在 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码。还原路径用于定位证据，不代表 Anthropic 内部仓库的原始目录结构。下面只摘录能证明控制流的真实短代码，省略无关字段、遥测和实验分支。
 
@@ -432,3 +432,11 @@ Claude Code 的 Command 系统是一层 REPL 内部路由。
 - [Work with sessions - Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/sessions)
 
 - [Claude Code /branch: Fork Sessions to Test Multiple Paths](https://claudcod.com/blog/claude-code-branch-sessions/)
+
+- [How Claude Code works](https://code.claude.com/docs/en/how-claude-code-works)
+
+- [Claude Code changelog](https://code.claude.com/docs/en/changelog)
+
+- [What is /branch Command in Claude Code](https://claudelog.com/faqs/what-is-branch-command-in-claude-code/)
+
+- [Fork vs. Branch in Claude: What's the Difference?](https://claudekit.app/blog/claude-fork-vs-branch)

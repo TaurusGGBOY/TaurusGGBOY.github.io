@@ -655,7 +655,7 @@ Claude Code 把会话恢复建立在一份追加式 JSONL transcript 上。写�
 
 ## 留给下一篇的问题
 
-作为用户，你应该什么时候使用 `branch`，什么时候使用 `fork`？
+你知道 Claude Code 中 `/branch`、`/fork` 和 `/new` 的区别吗？
 
 ## 参考资料
 
