@@ -71,6 +71,22 @@ runToolUse → 权限检查 → 具体 Tool.call()
 
 本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。外部资料只帮助固定 API 层的 `tool_use/tool_result` 契约和产品层的后台 Agent 语义；两者在 2.1.88 中怎样通过 `toolUseId`、`AppState.tasks` 和通知队列接起来，以本仓库源码为准。
 
+## AGENTS.md 与 Agent 定义不是一回事
+
+这里先纠正一个容易造成误会的名称：`AGENTS.md` 是面向多个编码 Agent 的项目级说明文件约定，内容通常是仓库结构、开发与测试命令、代码规范、安全限制和协作流程。它更像“给 Agent 的 README”，不是 `.claude/agents/*.md` 里的某个 subagent 定义；后者才会被解析为 `AgentDefinition`，并通过 `subagent_type` 选择。
+
+对 Claude Code 还要再加一层边界。2.1.88 的 `getMemoryFiles()` 会沿目录向上读取 `CLAUDE.md`、`.claude/CLAUDE.md` 与 `CLAUDE.local.md`，并处理 `.claude/rules/*.md`；`isMemoryFilePath()` 也只把这些路径识别为 memory file。源码没有按文件名自动扫描 `AGENTS.md`，所以仓库里有 `AGENTS.md`，不代表 Claude Code 会直接把它放进上下文。
+
+如果团队把通用规则写在 `AGENTS.md`，要让 Claude Code 共用这份内容，通常在 `CLAUDE.md` 中导入：
+
+```md
+@AGENTS.md
+```
+
+或者让 `CLAUDE.md` 符号链接到 `AGENTS.md`。导入后，文件内容才作为项目记忆与指令进入上下文；它影响 Agent 看到的项目约束，但不会创建新的 Agent，也不会改变 AgentDefinition 的 `tools`、`model` 或 `permissionMode`。
+
+因此，本文后面出现的“项目级指令”“项目上下文”要分两种情况理解：在 Claude Code 源码里，它首先指 `CLAUDE.md`/rules 这条 memory 加载链；如果项目采用 `AGENTS.md` 作为跨工具单一来源，则它必须通过 import 或 symlink 接到这条链上。`.claude/agents/*.md` 仍是另一条 Agent 定义发现链。
+
 ## Subagent 运行一条独立的子 Query Loop
 
 先看四个概念怎样共同确定委派边界。
@@ -652,3 +668,7 @@ Agent 定义决定“这个子线程是什么角色”，Tool Pool 决定“它�
 - [Run agents in parallel](https://code.claude.com/docs/en/agents)
 
 - [Agent view in Claude Code](https://claude.com/blog/agent-view-in-claude-code)
+
+- [How Claude remembers your project](https://code.claude.com/docs/en/memory)
+
+- [AGENTS.md — a simple, open format for guiding coding agents](https://github.com/agentsmd/agents.md)
