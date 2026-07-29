@@ -24,19 +24,88 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：错误恢复让当前运行能够继续以后，Claude Code 如何把会话写入历史，并实现 resume、fork 与分支恢复？
+上一篇留下的问题是：Anthropic 提到 Fable 5 遇到一些问题时可以降级到 Opus 4.8 执行；根据 2.1.88 的源码，这种 fallback 是如何实现的？
 
-先说结论。Claude Code 把 user、assistant、attachment、system 等消息连同可恢复元数据，持续追加到当前项目目录下的 `<sessionId>.jsonl`。每条消息有自己的 `uuid`，再用 `parentUuid` 指向上一条消息。恢复时，程序从 JSONL 中找出最新叶子节点，沿父指针倒着走回根节点，再把这条链反转、反序列化，并恢复文件历史、内容替换记录、Agent 设置、模式和 worktree 等状态。进程对象与已经执行过的工具副作用留在日志恢复边界之外。
+先把两个容易混在一起的 fallback 分开。Anthropic 对 Fable 5 描述的是安全分类器触发后的模型切换：分类器可以把请求标记为 `refusal`，再在同一会话用 Opus 4.8 重新执行。公开的 Cookbook 给出的服务端接口是 `fallbacks`，客户端方案则是 SDK 的 refusal-fallback middleware。这条路径发生在 API 或 SDK 层，响应仍可能是 HTTP 200，依据的是 `stop_reason`，不是 Claude Code 的 HTTP 重试错误。
 
-resume 与 fork 的区别发生在恢复完历史以后：
+而本仓库从 `@anthropic-ai/claude-code@2.1.88` 还原的代码，提供的是一个更通用的 `fallbackModel?: string` 通道。源码中没有 `claude-fable-5`、`claude-opus-4-8`、`stop_details` 或 `fallback_credit_token` 这些 Fable 专用字面量；`getErrorMessageIfRefusal()` 只把 `stop_reason === 'refusal'` 转成错误消息，并建议用户手动切换模型。因此，静态源码能确认的是：如果上层把 `claude-opus-4-8` 作为 `fallbackModel` 注入，客户端怎样在过载时切换；Fable 的安全分类器何时触发，以及 fallback credit 如何计费，则不是这份客户端源码实现的。
 
-- 普通 `--continue`、`--resume` 或 `/resume` 会切回原来的 session ID，并继续向原 transcript 追加消息。
-- `--fork-session` 会保留启动时新生成的 session ID，把加载到的旧消息写进一个新的 transcript，随后从新会话继续。
-- `/branch` 更直接：它复制当前 transcript 的主对话消息，换成新 session ID，并在每条复制消息上写入 `forkedFrom.sessionId` 与 `forkedFrom.messageUuid`。
+### fallbackModel 是怎样进入请求的
 
-三条路径都只能恢复“被持久化的数据”。尚未落盘的写队列、运行中的子进程、已经断开的网络流、旧进程里的 AbortController，都不会因为读取 JSONL 而回来。过去的 Bash、Edit、MCP 调用也不会自动重放；它们造成的外部副作用是否还存在，要看文件系统和外部服务本身。
+入口是 CLI 的 `--fallback-model <model>`。帮助文本明确写着它只对 `--print` 生效。这个参数是开放字符串，不是固定枚举；启动阶段只额外检查它不能和主模型相同，`default` 则被解析成当前默认主模型：
 
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块只保留证明当前结论所需的部分，省略了日志、遥测和无关分支；还原路径只用于定位本文引用的源码。
+```ts
+const userSpecifiedFallbackModel =
+  fallbackModel === 'default' ? getDefaultMainLoopModel() : fallbackModel
+
+// QueryEngineConfig
+fallbackModel: userSpecifiedFallbackModel
+```
+
+随后值沿 `QueryEngineConfig.fallbackModel` → `QueryParams.fallbackModel` → `queryModel()` 的 `Options.fallbackModel` 传递。`Options` 中这个字段是 `string | undefined`：省略时根本不会触发模型切换，传入任意字符串则由 provider 负责解释为模型 ID。也就是说，客户端并不会根据“Fable 5”这个名称自行推导 Opus 4.8；备用模型是谁，取决于调用入口注入的字符串和运行时 provider 配置。
+
+### 触发点在 withRetry，而不是分类器
+
+真正决定是否发出 fallback 信号的是 `restored-src/src/services/api/withRetry.ts` 的 `withRetry()`。源码先把连续 529（`overloaded`）计数，阈值是 `MAX_529_RETRIES = 3`：
+
+```ts
+if (
+  is529Error(error) &&
+  (process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS ||
+    (!isClaudeAISubscriber() && isNonCustomOpusModel(options.model)))
+) {
+  consecutive529Errors++
+  if (consecutive529Errors >= MAX_529_RETRIES && options.fallbackModel) {
+    throw new FallbackTriggeredError(
+      options.model,
+      options.fallbackModel,
+    )
+  }
+}
+```
+
+这里有三个很重要的限制。
+
+第一，触发条件是 HTTP 529 过载，不是 Fable 分类器返回的 `refusal`。第二，后台 query source 会在计数前通过 `shouldRetry529()` 直接放弃，只有前台会话、SDK、Agent、compact、Hook 等列出的 source 才会重试。第三，如果没有设置 `FALLBACK_FOR_ALL_PRIMARY_MODELS`，源码里的 `isNonCustomOpusModel()` 只把内置 Opus 4.0、4.1、4.5、4.6 视为可走这条分支；这份 2.1.88 还原代码并没有把 Fable 5 或 Opus 4.8 注册进这个列表。要让新模型也进入同一条过载 fallback 路径，必须由运行时 feature/env 或更新后的模型配置放宽条件。
+
+`FallbackTriggeredError` 不是最终给用户看的错误，而是一个控制流信号。`queryModelWithStreaming()` 捕获它时会原样重新抛出，避免把“应该换模型再试”误变成普通 assistant error。流式请求如果先转为非流式请求，`executeNonStreamingRequest()` 仍然携带同一个 `fallbackModel`；如果最初的流请求就是 529，还会以 `initialConsecutive529Errors: 1` 预置计数，保证流式和非流式合计三次后触发，而不是各自重新数三次。
+
+### queryLoop 才真正执行“换模型再跑一遍”
+
+`restored-src/src/query.ts` 的 `queryLoop()` 是切换发生的地方。它先把当前模型放在局部变量 `currentModel`，每轮把它和 `fallbackModel` 一起交给 `deps.callModel()`；收到 `FallbackTriggeredError` 后，执行下面这组动作：
+
+```ts
+if (innerError instanceof FallbackTriggeredError && fallbackModel) {
+  currentModel = fallbackModel
+  attemptWithFallback = true
+
+  yield* yieldMissingToolResultBlocks(
+    assistantMessages,
+    'Model fallback triggered',
+  )
+  assistantMessages.length = 0
+  toolResults.length = 0
+  toolUseBlocks.length = 0
+  if (streamingToolExecutor) {
+    streamingToolExecutor.discard()
+    streamingToolExecutor = new StreamingToolExecutor(
+      toolUseContext.options.tools,
+      canUseTool,
+      toolUseContext,
+    )
+  }
+  toolUseContext.options.mainLoopModel = fallbackModel
+  continue
+}
+```
+
+这不是把已经生成的 assistant 消息的 `model` 字段改名，而是让 `while (attemptWithFallback)` 重新进入 API 调用。新的请求仍使用同一份 `messagesForQuery`、system prompt 和工具定义，只把 `model` 改成 fallback model。已经产生的半截流式消息会被清理；缺失的 tool result 会先补成协议上可配对的结果，避免下一次请求看到悬空的 `tool_use`。如果是 Anthropic 内部用户，代码还会调用 `stripSignatureBlocks()`，因为 thinking signature 绑定原模型，直接把 Fable 的受保护 thinking block 重放给 Opus 可能得到 400。
+
+切换成功后，代码向 UI 发送一条 warning，内容类似“由于主模型需求过高，已切换到备用模型”。如果备用模型再次失败，就走普通的 `CannotRetryError`/assistant error 路径；源码没有把外部工具已经造成的副作用回滚，也不会重放已完成的工具调用。因而这是一种“清理当前请求状态、用新模型重新请求”的降级，不是事务回滚。
+
+把两套机制放在一起看，结论就清楚了：Anthropic 的 Fable 5 → Opus 4.8 安全 fallback 更像“服务端分类器决定重试目标”；Claude Code 这份源码里的 fallback 更像“客户端为请求准备备用模型，在连续 529 后通过异常信号跳出重试层，再由 queryLoop 重建一次干净请求”。如果未来版本把 Fable 的分类器响应也接入客户端，最自然的接入点会是 `getErrorMessageIfRefusal()` 或 `queryModelWithStreaming()` 的响应处理处；当前还原代码尚未这样做。
+
+本文后续仍以 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块只保留证明当前结论所需的部分，省略日志、遥测和无关 provider 分支；还原路径只用于定位本文引用的源码。
 
 ## 会话历史是一份可重建的事件日志
 
@@ -583,3 +652,9 @@ Claude Code 把会话恢复建立在一份追加式 JSONL transcript 上。写�
 - [Claude Code 会话管理](https://code.claude.com/docs/en/sessions)
 
 - [Claude Code Checkpointing](https://code.claude.com/docs/en/checkpointing)
+
+- [Why Claude switched models in your conversation with Fable 5](https://support.claude.com/en/articles/15363606-why-claude-switched-models-in-your-conversation-with-fable-5)
+
+- [Classifier fallback and billing for Claude Fable 5](https://platform.claude.com/cookbook/fable-5-fallback-billing-guide)
+
+- [Fallback credit](https://platform.claude.com/docs/en/build-with-claude/fallback-credit)

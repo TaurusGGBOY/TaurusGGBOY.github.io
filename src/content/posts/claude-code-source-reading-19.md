@@ -496,7 +496,7 @@ API 层用 `shouldRetry()` 判断连接、超时、锁冲突、限流、认证�
 
 ## 留给下一篇的问题
 
-错误恢复让当前运行能够继续以后，Claude Code 如何把会话写入历史，并实现 resume、fork 与分支恢复？
+Anthropic 提到 Fable 5 遇到一些问题时可以降级到 Opus 4.8 执行；根据 2.1.88 的源码，这种 fallback 是如何实现的？
 
 ## 参考资料
 
