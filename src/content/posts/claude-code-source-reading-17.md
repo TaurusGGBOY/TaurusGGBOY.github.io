@@ -24,13 +24,21 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：当对话历史、工具结果和项目上下文不断增长并逼近模型窗口时，Claude Code 如何判断何时压缩、保留什么、又怎样继续会话？
+上一篇留下的问题是：你知道 Claude Code 出现过什么 bug，导致 prompt cache 大规模失效吗？
 
-先给结论。Claude Code 会提前根据当前模型计算有效上下文窗口，为生成摘要预留输出空间，再减去自动压缩缓冲区，得到触发线。消息的 token 估算达到这条线后，自动压缩流程优先尝试已经提炼好的 session memory；这条实验路径不可用时，才调用模型生成完整摘要。
+先说最典型、也最容易被误读的一类：**resume/continue 重建会话时改变了原本应该稳定的 prompt 前缀。** [GitHub issue #42338](https://github.com/anthropics/claude-code/issues/42338) 的受控测试记录了 `--continue` / `/resume` 在几秒内重新进入同一会话，`cache_read` 仍然降到 0，随后 400–500k token 被重新写入；issue 进一步引用分析认为，v2.1.69 引入的 `deferred_tools_delta` 在恢复 transcript 时重新排列了工具结果，导致字节级前缀不再相同。这不是“缓存 TTL 到期”，而是客户端重建出的请求已经不是同一个前缀。
 
-压缩完成后，运行时会重建一条新的消息链：压缩边界、摘要、明确保留的近期消息、文件/计划/Skill/后台 Agent 等附件，最后再接上 SessionStart Hook 的结果。`queryLoop()` 拿到这组消息后继续下一轮推理；早期逐字历史由摘要和恢复线索接替，任务状态则沿同一循环继续推进。
+Anthropic 的 [Prompt caching 复盘](https://claude.com/blog/lessons-from-building-claude-code-prompt-caching-is-everything) 解释了为什么这个改动会造成大面积失效：缓存不是按“语义相同”命中，而是从请求开头做 prefix match。系统提示、工具定义、项目上下文和会话内容只要在前面发生一个字节级变化，变化点之后全部都要重新 cache write。工具顺序非确定、工具参数变化、把动态时间戳塞进静态 system prompt、切换模型或增删 MCP 工具，都可能造成同样的结果。
 
-这里还有两个边界。第一，旧工具结果可能先由 microcompact 做更小粒度的清理，但 2.1.88 的普通回退路径已经删除；它是否生效取决于时间条件、内部构建能力、模型支持和功能开关。
+所以可以把问题分成三层：
+
+- **恢复 bug**：`--resume` / `--continue` 重新序列化 transcript 后，把 `system-reminder`、deferred tool 结果或工具顺序放到了不同位置；长会话的稳定前缀被破坏，表现是一次性 `cache_read=0` 和大规模 `cache_creation`。
+- **正常的主动失效**：切换模型、MCP 连接变化、`/compact`、升级 Claude Code 本来就会改变缓存边界。它们是设计上的重新建缓存，不应和恢复 bug 混为一谈。
+- **TTL 过期**：等待超过缓存 TTL 会自然重建缓存；这解释“隔一段时间后变贵”，但不能解释几秒内 resume 就全量重建。
+
+回到 `2.1.88` 的源码，最值得盯的是 `getSystemPrompt`、tool schema 装配和 transcript resume 重建：稳定 section 的顺序、`cacheBreak` 边界、MCP/tool list、`system-reminder` 的插入点，任何一个变化都会改变下一次请求的前缀。源码里看到的“恢复后 Skills/system 信息位置变化、约 3800 token cache recreate”正是这个机制的缩小版；长会话再叠加大量工具定义，就会放大成数十万 token 的重建。
+
+因此，问题的根因不是“Anthropic 的缓存偶尔抽风”，而是 **客户端把同一会话重新编码成了不同的前缀**。排查时不要只看总 token：同时比较相邻请求的 `cache_read_input_tokens`、`cache_creation_input_tokens`、模型 ID、工具列表顺序、system prompt hash 和 resume 前后的 message JSON。若只发生一次且伴随模型/MCP/compact/升级，属于预期失效；若几秒内 resume 就全量重写，优先按恢复序列化或 tool-order regression 定位。
 
 ## 压缩是一场可继续执行的上下文重建
 
