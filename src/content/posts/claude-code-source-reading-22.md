@@ -24,18 +24,42 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：命令系统能够加载能力以后，Claude Code 的 Skills 如何被发现、描述、按需展开，并影响模型与工具执行？
+上一篇留下的问题是：如果你在 Claude Code 中输入了一大段文字，然后回到开头在最前面输入 `/` 想选择一个 Skill，为什么这时不会弹出 slash 命令提示？
 
-先说结论。Claude Code 2.1.88 把 Skill 归一化为 `type: 'prompt'` 的 Command，并采用“发现时给索引、调用时给正文”的两阶段装载。它先从 managed、user、project、plugin、bundled 与 MCP 等来源收集 Skill；随后把名称、description、`whenToUse` 等发现信息放进 `skill_listing`，让模型知道“有什么能力可以用”。
+先说结论：这通常不是 Skill 没加载，而是 2.1.88 的 typeahead 把整个输入框的字符串当作一条 slash 命令来判断。你在已有长文本前插入 `/` 后，光标虽然在第一个字符后面，但 `value` 已经变成 `/<原来的长文本>`；提示系统没有把“光标所在的命令 token”和光标后的草稿分开。
 
-真正调用时才展开正文。用户可以输入 `/skill-name args`，模型则调用 `Skill` 工具并传入 `{ skill, args? }`。两条入口最后都会取得同一个 PromptCommand，替换参数与内置变量，注册 hooks，把 `allowed-tools` 转成当前轮的权限信息，再根据 `context` 走两条路径：
+源码里的第一道判断是：
 
-- `context` 取默认 inline 语义时，Skill 正文作为 meta user message 进入当前 Query Loop；
-- `context: fork` 时，正文交给 `runAgent()`，父会话只接收子 Agent 的结果。
+```ts
+export function isCommandInput(input: string): boolean {
+  return input.startsWith('/')
+}
+```
 
-这里有一个容易误解的地方：**“按需展开”指的是全文按需进入模型上下文，不代表程序直到调用时才从磁盘读取文件。** 文件型 Skill 在发现阶段已经读取并解析了 `SKILL.md`，正文保存在 Command 的闭包里；但 Claude 起初通常只看到受预算约束的简介，调用后才看到完整指令。
+它只看字符串是否以 `/` 开头，不看光标位置。接着，`findMidInputSlashCommand()` 明确先排除 `input.startsWith('/')`，所以这个场景不会进入“中间位置 slash”的 ghost text 路径；`findSlashCommandPositions()` 在 `PromptInput` 中只负责给已经存在的 slash 片段做高亮，不负责生成下拉列表。
 
-Skill 始终处在统一权限引擎里。模型调用 `Skill` 工具本身要经过 allow、ask、deny；Skill 声明的 `allowed-tools` 会成为后续工具调用的附加规则。`disable-model-invocation: true` 可以禁止模型主动调用，`user-invocable: false` 则禁止用户通过斜杠入口调用。两个开关分别约束两个方向。
+然后是导致“没有 popup”的关键分支。用户的长文本通常包含空格，而光标不在文本末尾时：
+
+```ts
+function hasCommandWithArguments(
+  isAtEndWithWhitespace: boolean,
+  value: string,
+) {
+  return !isAtEndWithWhitespace &&
+    value.includes(' ') &&
+    !value.endsWith(' ')
+}
+```
+
+`updateSuggestions()` 只有在 `!hasCommandWithArguments(...)` 时才会进入命令提示逻辑。于是 `"/长文本..."` 被视为“已经有命令参数的输入”，函数直接跳过 `generateCommandSuggestions()`，并清掉旧提示。即使原文恰好以空格结尾，后续分支也会把第一个空格前的整段内容当作 `commandName`；只要后面还有真实文本，就会清空下拉提示。
+
+还有第二层限制：即便长文本没有空格，`generateCommandSuggestions(value, commands)` 搜索的也是 `value.slice(1)`——整段原文，而不是光标前 `/` 后面的短 token。它自然很难匹配 `review`、`publish` 这类 Skill 名称。因此这不是“Skill description 没读到”，而是“命令候选计算的输入范围错了”。
+
+把它和官方文档放在一起看，会发现这是一个边界/回归问题。文档说明 `user-invocable: false` 才会把 Skill 从 `/` 菜单隐藏，默认可被用户调用；而 2.1.88 这里是在 Skill 可见性判断之前，就因为输入被解释成带参数的命令而退出。官方 changelog 曾记录“`/` 出现在输入任意位置时支持 slash autocomplete”，后续又持续修复 mid-input autocomplete 相关问题，说明“支持任意位置”并不等于每个光标位置都走同一套弹窗路径。
+
+实际使用时，最稳妥的顺序是先在空输入或只保留 `/skill` 的状态下选择 Skill，再把长文本作为它的参数粘贴进去；如果草稿已经很长，可以先把草稿暂存或复制到外部编辑器，完成 Skill 选择后再粘回。若只想让 Claude 自动使用能力，也可以直接描述任务，让 Skill 的 `description` 参与自动匹配，不必依赖 slash 下拉框。
+
+如果要修源码，不能简单地把“有空格就不提示”这一保护删掉：它原本是为了避免用户已经输入命令参数时，Tab/Enter 又选中另一条命令。更准确的修复是以 `cursorOffset` 切出光标处的 `/token`，只对 token 做匹配，并把光标后的原文作为 suffix 保留；这也解释了为什么当前实现会在用户“回到开头”时暴露问题。
 
 本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面只截取证明控制流所需的真实短代码，省略日志、遥测、实验分支和无关参数；还原路径只用于定位本文引用的源码。
 
@@ -600,3 +624,11 @@ Skill 把一组指令按需展开以后，Claude Code 的 Task 运行时如何�
 - [Claude Code Skills](https://code.claude.com/docs/en/skills)
 
 - [Claude Code 扩展能力总览](https://code.claude.com/docs/en/features-overview)
+
+- [Extend Claude with skills - Claude Code Docs](https://code.claude.com/docs/en/slash-commands)
+
+- [Claude Code changelog](https://code.claude.com/docs/en/changelog)
+
+- [Lessons from building Claude Code: How we use skills](https://claude.com/blog/lessons-from-building-claude-code-how-we-use-skills)
+
+- [Skills from marketplace plugins don't appear in slash command autocomplete #18949](https://github.com/anthropics/claude-code/issues/18949)
