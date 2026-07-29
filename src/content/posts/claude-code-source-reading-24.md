@@ -24,7 +24,7 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：在 Claude Code 的执行链路中，tool-use 与 Task 分别负责什么，它们又是如何关联的？
+上一篇留下的问题是：在 Claude Code 的执行链路中，tool-use 与 Task 之间是如何关联的？
 
 先说结论：**它们是两层不同的对象。`tool_use` 是模型在消息中发出的一次工具调用请求；Task 是运行时为了管理长时间、可后台化或可取消的执行实例建立的生命周期记录。一个 `tool_use` 可以没有 Task，一个 Task 也可以没有对应的 `tool_use`；只有当工具创建任务时，二者才通过可选的 `toolUseId` 关联。**
 

@@ -382,7 +382,7 @@ Claude Code 的 Task 运行时可以压成一句话：**统一状态，分散执
 
 ## 留给下一篇的问题
 
-在 Claude Code 的执行链路中，tool-use 与 Task 分别负责什么，它们又是如何关联的？
+在 Claude Code 的执行链路中，tool-use 与 Task 之间是如何关联的？
 
 ## 参考资料
 
