@@ -12,6 +12,8 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
+这次改写前，我阅读了官方 [Claude Code error reference 的图片与请求大小说明](https://code.claude.com/docs/en/errors) 和一篇实测型的 [Claude Code image analysis 文章](https://claudcod.com/blog/claude-code-image-analysis/)。前者把图片尺寸、HTTP 请求大小和 context window 分成不同错误；后者提醒图片会进入会话上下文，裁剪和压缩只能降低风险，不能保证整段请求一定装得下。
+
 上一篇留下的问题是：**如果任务要求识别一张其内容超过当前上下文容量的图片，这次 `tool_use` 会不会失败、又会在哪一层失败？**
 
 先给结论：**不一定，而且即使最终失败，也不一定是这次 `tool_use` 本身失败。要先区分 Read 的单图预算、图片硬限制和整段对话的上下文窗口。**

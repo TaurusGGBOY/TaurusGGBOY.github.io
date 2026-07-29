@@ -23,6 +23,8 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
+我先读了 Anthropic 的 [session management 文章](https://claude.com/blog/using-claude-code-session-management-and-1m-context) 和 Clearly 的 [restart/clear 实践说明](https://www.clearly.sh/blog/how-to-restart-claude-code)。两篇文章都把 `/clear`/`/new` 描述成“清掉对话上下文、保留项目现场”，并把旧 transcript 与当前活动会话区分开来。
+
 上一篇最后的问题是：在 Claude Code CLI 中执行 `/new` 时，它究竟重置了哪些会话状态，又保留了哪些运行现场？
 
 答案先说：**`/new` 在当前 CLI 进程内切换活动会话，保留项目环境和进程级基础设施。**

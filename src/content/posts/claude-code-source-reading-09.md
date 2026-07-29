@@ -23,6 +23,8 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
+改写前我阅读了官方 [Tools reference](https://code.claude.com/docs/en/tools-reference) 和 Anthropic 的 [Seeing like an agent: how we design tools](https://claude.com/blog/seeing-like-an-agent)。两篇文章都提醒，Beta header 只是请求能力声明；工具是否真的可用，还要经过模型/provider 能力、工具池、Schema 和本地权限筛选。
+
 上一篇留下的问题是：**你知道 Beta 开关打开的时候有什么新功能吗？**
 
 源码把 Beta 表达为一组随请求发送的能力声明，最终组合成 `betas` 数组；具体 header 由 provider、模型、功能开关和运行模式共同决定。

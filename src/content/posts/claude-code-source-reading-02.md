@@ -23,6 +23,8 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
+我先对照阅读了 [LangChain 关于把 Claude Code 变成领域 Agent 的实验记录](https://www.langchain.com/blog/how-to-turn-claude-code-into-a-domain-specific-coding-agent) 和 [Developers Digest 的 Agent SDK/LangGraph 架构比较](https://www.developersdigest.tech/blog/claude-agent-sdk-vs-langgraph)。前者强调“指南提供方向、工具按需补细节”，后者把两者的边界说得更直接：SDK 继承一套现成循环，LangGraph 由开发者拥有状态和边。
+
 上一篇的问题是：如果我们用 LangGraph 开发一个编程 Agent，它和 Claude Code 到底有什么区别。
 
 答案先说：区别很大。

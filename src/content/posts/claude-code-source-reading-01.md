@@ -23,6 +23,8 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
+这次重写前，我先阅读了 [Coder 对源代码泄漏与供应链风险的复盘](https://coder.com/blog/what-the-claude-code-leak-tells-us-about-supply-chain-security) 和 [Vidoc 对泄漏源码安全边界的分析](https://blog.vidocsecurity.com/blog/claude-code-security-what-it-actually-secures)。两篇文章的共同提醒是：公开源码既能暴露真实实现，也容易把“历史缺陷”“已修复路径”和“仍可利用问题”混成一件事。
+
 上一篇最后留下的问题是，因为这次源码泄漏事件，网友们发现了 Claude Code 中的哪些 bug。
 
 先说答案。源码公开以后，网友确实顺着它找到了不少有意思的问题。不过，这些发现并不都代表 Claude Code 现在仍然存在漏洞。有些 bug 可以实际复现，有些只是源码注释记录下来的历史事故，还有一些属于值得继续验证的攻击面。

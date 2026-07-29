@@ -26,9 +26,26 @@ imagePosition: "left"
 
 上一篇留下的问题是：你知道 rewind 的时候哪些东西是无法回滚的吗？
 
-答案先说清楚：**rewind 不是整个 Agent 会话的 Undo，而是针对 File History 检查点的文件系统恢复。** 它只能处理已经被文件历史追踪、并且在目标消息检查点上留下备份的文件版本；对话内容、模型已经产生的推理、网络和数据库副作用、没有进入追踪流程的文件修改，都不在这条恢复链里。即使是被追踪的文件，恢复也按文件逐个执行，某个文件失败不会把已经恢复的其他文件重新撤销。
+这个问题在很多博文里都会被写成“给 Claude Code 加了一个 Ctrl+Z”。这个比喻不算错，但还不够精确。比如，[Clearly 的实践文章](https://www.clearly.sh/blog/claude-code-checkpoints-rewind)把 rewind 概括成“撤销错误的文件修改，同时保留当前会话”；[Jordan James Media 的教程](https://jordanjamesmedia.com/blog/post/claude-code-checkpoints-rewind/)则把它拆成 conversation only、code only 和 both 三种恢复选择；[The Prompt Shelf 的会话管理文章](https://thepromptshelf.dev/blog/claude-code-session-resume-continue-guide-2026/)进一步提醒，Bash 命令改出来的文件不在 checkpoint 的追踪范围内。它们看起来像是在描述不同功能，其实首先是在描述不同版本或不同入口。
 
-因此，看到“rewind 成功”时，准确理解应该是“目标检查点对应的文件恢复流程完成”，而不是“系统回到了过去的完整世界”。
+本文分析的是 `@anthropic-ai/claude-code@2.1.88` 的还原源码，不能把后来版本的 `/rewind` 菜单选项直接倒灌进这个版本。对这份源码，最准确的结论是：**`fileHistoryRewind` 是文件历史恢复，不是整个 Agent 世界的 Undo。** 它沿着 `fileHistoryRewind → applySnapshot → restoreBackup/unlink` 这条链恢复磁盘文件；它不会自动撤销已经发生的外部副作用，也不会让一次批量恢复获得跨文件事务语义。
+
+## 先把“不能回滚”拆成六类
+
+| 边界 | 为什么不能回滚 | `2.1.88` 源码落点 |
+|---|---|---|
+| **Bash 或人工改动** | 文件历史只在 Write、Edit、NotebookEdit 真正落盘前调用 `fileHistoryTrackEdit`；通过 Bash 的 `sed`、`mv`、`cp` 或用户编辑器改文件，不会自动留下同一套备份。 | `fileHistoryTrackEdit` 的调用方是文件编辑工具，而不是任意进程监控器。 |
+| **网络、数据库、部署和 Git 外部副作用** | `git push`、数据库写入、API 请求、发布部署已经改变了外部系统，复制一份本地文件备份无法反向撤销它们。 | `fileHistoryRewind` 最终只调用 `copyFile`、`chmod` 或 `unlink`。 |
+| **没有进入当前 trackedFiles 的文件** | 没有在目标消息检查点建立备份，就没有可供 `applySnapshot` 解析的 `backupFileName`；其他会话或检查点之外的文件不属于这次恢复范围。 | `FileHistorySnapshot.trackedFileBackups` 与 `applySnapshot(state, targetSnapshot)`。 |
+| **对话和模型已经产生的上下文** | 这条 `fileHistoryRewind` 调用链没有截断 transcript，也没有撤销已经完成的模型推理。较新的交互式产品可能另外提供“恢复对话”选项，但那是另一条控制路径，不能和本版文件恢复混为一谈。 | `REPL.tsx` / `print.ts` 调用的是文件历史恢复函数。 |
+| **不存在、被淘汰或未启用的 checkpoint** | checkpointing 被关闭、备份创建失败、snapshot 被淘汰，或者 `messageId` 找不到匹配 snapshot 时，系统没有完整的目标版本可恢复。 | `fileHistoryEnabled`、最多保留 100 个 snapshot、`The selected snapshot was not found`。 |
+| **跨文件的完整一致性** | `applySnapshot` 按文件循环并逐个捕获异常；某个文件恢复失败时，前面已经恢复的文件不会自动回滚。 | `applySnapshot` 的单文件 `try/catch` 与 `tengu_file_history_rewind_restore_file_failed` 事件。 |
+
+这个表也解释了为什么“代码回来了”不等于“任务回到了过去”。最多只能说：在目标消息对应的文件检查点里，仍有备份、且恢复操作成功执行的那些文件回来了。命令产生的构建目录、Git 指针、远程服务状态、另一会话的修改，以及模型已经看过的上下文，都要分别处理。
+
+还有一个容易被忽略的风险：`checkOriginFileChanged` 只是在恢复前判断当前文件是否与备份不同，并不会替你做三方合并。随后 `restoreBackup` 直接复制备份内容；如果用户在 checkpoint 之后手工改过同一个文件，这些修改可能被目标版本覆盖。所谓 rewind 是“回到旧文件快照”，不是“把旧版本和新版本智能合并”。
+
+因此，实践中可以按问题类型选择动作：只是文件改错了，优先用 code-only 的思路恢复文件；如果是模型已经陷入错误推理，单纯恢复文件不够，还要考虑恢复对话或重新开会话；如果是命令已经推送到远端、写入数据库或完成部署，就应该使用对应系统的补偿操作或 Git/发布系统的回滚，而不是继续寻找一个本地 checkpoint。
 
 本文继续限定在 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码。下面的代码均来自 `restored-src/`，只省略与本段结论无关的字段与分支。
 
