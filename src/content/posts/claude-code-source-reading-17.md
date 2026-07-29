@@ -231,6 +231,27 @@ session memory 能用时，它会保留一段近期原始消息。默认配置�
 
 这解释了“保留什么”的第一层答案：已经提炼的 session memory 与近期逐字消息共同提供上下文，减少摘要漂移对正在执行任务的影响。
 
+### session memory 中到底有什么
+
+它不是一份隐藏的完整 transcript，也不是 CLAUDE.md 或 system prompt 的副本，而是当前会话目录下的 Markdown 文件：`{projectDir}/{sessionId}/session-memory/summary.md`。文件由一个隔离的 forked Agent 读取和编辑；更新提示明确要求它只根据用户对话写入笔记，不把 system prompt、CLAUDE.md、过去的 session summary 或“正在做笔记”的指令混进内容。压缩时，`getSessionMemoryContent()` 读取这份文件，`createCompactionResultFromSessionMemory()` 把它包进摘要消息，而不是再次调用 compact API。
+
+默认模板固定了 10 个 section，真正可变的是每个斜体说明下面的内容：
+
+1. **Session Title**：5–10 个词的高信息密度会话标题。
+2. **Current State**：当前正在做什么、哪些任务未完成、下一步是什么。
+3. **Task specification**：用户要求、设计决定和必要的背景解释。
+4. **Files and Functions**：关键文件、函数，以及它们为什么重要。
+5. **Workflow**：常用命令、执行顺序和不明显的输出解释。
+6. **Errors & Corrections**：遇到的错误、修复方式、用户纠正过的方向，以及不要重试的失败方案。
+7. **Codebase and System Documentation**：重要系统组件及其关系和工作方式。
+8. **Learnings**：有效做法、无效做法和需要避免的经验，不能重复其他 section。
+9. **Key results**：用户要求的答案、表格或文档等结果的完整内容。
+10. **Worklog**：按步骤记录已经尝试和完成的事情，要求非常简短。
+
+模板本身还保留每个 section 的斜体说明；Agent 只能改说明下面的正文，不能改 section 标题或说明。
+
+这份 memory 有两层预算。更新 prompt 会把总量控制在约 12,000 token，每个 section 超过约 2,000 token 会要求 Agent 压缩；真正插入 compact 消息时又按每 section 约 2,000 token（源码用字符数近似）截断，截断后会在对应位置放入 `[... section truncated for length ...]`，并告诉模型完整文件路径。也就是说，session memory 保存的是“可继续执行任务所需的结构化状态”：当前状态、约束、关键证据和恢复线索，而不是逐字保留所有历史。
+
 ### 第四步：传统 compact 让一个受限 Agent 写摘要
 
 完整压缩入口的签名如下：
@@ -352,7 +373,7 @@ Claude Code 通过分层减负与结构化重建，让长会话在有限窗口�
 
 ## 留给下一篇的问题
 
-上下文压缩解决了窗口限制以后，Claude Code 的 Hooks 如何在生命周期节点观察、改写、阻止或扩展一次运行？
+当 /compact 进行到一半时，你手动中断，然后再次执行 /compact，你觉得压缩还能继续进行吗？
 
 ## 参考资料
 

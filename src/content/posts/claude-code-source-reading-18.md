@@ -24,9 +24,21 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇最后留下的问题是：上下文压缩解决了窗口限制以后，Claude Code 的 Hooks 如何在生命周期节点观察、改写、阻止或扩展一次运行？
+上一篇最后留下的问题是：当 /compact 进行到一半时，你手动中断，然后再次执行 /compact，你觉得压缩还能继续进行吗？
 
-先说结论：Claude Code 通过一组明确的生命周期节点接入外部逻辑，在事件边界传入结构化 JSON，再接收结构化结果。
+先给结论：**可以再次压缩，但不能从上一次中断的位置续传。** 第二次 `/compact` 会读取当前仍然有效的消息，再从头走一遍压缩流程；上一次已经生成了一半的摘要不会被当成 checkpoint。
+
+2.1.88 的传统路径把 `CompactionResult` 保存在 `compactConversation()` 的局部变量里。它必须先拿到完整摘要，再生成文件、计划、Skill 和 deferred tool 附件，执行 `SessionStart` / `PostCompact` hooks，最后才由 slash-command 处理器调用 `buildPostCompactMessages()`，把 boundary、summary、保留消息和附件一次性替换进会话。中途按 Esc 或 Ctrl-C 时，abort signal 会传给 PreCompact/PostCompact hooks、forked summary Agent 和流式 API；异常被 `call()` 转成 `Compaction canceled.`。因此，半截流式文本、半成品 boundary 和未完成附件都不会进入主消息数组。
+
+这也解释了为什么重试是“重新压缩”，不是“接着压缩”：如果第一次停在传统摘要的模型请求阶段，第二次会重新执行 microcompact、重新生成摘要，重新跑后续清理。第一次调用产生的本地变量不会跨命令保留；只有 hook 已经执行过的外部副作用（例如写文件或发请求）可能留下，压缩本身不会替你回滚这些副作用。官方错误说明给出的恢复方式也是先释放上下文后再次运行 `/compact`，而不是恢复某个半截摘要；见 [Claude Code 错误说明](https://code.claude.com/docs/en/errors)。
+
+session memory 是一个容易混淆的例外。手工 `/compact` 会优先尝试 `trySessionMemoryCompaction()`：它读取当前会话的 `summary.md`，而不是调用 compact API。若另一个后台 memory extraction 正在运行，它最多等待 15 秒；等到 extraction 完成后，下一次 `/compact` 可以复用已经写完的笔记。Anthropic 的 [session memory compaction cookbook](https://platform.claude.com/cookbook/misc-session-memory-compaction) 也把这种“后台提前生成、触发时立即使用”的模式作为 instant compaction 的核心。
+
+但这仍不是断点续传。`lastSummarizedMessageId` 只有 extraction 成功后才更新；如果边界不存在，源码把它当作 resumed session，重新计算近期消息保留区，并调整边界避免拆开 `tool_use` / `tool_result`。如果 memory 文件不存在、仍是模板、读取失败，或重建后的消息仍超过阈值，就返回 `null`，回退到传统 compact。若文件已经被编辑过但 extraction 尚未完整结束，源码只能看到磁盘上的当前内容，无法判断其中哪些段是“已经完成”的，因此这类内容应视为可能不完整的状态，而不是可验证的增量摘要。
+
+所以可以把结果分成三种：**传统 compact 被中断：重跑；session memory 已完整落盘：下一次可以复用整份 memory；session memory 只写了一半：不会续写，只会把当前文件当作输入，必要时回退传统摘要。** [Anthropic 的会话管理文章](https://claude.com/blog/using-claude-code-session-management-and-1m-context) 将 `/compact` 描述为“总结会话后继续”，它强调的是成功后的新上下文，并不意味着中断请求拥有可恢复的中间状态。
+
+本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块都是短摘录，`// ...` 只标记被删去的埋点、UI 消息和无关分支；还原路径只用于定位本文引用的源码。
 
 一次 Hook 的主路径可以概括为五步：
 
@@ -37,8 +49,6 @@ imagePosition: "left"
 5. 调用方解释输出：PreToolUse 可以改写输入并参与 `allow / ask / deny` 决策，PostToolUse 可以补上下文，PreCompact 可以补摘要指令，Stop 可以把阻断反馈交回模型再运行一轮。
 
 所以，Hook 既能观察，也能改变后续控制流，但能力取决于所在事件。一个 PostToolUse Hook 看见工具结果，不代表它能让已经完成的本地文件写入自动回滚；一个异步 Hook 已经让主流程继续，也不能再用普通同步返回值改写那次工具输入。
-
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块都是短摘录，`// ...` 只标记被删去的埋点、UI 消息和无关分支；还原路径只用于定位本文引用的源码。
 
 ## Hook 用生命周期协议接入运行时
 
