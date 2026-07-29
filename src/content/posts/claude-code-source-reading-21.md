@@ -74,6 +74,20 @@ type LocalJSXCommand = {
 
 这个联合类型集中定义后续分流。新增命令必须选择控制权属于模型、本地函数还是 UI；选择以后，运行时统一负责消息包装、错误处理和是否继续查询。
 
+### 三种类型分别对应哪些命令
+
+以 `@anthropic-ai/claude-code@2.1.88` 的内置命令为例，可以先用下面的表建立直觉：
+
+| `type` | 典型命令 | 源码入口 | 执行结果 |
+| --- | --- | --- | --- |
+| `local` | `/clear`（别名 `/new`）、`/compact`、`/cost`、`/files`、`/version` | 命令对象提供 `load()`，模块再实现 `call()` | 在 CLI 进程本地完成，返回文本、压缩结果或 `skip`，不会进入模型查询 |
+| `local-jsx` | `/branch`、`/config`、`/model`、`/permissions`、`/resume`、`/help` | `load()` 懒加载 React/Ink UI；结束时通过 `onDone()` 回传结果 | 打开选择器、表单或其他终端界面；`onDone()` 可以决定是否继续查询 |
+| `prompt` | `/review`、`/commit`、`/commit-push-pr`、`/statusline` | 命令对象直接实现 `getPromptForCommand(args)` | 把命令参数展开成 `ContentBlockParam[]`，包装成消息后交给 Query Loop |
+
+这里的分类不是根据命令名字猜出来的，也不是看函数返回值临时推断的，而是由命令对象上的字符串字面量字段 `type` 明确标记。`processSlashCommand.tsx` 先用输入的名字和 alias 找到一个 `Command`，随后在 `getMessagesForSlashCommand()` 中执行 `switch (command.type)`：`local-jsx` 走 UI 的 `load().then(mod => mod.call(...))`，`local` 调用模块的 `call(args, context)`，`prompt` 调用 `getPromptForCommand()`。这就是 TypeScript 判别联合在运行时对应的显式路由。
+
+因此，`/review` 虽然最终会让模型分析 Pull Request，却仍然是 `prompt`：它的本地工作只是生成一段提示词；而 `/branch` 即使会改变当前会话，也属于 `local-jsx`，因为它需要先交给终端 UI 完成分支操作。命令的“名字”描述用户意图，`type` 才决定 Claude Code 采用哪条控制流。
+
 ![Claude Code 斜杠命令解析与三类执行路径手绘图](/images/posts/claude-code-source-reading-21/21-command-system-handdrawn.png)
 
 图里最重要的控制字段是 `shouldQuery`，它只出现在通往 Query Loop 的路径上。`local` 可以产生输出，`local-jsx` 可以产生界面，但二者都不会因此自动调用模型。
