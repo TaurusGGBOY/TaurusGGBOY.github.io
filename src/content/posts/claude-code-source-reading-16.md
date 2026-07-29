@@ -24,23 +24,13 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇最后留下的问题是：搜索结果和项目文件找齐以后，Claude Code 如何把 CLAUDE.md、cwd、git 状态、工具与用户配置组装成 system prompt 和本轮上下文？
+上一篇留下的问题是：你知道 Claude Code 会用你默认的模型进行 WebSearch 吗？
 
-先说结论：它把上下文分成 system prompt、user context 和 system context 三条通道。
+答案不是简单的“是”或“不是”。默认情况下，WebSearch 会沿用当前主循环的 `context.options.mainLoopModel`；但运行时功能开关 `tengu_plum_vx3` 为真时，搜索流会切换到 `getSmallFastModel()`，优先使用 `ANTHROPIC_SMALL_FAST_MODEL`，未设置时回退到默认 Haiku。
 
-第一条是 **system prompt**。固定行为规范、当前模型、cwd、平台、Shell、已启用工具带来的使用指引，以及语言、output style 等设置，会被组装成一个字符串数组。第二条是 **user context**。CLAUDE.md、rules 和当前日期会被包装成一条 `isMeta: true` 的 user message，放到本轮历史最前面。第三条是 **system context**。会话开始时的 git 分支、工作区状态和最近提交，会被追加到 system prompt 尾部。
+因此，`isEnabled()` 返回 true 只说明当前 provider/model 组合具备 WebSearch 能力，不代表最终搜索模型已经确定。真正的模型选择发生在 `WebSearchTool.call()`：默认分支使用主循环模型，功能开关分支使用 small fast model；两条路径都通过独立的模型流调用服务端 WebSearch 工具。
 
-工具还要单独看。工具名称会影响 system prompt 中的使用说明，但真正的工具描述与输入 Schema 通过 API 的 `tools` 字段传入，并不靠自然语言 prompt 冒充工具契约。
-
-因此，一次请求的核心形态是：
-
-```text
-system = 默认行为规范 + 环境信息 + 用户设置 + git 快照
-messages = CLAUDE.md/currentDate 元消息 + 对话历史 + 本轮输入
-tools = 当前工具集合对应的 API Schema
-```
-
-这段最小模型是本文对三条真实组装路径的概括。`system`、`messages`、`tools` 是最终模型调用中彼此独立的字段；后文会逐条回到还原源码验证它们。
+所以更准确的回答是：**默认情况下会使用当前主循环模型，但并不是任何情况下都固定使用默认模型。**
 
 本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块都是短摘录，省略了与当前结论无关的日志、埋点和实验分支；还原路径只用于定位本文引用的源码。
 

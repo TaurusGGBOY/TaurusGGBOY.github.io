@@ -24,17 +24,11 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：当 Agent 不知道目标在哪里时，Glob、Grep、Read、WebSearch 与 WebFetch 等检索工具如何分层搜索并裁剪结果？
+上一篇留下的问题是：你知道 rewind 的时候哪些东西是无法回滚的吗？
 
-答案先说：**Claude Code 用多种检索工具逐层缩小未知范围，再把每一层的结果压成模型能够继续消费的 `tool_result`。**
+答案先说清楚：**rewind 不是整个 Agent 会话的 Undo，而是针对 File History 检查点的文件系统恢复。** 它只能处理已经被文件历史追踪、并且在目标消息检查点上留下备份的文件版本；对话内容、模型已经产生的推理、网络和数据库副作用、没有进入追踪流程的文件修改，都不在这条恢复链里。即使是被追踪的文件，恢复也按文件逐个执行，某个文件失败不会把已经恢复的其他文件重新撤销。
 
-本地路径最典型的顺序是 `Glob → Grep → Read`。`Glob` 根据文件名模式圈出候选文件，`Grep` 用正则在文件内容里定位命中，`Read` 最后读取确定文件的一段内容。网络路径则是 `WebSearch → WebFetch`：前者找候选页面与链接，后者抓取指定 URL，并按照 `prompt` 提取与当前任务相关的信息。
-
-这几种工具可以按已知信息自由组合。已经知道文件路径时可以直接 `Read`；只需要确认某个符号出现在哪些文件时，`Grep` 可以直接从 cwd 开始；用户给出了网页 URL，可以直接交给 `WebFetch`。这里的“分层”指各工具分别处理路径发现、内容定位、定点读取和网络提取，调用顺序由当前证据决定。
-
-裁剪发生在每一层。`Glob` 默认最多返回 100 个路径；`Grep` 默认保留 250 行或条目，并支持 `offset` 翻页；`Read` 用 `offset`、`limit`、字节上限和 token 上限控制文件切片；`WebSearch` 把服务端搜索块整理为标题、URL 和文本；`WebFetch` 最多把 100,000 个字符交给二次模型处理。它们最后都经过各自的 `mapToolResultToToolResultBlockParam()`，变成查询循环能追加到消息历史的 `tool_result`。
-
-因此，`No files found` 或 `No matches found` 只表示：**本次 path、pattern、ignore 规则、权限范围与分页窗口共同得到空结果。** 超时、截断、权限拒绝和网络失败属于独立状态，不能归入空结果。
+因此，看到“rewind 成功”时，准确理解应该是“目标检查点对应的文件恢复流程完成”，而不是“系统回到了过去的完整世界”。
 
 本文继续限定在 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码。下面的代码均来自 `restored-src/`，只省略与本段结论无关的字段与分支。
 
@@ -293,7 +287,7 @@ Claude Code 的检索能力可以概括成三条原则。
 
 ## 留给下一篇的问题
 
-搜索结果和项目文件找齐以后，Claude Code 如何把 CLAUDE.md、cwd、git 状态、工具与用户配置组装成 system prompt 和本轮上下文？
+你知道 Claude Code 会用你默认的模型进行 WebSearch 吗？
 
 ## 参考资料
 
