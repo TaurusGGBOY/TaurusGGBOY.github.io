@@ -24,15 +24,63 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：Skill 把一组指令按需展开以后，Claude Code 的 Task 运行时如何创建、调度、观察并收束长时间任务？
+上一篇留下的问题是：如果你想自己定义一个 Skill slash 命令，你应该怎么实现？
 
-答案先说：**Claude Code 把“任务是什么”收进统一状态，把“任务怎么跑”交给不同实现，再用输出文件、通知队列和取消接口把生命周期接回来。**
+答案先说：**在 2.1.88 中，通常不需要注册新的 TypeScript `Command`。创建一个 Skill 目录和 `SKILL.md`，Claude Code 就会把它加载成一个 `type: 'prompt'` 的 Command；用户输入 `/skill-name` 或模型调用 `Skill` 工具时，正文才被展开并送进 Query Loop。**
 
-一个长时间 Bash 命令、一个本地 Agent、一个远程 Agent，执行方式完全不同。强行塞进同一个 `run()` 函数，只会得到一个满是分支的巨型调度器。2.1.88 选择的公共面更窄：运行中的实例进入 `AppState.tasks`；共同状态使用 `pending`、`running`、`completed`、`failed`、`killed`；每种任务自己负责启动、完成回调和终态通知；统一的 `TaskStop` 再按 `type` 找到对应的 `kill()`。
+最小的项目级结构可以这样写：
 
-前台与后台描述的是**结果由谁等待**。前台时，当前工具调用还在等结果，并持续显示进度；后台时，进程或 Agent 继续运行，当前调用先把 task ID 和输出文件交还给模型。之后任务完成，通过 `task-notification` 触发新一轮处理。`isBackgrounded` 可以在运行中从 `false` 变为 `true`，底层任务继续沿用同一个运行实例。
+```text
+.claude/
+└── skills/
+    └── release-note/
+        ├── SKILL.md
+        ├── checklist.md       # 可选：按需读取的参考资料
+        └── scripts/
+            └── validate.sh    # 可选：由正文明确要求执行
+```
 
-这就是本篇的主线：创建状态，注册实例，执行者推进，输出落盘，终态入队，主循环回收。本文仍以仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原的 `restored-src/` 为边界。下面的源码只省略与当前结论无关的字段和 UI 分支。
+`SKILL.md` 至少应该有一段清晰的说明和一组可执行指令，例如：
+
+```markdown
+---
+name: release-note
+description: 根据当前 Git 变更生成发布说明；用户准备发版或要求整理 changelog 时使用。
+argument-hint: [version]
+allowed-tools: Read Grep Bash
+user-invocable: true
+context: fork
+---
+
+请检查当前变更，生成版本 $ARGUMENTS 的发布说明。
+先读取 checklist.md，再运行测试；不要修改源文件。
+```
+
+目录位置决定作用域：`.claude/skills/<name>/SKILL.md` 只对当前项目可见，`~/.claude/skills/<name>/SKILL.md` 可用于个人的所有项目。源码中的 `loadSkillsFromSkillsDir()` 只把目录（或符号链接）下名为 `SKILL.md` 的文件当作现代 Skill；`skills/` 下面直接放一个 `release-note.md` 不会被这个加载器接受。
+
+旧的 `.claude/commands/` 仍然兼容单文件写法：`.claude/commands/release-note.md` 也会生成 `/release-note`。这条路径会被标记为 `commands_DEPRECATED`；普通命令名来自去掉 `.md` 的文件名，Skill 目录命令名来自目录名，嵌套目录则由 `buildNamespace()` 拼成类似 `team:release-note` 的名字。对于新项目，目录式 Skill 更适合携带参考文件和脚本。
+
+真正的“命令化”发生在加载器内部，而不在 Markdown 文件本身：`getSkills()` 并行收集项目/个人 Skill、插件 Skill 和 bundled Skill；`loadSkillsFromSkillsDir()` 读取 frontmatter 与正文；`parseSkillFrontmatterFields()` 解析开关、参数和执行上下文；最后 `createSkillCommand()` 返回：
+
+```ts
+{
+  type: 'prompt',
+  name: skillName,
+  description,
+  userInvocable,
+  disableModelInvocation,
+  context: executionContext,
+  async getPromptForCommand(args, toolUseContext) { /* 展开正文 */ },
+}
+```
+
+这里有三个容易写错的边界。第一，在本地/项目 Skill 中，2.1.88 的路由名来自目录名，frontmatter 的 `name` 主要作为显示名称；`description` 缺省时源码会从正文第一段提取。第二，`user-invocable` 缺省为 `true`，设为 `false` 会隐藏并阻止用户直接输入 slash；`disable-model-invocation` 缺省为 `false`，设为 `true` 则禁止模型通过 `Skill` 工具调用。第三，`context` 只有精确值 `'fork'` 才会在模型通过 `Skill` 工具调用时进入隔离 Agent；`undefined`、`'inline'` 或其他字符串都会按当前会话展开，用户直接输入 slash 仍先走 PromptCommand 路径。`allowed-tools` 只是给后续工具增加允许规则，仍受 deny、沙箱和工具自身校验约束。
+
+调用 `/release-note v1.2` 时，`getPromptForCommand()` 会先补上 Skill 根目录，再替换 `$ARGUMENTS`、命名参数以及 `${CLAUDE_SKILL_DIR}`、`${CLAUDE_SESSION_ID}`；非 MCP Skill 的正文还可以经过统一的 inline shell 展开器。随后 `processPromptSlashCommand()` 把结果包装为消息，`shouldQuery: true` 让 Query Loop 继续处理，因此 Skill 本身不是一个直接执行 Bash 的函数，而是一份带路由和权限元数据的 PromptCommand。
+
+如果 frontmatter 写了 `context: fork`，`SkillTool.call()` 会改走 `executeForkedSkill()`：源码创建新的 `agentId`，调用 `runAgent()`，收集子 Agent 的消息和进度，最后只把提取出的结果文本返回父会话。也就是说，自定义 slash 命令的实现工作止于“定义 Skill”；上下文隔离、任务状态、输出回收和取消，交给后面的 Task 运行时处理。
+
+本文仍以仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原的 `restored-src/` 为边界。外部资料可以帮助理解推荐写法，但命令名来源、frontmatter 默认值和 `Command` 包装方式以这份版本源码为准。
 
 ## 两种 Task 分别描述执行实例与协作事项
 
@@ -341,3 +389,9 @@ Claude Code 的 Task 运行时可以压成一句话：**统一状态，分散执
 - [Claude Code 交互模式与任务列表](https://code.claude.com/docs/en/interactive-mode)
 
 - [Claude Code Commands](https://code.claude.com/docs/en/commands)
+
+- [Extend Claude with skills - Claude Code Docs](https://code.claude.com/docs/en/slash-commands)
+
+- [How to create custom skills - Claude Help Center](https://support.claude.com/en/articles/12512198-how-to-create-custom-skills)
+
+- [Claude Code Custom Slash Commands: Build Reusable Workflows with Skills](https://thepromptshelf.dev/blog/claude-code-custom-slash-commands/)

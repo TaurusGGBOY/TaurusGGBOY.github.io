@@ -617,7 +617,7 @@ Claude Code 的 Skill 系统复用 Command 与 Query Loop 执行内核。它把�
 
 ## 留给下一篇的问题
 
-Skill 把一组指令按需展开以后，Claude Code 的 Task 运行时如何创建、调度、观察并收束长时间任务？
+如果你想自己定义一个 Skill slash 命令，你应该怎么实现？
 
 ## 参考资料
 
