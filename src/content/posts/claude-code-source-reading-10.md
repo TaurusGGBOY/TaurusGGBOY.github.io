@@ -11,8 +11,6 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-我先阅读了官方 [Tools reference](https://code.claude.com/docs/en/tools-reference) 和 Caelan Drayer 的 [Built-in tools 目录](https://caelandrayer.ca/kb/AI/claude-code-guide-part-6-built-in-tools)。前者给出权限与工具名的规范，后者按“模型什么时候会用它”整理了实践清单；两者都把内置工具与 MCP、插件和 Skill 明确分开。
-
 上一篇留下的问题是：**你知道 Claude Code 自带哪些 tool 吗？**
 
 先给结论：源码在 `restored-src/src/tools.ts::getAllBaseTools()` 定义内置候选集；每次请求再经过 `isEnabled()`、权限 deny 规则、运行模式、provider 能力和功能开关，得到本轮发给模型的工具池。
@@ -516,6 +514,7 @@ Tool orchestration 在保持副作用顺序的前提下，释放工具明确声�
 
 ## 参考资料
 
+- [Claude Code Built-in Tools](https://caelandrayer.ca/kb/AI/claude-code-guide-part-6-built-in-tools)
 - [Anthropic 工具调用实现指南](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/implement-tool-use)
 
 - [Claude Code 工具参考](https://code.claude.com/docs/en/tools-reference)

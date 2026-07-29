@@ -23,8 +23,6 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-我先阅读了 Anthropic 的 [`claude -p`/Agent SDK 运行说明](https://code.claude.com/docs/en/headless) 和一篇实际使用者整理的 [Claude Code 权限模式比较](https://claudcod.com/blog/claude-code-permissions/)。两者都把 `-p` 定义为 non-interactive，而不是“把交互界面隐藏起来”：提示、输出格式和权限询问都必须由参数、配置或外部宿主接管。
-
 上一篇最后留下的问题来自一个很具体的命令：`claude -p`。当它无法像普通 REPL 一样停下来与用户交互时，工具权限由谁决定；而对 Claude Code 来说，带 `-p` 与不带 `-p`，究竟只是输出形式不同，还是运行模式已经变了？
 
 答案先说：**运行模式改变了权限的交互入口；本地弹窗改由配置规则或外部协议承担。**
@@ -434,6 +432,7 @@ Claude Code 通过宿主、会话包装、消息协议和执行循环的分层�
 
 ## 参考资料
 
+- [Claude Code 权限模式比较](https://claudcod.com/blog/claude-code-permissions/)
 - [非交互模式](https://code.claude.com/docs/en/headless)
 
 - [Remote Control](https://code.claude.com/docs/en/remote-control)

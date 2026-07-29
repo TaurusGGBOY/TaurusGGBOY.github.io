@@ -23,8 +23,6 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-在改写前，我阅读了官方的 [Agent SDK 运行说明](https://code.claude.com/docs/en/headless) 和 [Developers Digest 的 SDK/LangGraph 选型文章](https://www.developersdigest.tech/blog/claude-agent-sdk-vs-langgraph)。它们的实际建议很一致：一次性脚本适合 CLI，持续接收消息、控制权限和消费结构化事件时，SDK 的宿主接口更合适。
-
 上一篇的问题是：当代码需要结合 Claude Code 时，到底应该直接调用 `claude -p`，还是使用 Claude Agent SDK；分别在什么场景下使用它们？
 
 先给结论：**如果你的程序只需要“提交任务，等待结果”，优先使用 `claude -p`；如果还要在运行过程中持续观察、控制并维持会话，使用 Claude Agent SDK。**
@@ -333,6 +331,8 @@ try {
 
 ## 参考资料
 
+- [Claude Agent SDK vs LangGraph](https://www.developersdigest.tech/blog/claude-agent-sdk-vs-langgraph)
+- [Using Claude Code: session management and 1M context](https://claude.com/blog/using-claude-code-session-management-and-1m-context)
 - [非交互模式与结构化输出](https://code.claude.com/docs/en/headless)
 
 - [Claude Code 的工作方式](https://code.claude.com/docs/en/how-claude-code-works)

@@ -24,8 +24,6 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-我先阅读了 Anthropic 的 [Haiku 4.5 说明](https://www.anthropic.com/claude/haiku) 和官方 [Claude Code model configuration](https://code.claude.com/docs/en/model-config)。前者解释了为什么低延迟模型常被用于高频、并行、子 Agent 工作；后者则说明“Default”、主会话模型、别名和环境变量是不同层次，不能把用户看到的默认选项等同于每个内部工具调用的模型。
-
 上一篇留下的问题是：你知道 Claude Code 会用你默认的模型进行 WebSearch 吗？
 
 答案不是简单的“是”或“不是”。默认情况下，WebSearch 会沿用当前主循环的 `context.options.mainLoopModel`；但运行时功能开关 `tengu_plum_vx3` 为真时，搜索流会切换到 `getSmallFastModel()`，优先使用 `ANTHROPIC_SMALL_FAST_MODEL`，未设置时回退到默认 Haiku。
@@ -405,6 +403,8 @@ Claude Code 的项目上下文组装可以归纳成四步。
 
 ## 参考资料
 
+- [Claude Haiku 4.5](https://www.anthropic.com/claude/haiku)
+- [Claude Code model configuration](https://code.claude.com/docs/en/model-config)
 - [Claude Code 项目记忆](https://code.claude.com/docs/en/memory)
 
 - [Claude Code Prompt Caching](https://code.claude.com/docs/en/prompt-caching)

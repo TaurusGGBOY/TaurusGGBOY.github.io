@@ -24,8 +24,6 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-我先阅读了 Anthropic 的 [session/context 文章](https://claude.com/blog/using-claude-code-session-management-and-1m-context) 和同一份 [Advanced Claude Code CLI 实践手册](https://media.licdn.com/dms/document/media/v2/D4E1FAQE9GrR1bPPyNQ/feedshare-document-pdf-analyzed/B4EZp.4We2KMAY-/0/1763065294861?e=1770854400&t=D8gaypHX1jhHDgxTXFEdEHVG9M64ImehhCdzEL1lZ4&v=beta)。它们分别说明了会话持久化与 Esc 的两种语义：一次是回到旧消息重试，一次只是暂停当前生成。
-
 上一篇留下的问题是：**如果用户刚发完一条消息，却马上发现有问题并打断（例如按 `Esc` / `Ctrl+C`），这条消息还会出现在后面的对话里吗？**
 
 先给结论：在 **transcript（持久会话日志）**里，这条用户消息通常会先被落盘；在 **当前会话视图**里，REPL 可能会把它回滚成“未发送”，所以你看到的可能是看起来没记住这条消息。
@@ -525,6 +523,8 @@ Claude Code 的 API 层做的事情，可以概括为一句话：**把不完整�
 
 ## 参考资料
 
+- [Using Claude Code: session management and 1M context](https://claude.com/blog/using-claude-code-session-management-and-1m-context)
+- [Advanced Claude Code 实践手册](https://media.licdn.com/dms/document/media/v2/D4E1FAQE9GrR1bPPyNQ/feedshare-document-pdf-analyzed/B4EZp.4We2KMAY-/0/1763065294861?e=1770854400&t=D8gaypHX1jhHDgxTXFEdEHVG9M64ImehhCdzEL1lZ4&v=beta)
 - [Messages API 流式传输](https://docs.anthropic.com/en/api/messages-streaming)
 
 - [Claude Code 模型配置](https://code.claude.com/docs/en/model-config)

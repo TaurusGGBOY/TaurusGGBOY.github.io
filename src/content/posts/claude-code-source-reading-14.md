@@ -24,8 +24,6 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-改写前我阅读了 Netnerds 的 [PowerShell 与 Claude Code hooks 实践](https://blog.netnerds.net/2026/02/claude-code-powershell-hooks/) 和 Microsoft 的 [PowerShell 异常处理说明](https://learn.microsoft.com/en-us/powershell/scripting/learn/deep-dives/everything-about-exceptions?view=powershell-7.5)。前者展示了 Bash/PowerShell 边界、引用和模块环境造成的真实失败，后者把 parse error、parameter binding 和运行时异常明确分层。
-
 上一篇留下的问题是：从当前版本看来，为什么很多 PowerShell 脚本要到执行时才报错？
 
 先给结论：PowerShell 的“能被解析”和“能在当前主机上成功执行”是两件事。2.1.88 里的安全链会先用 PowerShell 自己的 AST 做语法与危险结构分析，再做权限判断；这一步的目标是判断“是否应该允许尝试”，不是提前运行脚本验证所有命令、模块、路径、数据和外部程序。真正执行时，PowerShell 才会解析命令名、绑定参数、加载模块、读取环境和文件，并产生 stdout、stderr 与退出码，所以很多错误只能在这个阶段出现。
@@ -522,6 +520,8 @@ Claude Code 的文件安全可以压缩成四步：Read 保存一份带范围和
 
 ## 参考资料
 
+- [PowerShell 与 Claude Code hooks 实践](https://blog.netnerds.net/2026/02/claude-code-powershell-hooks/)
+- [Everything about exceptions](https://learn.microsoft.com/en-us/powershell/scripting/learn/deep-dives/everything-about-exceptions?view=powershell-7.5)
 - [Claude Code Checkpointing](https://code.claude.com/docs/en/checkpointing)
 
 - [Claude Code 权限配置](https://code.claude.com/docs/en/permissions)

@@ -23,8 +23,6 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-这次回答前，我阅读了官方 [Agent SDK agent loop 说明](https://code.claude.com/docs/en/agent-sdk/agent-loop) 和一份面向 CLI 使用者的 [Advanced Claude Code 实践手册](https://media.licdn.com/dms/document/media/v2/D4E1FAQE9GrR1bPPyNQ/feedshare-document-pdf-analyzed/B4EZp.4We2KMAY-/0/1763065294861?e=1770854400&t=D8gaypHX1jhHDgxTXFEdEHVG9M64ImehhCdzEL1lZ4&v=beta)。前者明确说 `maxTurns` 只统计带工具调用的 agentic turns，后者把 Esc 中断和继续输入的体验与这条循环区分开。
-
 上一篇的问题是：Claude Code 里的 `turn` 到底算什么？我发一句用户消息后，后续每次“工具调用 + 结果反馈”的往返都算一个新的 turn 吗？`maxTurns` 这个上限能不能手动设置？
 
 先给结论：在 Claude Code 的语境里，`turn` 是“一个完整回合”——一次用户输入触发的模型输出结束。输出可以直接以文本收束，也可以包含若干 `tool_use`，等待工具结果后再进入下一次模型决策。每一组 `tool_use` + `tool_result` 回流都会开启下一条 `turn`；最终文本收束则产生最后一个 `turn`。`maxTurns` 主要约束这类工具驱动回合的续航。
@@ -691,6 +689,8 @@ Claude Code 的对话通过多组关系键保持可追踪：不同 ID 分别表�
 
 ## 参考资料
 
+- [How the agent loop works](https://code.claude.com/docs/en/agent-sdk/agent-loop)
+- [Advanced Claude Code 实践手册](https://media.licdn.com/dms/document/media/v2/D4E1FAQE9GrR1bPPyNQ/feedshare-document-pdf-analyzed/B4EZp.4We2KMAY-/0/1763065294861?e=1770854400&t=D8gaypHX1jhHDgxTXFEdEHVG9M64ImehhCdzEL1lZ4&v=beta)
 - [Anthropic Messages API](https://docs.anthropic.com/en/api/messages)
 
 - [流式 Messages API](https://docs.anthropic.com/en/api/messages-streaming)

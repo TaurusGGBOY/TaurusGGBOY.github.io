@@ -23,8 +23,6 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-我先对照阅读了 [LangChain 关于把 Claude Code 变成领域 Agent 的实验记录](https://www.langchain.com/blog/how-to-turn-claude-code-into-a-domain-specific-coding-agent) 和 [Developers Digest 的 Agent SDK/LangGraph 架构比较](https://www.developersdigest.tech/blog/claude-agent-sdk-vs-langgraph)。前者强调“指南提供方向、工具按需补细节”，后者把两者的边界说得更直接：SDK 继承一套现成循环，LangGraph 由开发者拥有状态和边。
-
 上一篇的问题是：如果我们用 LangGraph 开发一个编程 Agent，它和 Claude Code 到底有什么区别。
 
 答案先说：区别很大。
@@ -72,7 +70,7 @@ Claude Code 以 TypeScript/Node.js CLI 交付，又要同时服务 REPL、IDE、
 
 ### Open SWE 为什么适合 LangGraph
 
-LangChain 官方开源的 [Open SWE](https://github.com/langchain-ai/open-swe) 是一个很好的对照。截至 2026 年 7 月，它在 GitHub 上约有 10.3k stars，基于 LangGraph 和 Deep Agents 构建。
+LangChain 官方开源的 Open SWE 是一个很好的对照。截至 2026 年 7 月，它在 GitHub 上约有 10.3k stars，基于 LangGraph 和 Deep Agents 构建。
 
 Open SWE 从 Slack、Linear 或 GitHub 接收任务，在云端沙箱中修改代码、运行测试并创建 Pull Request，还要管理子 Agent、任务状态和异步恢复。它有明显的多阶段工作流和持久化需求，所以 LangGraph 的 graph、state、interrupt 和运行平台能够直接产生价值。
 
@@ -308,6 +306,9 @@ ReAct 是一种经典的 Agent 工作方式：模型先根据当前信息进行�
 
 ## 参考资料
 
+- [How to Turn Claude Code into a Domain-Specific Coding Agent](https://www.langchain.com/blog/how-to-turn-claude-code-into-a-domain-specific-coding-agent)
+- [Claude Agent SDK vs LangGraph](https://www.developersdigest.tech/blog/claude-agent-sdk-vs-langgraph)
+- [Open SWE](https://github.com/langchain-ai/open-swe)
 - [Claude Code 的工作方式](https://code.claude.com/docs/en/how-claude-code-works)
 
 - [Dive into Claude Code：生产级 Agent 的设计空间](https://arxiv.org/abs/2604.14228)

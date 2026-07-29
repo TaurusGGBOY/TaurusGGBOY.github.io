@@ -26,7 +26,7 @@ imagePosition: "left"
 
 上一篇留下的问题是：你知道 rewind 的时候哪些东西是无法回滚的吗？
 
-这个问题在很多博文里都会被写成“给 Claude Code 加了一个 Ctrl+Z”。这个比喻不算错，但还不够精确。比如，[Clearly 的实践文章](https://www.clearly.sh/blog/claude-code-checkpoints-rewind)把 rewind 概括成“撤销错误的文件修改，同时保留当前会话”；[Jordan James Media 的教程](https://jordanjamesmedia.com/blog/post/claude-code-checkpoints-rewind/)则把它拆成 conversation only、code only 和 both 三种恢复选择；[The Prompt Shelf 的会话管理文章](https://thepromptshelf.dev/blog/claude-code-session-resume-continue-guide-2026/)进一步提醒，Bash 命令改出来的文件不在 checkpoint 的追踪范围内。它们看起来像是在描述不同功能，其实首先是在描述不同版本或不同入口。
+把 rewind 想成“给 Claude Code 加了一个 Ctrl+Z”不算错，但还不够精确。关键要先区分文件快照、会话消息和外部副作用：不同入口可能只恢复其中一层，Bash 或其他进程改动也不一定进入文件历史。
 
 本文分析的是 `@anthropic-ai/claude-code@2.1.88` 的还原源码，不能把后来版本的 `/rewind` 菜单选项直接倒灌进这个版本。对这份源码，最准确的结论是：**`fileHistoryRewind` 是文件历史恢复，不是整个 Agent 世界的 Undo。** 它沿着 `fileHistoryRewind → applySnapshot → restoreBackup/unlink` 这条链恢复磁盘文件；它不会自动撤销已经发生的外部副作用，也不会让一次批量恢复获得跨文件事务语义。
 
@@ -308,6 +308,9 @@ Claude Code 的检索能力可以概括成三条原则。
 
 ## 参考资料
 
+- [Claude Code Checkpoints and Rewind](https://www.clearly.sh/blog/claude-code-checkpoints-rewind)
+- [Claude Code Checkpoints & Rewind](https://jordanjamesmedia.com/blog/post/claude-code-checkpoints-rewind/)
+- [Claude Code session resume/continue guide](https://thepromptshelf.dev/blog/claude-code-session-resume-continue-guide-2026/)
 - [Claude Code 工具参考](https://code.claude.com/docs/en/tools-reference)
 
 - [Claude Code 上下文窗口](https://code.claude.com/docs/en/context-window)

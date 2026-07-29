@@ -23,8 +23,6 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-创作前我阅读了 [n8n 对 ReAct Agent 回环的拆解](https://blog.n8n.io/react-agent/) 和 [Zapier 对 Thought–Action–Observation 流程的说明](https://zapier.com/blog/react-agent/)。它们都把 ReAct 定义为“模型决定动作、工具返回观察、模型继续决策”的循环，同时提醒生产系统必须补上迭代上限、错误处理和上下文管理。
-
 上一篇留下的问题是：Claude Code 的 `queryLoop` 算不算 ReAct，它与经典 ReAct 又有什么区别？
 
 先说答案：**从执行范式看，它当然算 ReAct；从工程实现看，它又远不止 ReAct。**
@@ -510,6 +508,8 @@ Claude Code 的启动过程先分流运行模式，再逐步建立可信的项�
 
 ## 参考资料
 
+- [How to Build a ReAct Agent](https://blog.n8n.io/react-agent/)
+- [What Is a ReAct Agent?](https://zapier.com/blog/react-agent/)
 - [Claude Code 快速入门](https://code.claude.com/docs/en/quickstart)
 
 - [Claude Code 安装与更新](https://code.claude.com/docs/en/installation)

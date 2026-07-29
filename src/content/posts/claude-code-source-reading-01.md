@@ -23,17 +23,15 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-这次重写前，我先阅读了 [Coder 对源代码泄漏与供应链风险的复盘](https://coder.com/blog/what-the-claude-code-leak-tells-us-about-supply-chain-security) 和 [Vidoc 对泄漏源码安全边界的分析](https://blog.vidocsecurity.com/blog/claude-code-security-what-it-actually-secures)。两篇文章的共同提醒是：公开源码既能暴露真实实现，也容易把“历史缺陷”“已修复路径”和“仍可利用问题”混成一件事。
-
 上一篇最后留下的问题是，因为这次源码泄漏事件，网友们发现了 Claude Code 中的哪些 bug。
 
 先说答案。源码公开以后，网友确实顺着它找到了不少有意思的问题。不过，这些发现并不都代表 Claude Code 现在仍然存在漏洞。有些 bug 可以实际复现，有些只是源码注释记录下来的历史事故，还有一些属于值得继续验证的攻击面。
 
-第一个问题和 prompt cache 有关。一份[公开 issue](https://github.com/anthropics/claude-code/issues/44045)记录了这样一个现象：恢复会话以后，Skills 列表和其他系统信息移动到了新的位置。人眼看到的文本内容近似不变；按照前缀匹配的缓存会因顺序变化而重写后续内容。复现数据中，每恢复一次会话，都会重新创建大约 3800 个缓存 token。这也解释了为什么有些用户只是继续一段旧对话，token 消耗却像重新开始了一次会话。
+第一个问题和 prompt cache 有关。一份公开 issue 记录了这样一个现象：恢复会话以后，Skills 列表和其他系统信息移动到了新的位置。人眼看到的文本内容近似不变；按照前缀匹配的缓存会因顺序变化而重写后续内容。复现数据中，每恢复一次会话，都会重新创建大约 3800 个缓存 token。这也解释了为什么有些用户只是继续一段旧对话，token 消耗却像重新开始了一次会话。
 
-第二个问题更夸张。泄露源码中的一段注释记录，Claude Code 曾经有 1279 个会话连续压缩失败 50 次以上，最严重的一个会话失败了 3272 次，每天因此浪费大约 25 万次 API 调用。[Alex Kim 对泄露源码的整理](https://alex000kim.com/posts/2026-03-31-claude-code-source-leak/)也记录了这组数字。2.1.88 已经加上熔断保护，连续失败 3 次就停止重试。因此，这段源码记录的是已经加入保护的历史故障。
+第二个问题更夸张。泄露源码中的一段注释记录，Claude Code 曾经有 1279 个会话连续压缩失败 50 次以上，最严重的一个会话失败了 3272 次，每天因此浪费大约 25 万次 API 调用。独立的源码整理也记录了这组数字。2.1.88 已经加上熔断保护，连续失败 3 次就停止重试。因此，这段源码记录的是已经加入保护的历史故障。
 
-第三个问题出现在权限检查里。某些看起来安全的命令曾经可以提前得到允许，后面的重定向检查因此不会继续执行。一条原本只是提交 Git 记录的命令，就可能把输出写进 shell 启动配置，并在用户下次打开终端时产生副作用。2.1.88 中已经能看到针对这个路径的保护。[Straiker 的安全分析](https://www.straiker.ai/blog/claude-code-source-leak-with-great-agency-comes-great-responsibility)提到这个案例时，也把重点放在了多套 shell 解析逻辑之间的差异上。
+第三个问题出现在权限检查里。某些看起来安全的命令曾经可以提前得到允许，后面的重定向检查因此不会继续执行。一条原本只是提交 Git 记录的命令，就可能把输出写进 shell 启动配置，并在用户下次打开终端时产生副作用。2.1.88 中已经能看到针对这个路径的保护。安全分析也把重点放在了多套 shell 解析逻辑之间的差异上。
 
 这三个 bug 分别落在上下文与模型、会话内核、执行与权限三个区域。理解它们的共同前提，是把 Claude Code 看成一套由多个区域协作的 Agent 系统。
 
@@ -133,6 +131,10 @@ LangGraph 是一个有状态 Agent 编排框架。开发者可以把模型调用
 
 ## 参考资料
 
+- [What the Claude Code Leak Tells Us About Supply Chain Security](https://coder.com/blog/what-the-claude-code-leak-tells-us-about-supply-chain-security)
+- [Claude Code Security: What It Actually Secures](https://blog.vidocsecurity.com/blog/claude-code-security-what-it-actually-secures)
+- [Claude Code Source Leak: Analysis](https://alex000kim.com/posts/2026-03-31-claude-code-source-leak/)
+- [Claude Code Source Leak: With Great Agency Comes Great Responsibility](https://www.straiker.ai/blog/claude-code-source-leak-with-great-agency-comes-great-responsibility)
 - [Claude Code 的工作方式](https://code.claude.com/docs/en/how-claude-code-works)
 
 - [Dive into Claude Code：生产级 Agent 的设计空间](https://arxiv.org/abs/2604.14228)

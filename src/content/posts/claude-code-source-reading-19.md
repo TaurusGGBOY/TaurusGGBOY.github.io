@@ -24,13 +24,39 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：当 Hook、工具、网络或模型调用失败时，Claude Code 如何分类错误、重试、恢复，并决定继续还是终止？
+上一篇留下的问题是：你能想到 Hook 有什么妙用？
 
-先说结论。Claude Code 先按失败发生的位置做隔离，再决定这个失败能否安全地回到 Agent 循环：Hook 会被归并为成功、阻断、非阻断错误或取消；工具异常会变成与原 `tool_use_id` 配对的 `is_error: true` 的 `tool_result`；API 和网络错误先进入 `withRetry()`，满足重试条件才退避重发；流式传输失败还可能切到非流式请求；连续 529 在满足模型与运行环境条件时，可以触发备用模型。
+先给结论：Hook 最有价值的地方，不是替模型再写一段提示词，而是把“每次都必须发生”的动作放到生命周期边界上，让它变成可重复、可审计的工程约束。社区里已经有人把 Hook 用成安全护栏、提交前审查器、上下文注入器、后台任务调度器和完成通知器。
 
-最后仍然无法恢复的 API 错误会被映射成带 `error` 分类的 synthetic assistant message，避免异常形态穿透所有 UI 和 SDK。`queryLoop()` 看见这类消息后跳过普通 Stop Hook，执行 `StopFailure` Hook，然后结束本轮。用户取消走独立路径：`AbortSignal` 终止等待或工具，运行时补一条 interruption message，取消不会被归入网络失败重试。
+### 1. 把危险操作和敏感文件挡在 `PreToolUse`
 
-所以，Claude Code 的恢复机制依次做三道判断：错误属于哪一层；重做是否会放大副作用；恢复后消息协议能否保持完整。三道判断都过关，执行才会继续。
+一个很实用的起点，是在 `Bash`、`Write` 或 `Edit` 真正执行前检查输入：拒绝 `rm -rf`、向主分支强制 push、fork bomb，或者阻止修改 `.env`、SSH key、云凭证、锁文件和 CI 配置。社区实战中的做法是让 Hook 读取 JSON stdin，匹配命令或路径，命中后返回非零退出码或结构化 deny；模型会收到原因并改走其他方案。
+
+这里的关键不是“让 Claude 记住不要做什么”，而是把规则放在模型决策之后、工具副作用之前。规则写在 Hook 里，即使 prompt 漏掉了约束，也不会直接越过这道门。
+
+### 2. 把 `git commit` 变成自动 code review 门禁
+
+另一个社区工作流是在 `PreToolUse` 里只匹配 `git commit`：Hook 启动一个 reviewer subagent 检查 staged diff，严重问题直接阻止提交，轻微问题可以自动修复但保持 unstaged，让主 Agent或开发者复核后再提交。这样做比让主 Agent 自己“提交前顺手 review 一遍”稳定，因为 review 是提交动作的固定前置条件。
+
+这个模式也说明 Hook 和 subagent 的分工：Hook 负责决定什么时候必须审查、审查失败能不能继续；subagent 负责在隔离上下文里阅读 diff。前者是事件驱动的门，后者是一次有边界的分析任务。
+
+### 3. 用 `SessionStart` 和 `Stop` 管理长期会话
+
+有人把团队规则、当前分支状态和项目运行手册放进 `SessionStart`，每次新会话或 resume 都自动注入；也有人在 `PostToolUse` 追踪 Edit、Write、Bash 造成的变化，在 `Stop` 时让隔离 Agent 把关键进展同步到 `CLAUDE.md` 或项目 memory。这样可以减少把长篇背景重复塞进主会话的成本，但要注意只写入经过筛选的事实，别把临时日志和整个 transcript 复制进去。
+
+`Stop` 还可以用来做“完成定义”检查：例如测试失败就阻止停止，把失败摘要交回模型继续修复。社区示例特别强调 `stop_hook_active` 保护；没有这个循环护栏，Stop Hook 可能在每次重试时再次阻止停止，形成自激循环。
+
+### 4. 把阻塞命令改造成后台任务
+
+`PreToolUse` 不只用来拒绝。对于 `npm run dev`、`tail -f` 这类会一直占住前台的命令，社区有人用 Hook 识别它们，改写输入或注入指令，让命令转入后台并过滤日志；主 Agent 继续做下一步，另一个监控路径再通过 `PostToolUse` 或 Monitor 工具消费输出。
+
+这类用法的边界是版本和事件能力：Hook 能否改写 `updatedInput`，取决于当前事件的输出协议与 2.1.88 还原源码；不能确认的字段不要照抄后续版本示例。即使不能改写，也可以在 `PreToolUse` 返回提醒或拒绝前台阻塞命令，让模型重新组织调用。
+
+### 5. 把“人在等待”变成可达的通知
+
+长时间运行的任务不应该要求人盯着终端。`Notification` 可以接 macOS/Linux 桌面通知，或转发到 Slack、手机推送；`Stop` 则适合通知“整个任务已经结束”。社区实践通常把权限等待、空闲等待和最终完成分开通知，避免把每一次工具进度都变成噪音。
+
+所以，Hook 的妙用可以浓缩成一句话：**把不可忘记的规则放到不可绕过的事件点，把需要隔离的分析交给 subagent，把需要等待人的状态接到通知系统。** 它不是万能的工作流编排器；Hook 自身仍可能超时、失败或重复触发，生产配置要做 matcher、超时、幂等和递归保护。
 
 ## 错误恢复是一条分层的控制流
 
@@ -474,6 +500,10 @@ API 层用 `shouldRetry()` 判断连接、超时、锁冲突、限流、认证�
 
 ## 参考资料
 
+- [Claude Code's Most Underrated Feature: Hooks](https://www.reddit.com/r/ClaudeCode/comments/1qlzzzf/claude_codes_most_underrated_feature_hooks_wrote/)
+- [Automate Your Claude Code Workflow with Essential Hooks](https://www.reddit.com/r/ClaudeWorkflows/comments/1v6lxrg/workflow_automate_your_claude_code_workflow_with/)
+- [Advanced Claude Code Hooks for Prompt Improvement and Memory Sync](https://www.reddit.com/r/ClaudeWorkflows/comments/1v6onha/workflow_advanced_claude_code_hooks_for_automated/)
+- [Claude Code Hooks and Automation](https://claudcod.com/blog/claude-code-hooks/)
 - [Claude Code 错误参考](https://code.claude.com/docs/en/errors)
 
 - [Claude Code 监控与 API 错误事件](https://code.claude.com/docs/en/monitoring-usage)

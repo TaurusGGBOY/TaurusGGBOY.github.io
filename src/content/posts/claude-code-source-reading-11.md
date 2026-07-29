@@ -12,8 +12,6 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-我先读了 [Harness Books 对 Claude Code 工具编排的章节](https://harness-books.agentway.dev/en/book1-claude-code/exported/book1-claude-code-en.pdf) 和官方 [Tools reference](https://code.claude.com/docs/en/tools-reference)。前者从 `partitionToolCalls` 说明并发批次与串行屏障，后者则强调“并发安全”不等于跳过权限、输入校验或工具自身限制。
-
 上一篇留下的问题是：**你认为 `WebSearch` 在任何情况下都可以并发执行吗？**
 
 这个问题要分成“工具怎样声明”和“调用是否真的同时运行”两层看。
@@ -491,6 +489,7 @@ transcript 里记录的是消息协议结果，而 file history 记录的是文�
 
 ## 参考资料
 
+- [Claude Code 工具编排](https://harness-books.agentway.dev/en/book1-claude-code/exported/book1-claude-code-en.pdf)
 - [Anthropic 工具调用实现指南](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/implement-tool-use)
 
 - [Claude Code Hooks 参考](https://code.claude.com/docs/en/hooks)

@@ -26,9 +26,9 @@ imagePosition: "left"
 
 上一篇留下的问题是：你知道 Claude Code 出现过什么 bug，导致 prompt cache 大规模失效吗？
 
-先说最典型、也最容易被误读的一类：**resume/continue 重建会话时改变了原本应该稳定的 prompt 前缀。** [GitHub issue #42338](https://github.com/anthropics/claude-code/issues/42338) 的受控测试记录了 `--continue` / `/resume` 在几秒内重新进入同一会话，`cache_read` 仍然降到 0，随后 400–500k token 被重新写入；issue 进一步引用分析认为，v2.1.69 引入的 `deferred_tools_delta` 在恢复 transcript 时重新排列了工具结果，导致字节级前缀不再相同。这不是“缓存 TTL 到期”，而是客户端重建出的请求已经不是同一个前缀。
+先说最典型、也最容易被误读的一类：**resume/continue 重建会话时改变了原本应该稳定的 prompt 前缀。** 受控测试记录了 `--continue` / `/resume` 在几秒内重新进入同一会话，`cache_read` 仍然降到 0，随后 400–500k token 被重新写入；进一步的版本分析认为，v2.1.69 引入的 `deferred_tools_delta` 在恢复 transcript 时重新排列了工具结果，导致字节级前缀不再相同。这不是“缓存 TTL 到期”，而是客户端重建出的请求已经不是同一个前缀。
 
-Anthropic 的 [Prompt caching 复盘](https://claude.com/blog/lessons-from-building-claude-code-prompt-caching-is-everything) 解释了为什么这个改动会造成大面积失效：缓存不是按“语义相同”命中，而是从请求开头做 prefix match。系统提示、工具定义、项目上下文和会话内容只要在前面发生一个字节级变化，变化点之后全部都要重新 cache write。工具顺序非确定、工具参数变化、把动态时间戳塞进静态 system prompt、切换模型或增删 MCP 工具，都可能造成同样的结果。
+这类改动会造成大面积失效，是因为缓存不是按“语义相同”命中，而是从请求开头做 prefix match。系统提示、工具定义、项目上下文和会话内容只要在前面发生一个字节级变化，变化点之后全部都要重新 cache write。工具顺序非确定、工具参数变化、把动态时间戳塞进静态 system prompt、切换模型或增删 MCP 工具，都可能造成同样的结果。
 
 所以可以把问题分成三层：
 
@@ -189,6 +189,8 @@ export async function microcompactMessages(
 
 ### 第三步：达到阈值后，优先复用 session memory
 
+这里先定义 `session memory`：它是当前会话目录下的一份结构化 Markdown 笔记，由后台的隔离 Agent 从用户对话中提炼，用来在压缩或恢复时保留任务状态。它不是完整 transcript，也不是 `CLAUDE.md` 或 system prompt 的副本；它保存的是可继续执行所需的目标、约束、关键文件、错误和恢复线索。
+
 `autoCompactIfNeeded()` 把判断与执行接起来。主干可以缩成下面几行：
 
 ```ts
@@ -233,7 +235,7 @@ session memory 能用时，它会保留一段近期原始消息。默认配置�
 
 ### session memory 中到底有什么
 
-它不是一份隐藏的完整 transcript，也不是 CLAUDE.md 或 system prompt 的副本，而是当前会话目录下的 Markdown 文件：`{projectDir}/{sessionId}/session-memory/summary.md`。文件由一个隔离的 forked Agent 读取和编辑；更新提示明确要求它只根据用户对话写入笔记，不把 system prompt、CLAUDE.md、过去的 session summary 或“正在做笔记”的指令混进内容。压缩时，`getSessionMemoryContent()` 读取这份文件，`createCompactionResultFromSessionMemory()` 把它包进摘要消息，而不是再次调用 compact API。
+具体实现是当前会话目录下的 Markdown 文件：`{projectDir}/{sessionId}/session-memory/summary.md`。文件由一个隔离的 forked Agent 读取和编辑；更新提示明确要求它只根据用户对话写入笔记，不把 system prompt、CLAUDE.md、过去的 session summary 或“正在做笔记”的指令混进内容。压缩时，`getSessionMemoryContent()` 读取这份文件，`createCompactionResultFromSessionMemory()` 把它包进摘要消息，而不是再次调用 compact API。
 
 默认模板固定了 10 个 section，真正可变的是每个斜体说明下面的内容：
 
@@ -377,6 +379,8 @@ Claude Code 通过分层减负与结构化重建，让长会话在有限窗口�
 
 ## 参考资料
 
+- [Session resume invalidates entire prompt cache · Issue #42338](https://github.com/anthropics/claude-code/issues/42338)
+- [Lessons from building Claude Code: Prompt caching is everything](https://claude.com/blog/lessons-from-building-claude-code-prompt-caching-is-everything)
 - [Claude Code 上下文窗口](https://code.claude.com/docs/en/context-window)
 
 - [Claude Code 的工作方式](https://code.claude.com/docs/en/how-claude-code-works)

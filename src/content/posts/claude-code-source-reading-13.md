@@ -12,8 +12,6 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-我先阅读了 Anthropic 的 [Auto mode 工程说明](https://www.anthropic.com/engineering/claude-code-auto-mode) 和 Shine Soft 的 [Auto Mode 分析](https://blog.shinesoftcorp.com/blog/enhancing-claude-code-safety-with-auto-mode-a-deep-dive/)。两篇文章都指出自动模式使用模型分类器承接一部分人工审批，但它仍是云端推理链，不是本地静态规则，也不替代后面的沙箱和执行检查。
-
 上一篇留下的问题是：当 permission mode 为 `auto` 时，“自动”具体体现在哪里？
 
 先给结论：`auto` 不是把所有工具直接放行，而是把权限链里原本需要交给人的 `ask`，交给一组源码明确的自动决策路径。已经命中 deny 或 allow 的结果不会重新进入这条路径；只有 `hasPermissionsToUseToolInner()` 返回 `ask` 时，外层 `hasPermissionsToUseTool()` 才会继续检查 `auto`。
@@ -452,6 +450,8 @@ Windows 原生平台使用独立的 `PowerShellTool` 和 PowerShell AST 解析�
 
 ## 参考资料
 
+- [How we built Claude Code auto mode](https://www.anthropic.com/engineering/claude-code-auto-mode)
+- [Enhancing Claude Code Safety with Auto Mode](https://blog.shinesoftcorp.com/blog/enhancing-claude-code-safety-with-auto-mode-a-deep-dive/)
 - [Claude Code 沙箱机制](https://code.claude.com/docs/en/sandboxing)
 
 - [Claude Code 权限配置](https://code.claude.com/docs/en/permissions)
