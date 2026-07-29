@@ -382,7 +382,7 @@ Claude Code 的 Task 运行时可以压成一句话：**统一状态，分散执
 
 ## 留给下一篇的问题
 
-当一个任务需要独立上下文和专门能力时，Claude Code 如何创建 subagent、选择 Agent 定义，并在主线程与子线程之间传递结果？
+tool-use 和 Task 的关系是什么？
 
 ## 参考资料
 

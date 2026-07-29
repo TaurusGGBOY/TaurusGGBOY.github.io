@@ -24,21 +24,52 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：当一个任务需要独立上下文和专门能力时，Claude Code 如何创建 subagent、选择 Agent 定义，并在主线程与子线程之间传递结果？
+上一篇留下的问题是：tool-use 和 Task 的关系是什么？
 
-先说结论：**Claude Code 把 subagent 做成一次受约束的 Agent 工具调用，为子任务重新装配上下文、工具、权限和 transcript。**
+先说结论：**它们是两层不同的对象。`tool_use` 是模型在消息中发出的一次工具调用请求；Task 是运行时为了管理长时间、可后台化或可取消的执行实例建立的生命周期记录。一个 `tool_use` 可以没有 Task，一个 Task 也可以没有对应的 `tool_use`；只有当工具创建任务时，二者才通过可选的 `toolUseId` 关联。**
 
-主线程先发出 `Agent` 的 `tool_use`，其中至少包含任务说明和 prompt。`AgentTool.call()` 再从当前生效的 Agent 定义中选出一种角色，解析模型、工具、权限模式和运行方式，最后把这些参数交给 `runAgent()`。`runAgent()` 会创建新的 agent ID、消息数组、文件读取缓存、工具上下文和 sidechain transcript，然后复用同一个 `query()` 内核独立执行。
+在 Claude API 的协议层，assistant 消息包含 `tool_use` 块，里面有 `id`、`name` 和 `input`。2.1.88 的 `runToolUse()` 接收这个块，按 `name` 找到工具，执行权限检查，再把工具产生的结果包装成 `tool_result`，其中的 `tool_use_id` 必须回填原来的 `tool_use.id`。所以 `tool_use` 解决的是“模型这一次想调用什么，以及这一次调用怎样和消息历史配对”。
 
-这里有两个容易混淆的地方。
+`StreamingToolExecutor.executeTool()` 则负责把这个协议调用放进运行时队列：标记工具为 `executing`，为它创建可中断的子控制器，消费 `runToolUse()` 的进度和消息，最后把结果收集回这个工具调用。这里的 `tool.status` 是工具执行器的短生命周期状态，不等于 Task 的 `pending/running/completed/failed/killed`。
 
-第一，普通 subagent 默认不会继承父会话的对话历史。父线程必须在 `prompt` 里交代目标、已知事实、文件路径和约束。2.1.88 还有一条 feature-gated 的 Fork 路径：省略 `subagent_type` 时，它可以把父消息过滤后带入子线程。但这是实验分支，不能把它当成所有 subagent 的通用语义。
+Task 在另一层描述“执行实例怎样活着”。`createTaskStateBase()` 的签名已经把关系写得很清楚：
 
-第二，“隔离上下文”覆盖消息、工具集合和 transcript，子线程仍会读取当前项目环境，并通过包装后的 `getAppState()` 看见权限状态。同步 subagent 可以共享一部分父级回调；后台 subagent 的普通状态写入被隔离，任务注册则写回根 `AppState`，供父线程观察和停止。
+```ts
+createTaskStateBase(
+  id: string,
+  type: TaskType,
+  description: string,
+  toolUseId?: string,
+)
+```
 
-结果回传取决于运行方式：前台执行会把最后一条 assistant 文本整理成当前 `Agent` 调用的 `tool_result`；后台执行先返回 agent ID 和 output file，完成后再向消息队列写入 `<task-notification>`。失败和取消也沿这两条路径分别收束。
+Task 有自己生成的 `id`、类型、状态、输出文件、偏移量和 `notified` 标志；`toolUseId` 却是可选的外部关联字段。`registerTask()` 把 Task 放入 `AppState.tasks`，并发出 `task_started` SDK 事件。换句话说，Task 不是 `tool_use` 的另一种写法，而是工具执行需要跨越当前回合时的管理对象。
 
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面只截取证明控制流所需的真实短代码，省略 UI、遥测、内部构建分支和无关参数；还原目录只用于定位本文引用的源码。
+可以用下面这条链区分两者：
+
+```text
+assistant.tool_use(id, name, input)
+          │
+          ▼
+runToolUse → 权限检查 → 具体 Tool.call()
+          │
+          ├─ 直接完成 ───────────────► tool_result(tool_use_id=id)
+          │
+          └─ 创建 Task ─► AppState.tasks[task.id]
+                              │
+                    running → terminal status
+                              │
+                              └─ task-notification(task_id,
+                                  optional tool_use_id, output_file, status)
+```
+
+以 Read、Grep 这类短调用为例，工具通常直接产生 `tool_result`，不会创建运行时 Task。前台 Bash 或前台 Agent 即使会注册一个 Task，当前工具调用仍会等待执行结束，再把最终结果作为原 `tool_use.id` 对应的 `tool_result` 返回。此时 Task 主要提供进度、状态和统一取消入口。
+
+后台 Bash、后台 Agent 或远程 Agent 则把两层生命周期拆开：原始 `tool_use` 先得到一个包含 task ID、输出文件等信息的结果，模型回合可以继续；Task 在后台推进并把大输出写入文件。进入终态后，`enqueueTaskNotification()` 生成带有 `task_id`、可选 `tool_use_id`、`task_type`、`output_file`、`status` 和摘要的消息，放入 `task-notification` 队列，后续回合再让模型按需读取结果。
+
+因此，不能把“一个 tool-use 就是一个 Task”当成规则。Task 框架还服务于主会话、Dream、远程任务和 teammate 等没有单个模型 `tool_use` 的执行实例；反过来，`TaskStop` 自己也是一次 `tool_use`，但它的作用是根据 `task_id` 找到已有 Task 并调用 `kill()`，不会把停止请求误认为被停止的任务本身。
+
+本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。外部资料只帮助固定 API 层的 `tool_use/tool_result` 契约和产品层的后台 Agent 语义；两者在 2.1.88 中怎样通过 `toolUseId`、`AppState.tasks` 和通知队列接起来，以本仓库源码为准。
 
 ## Subagent 运行一条独立的子 Query Loop
 
@@ -613,3 +644,11 @@ Agent 定义决定“这个子线程是什么角色”，Tool Pool 决定“它�
 - [Claude Code Subagents](https://code.claude.com/docs/en/sub-agents)
 
 - [Claude Code 上下文窗口](https://code.claude.com/docs/en/context-window)
+
+- [Tool use with Claude](https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview)
+
+- [Handle tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls)
+
+- [Run agents in parallel](https://code.claude.com/docs/en/agents)
+
+- [Agent view in Claude Code](https://claude.com/blog/agent-view-in-claude-code)
