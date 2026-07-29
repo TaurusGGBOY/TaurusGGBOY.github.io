@@ -123,6 +123,16 @@ if (innerError instanceof FallbackTriggeredError && fallbackModel) {
 
 第四个概念是 **fork**。fork 复制可恢复的对话状态，新会话继承旧消息；旧对话已经产生的文件副作用继续保留，Git 工作区也沿用原现场。`--fork-session`、`/branch` 与后文第 26 篇会讲到的 Git worktree，分别隔离会话 ID、消息来源和文件目录。
 
+把 `branch` 和 `fork` 放在同一张表里看，先记住一句话：**它们都创建新的会话历史，区别主要是用户入口和创建时机；它们都不是 Git 工作区隔离。**
+
+| 维度 | `branch` | `fork` |
+| --- | --- | --- |
+| 在本章指什么 | 交互式 REPL 中执行 `/branch [name]` | “复制会话并获得新 session ID”的通用机制；命令行用 `--fork-session`，SDK 用 `forkSession` |
+| 典型场景 | 已经在会话里，想从当前对话点试另一种实现 | 启动另一个进程、终端或程序化任务，从旧会话派生独立上下文 |
+| 2.1.88 的落盘路径 | `createFork()` 立刻复制主链 JSONL，并为记录写入 `forkedFrom` | 恢复流程读取旧历史，但保留 fresh session ID；后续消息写入新 transcript |
+| 原会话 | 保持不变，可用 `/resume` 回去 | 同样保持不变，可独立恢复 |
+| 文件和外部副作用 | 不复制、不回滚当前工作区或已经执行的工具 | 一样不复制、不回滚；需要 Git worktree、checkpoint 或其他隔离机制 |
+
 为什么要这样实现？因为会话可能很长，写入又很频繁。追加日志把每次写入限制在尾部；UUID 链允许从同一份日志里选择一条有效分支；元数据记录让恢复逻辑按需重建状态，而不必序列化整个运行时对象图。
 
 ## session ID 与 transcript 路径必须一起切换
@@ -645,7 +655,7 @@ Claude Code 把会话恢复建立在一份追加式 JSONL transcript 上。写�
 
 ## 留给下一篇的问题
 
-会话能够恢复以后，Claude Code 的斜杠命令如何被解析、路由，并与普通用户消息走上不同路径？
+作为用户，你应该什么时候使用 `branch`，什么时候使用 `fork`？
 
 ## 参考资料
 

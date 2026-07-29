@@ -24,20 +24,23 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：会话能够恢复以后，Claude Code 的斜杠命令如何被解析、路由，并与普通用户消息走上不同路径？
+上一篇留下的问题是：作为用户，你应该什么时候使用 `branch`，什么时候使用 `fork`？
 
-答案先说：**Claude Code 在用户输入进入 Query Loop 以前先做本地路由，`/compact`、`/config` 和 Skill 会按命令类型进入不同 handler。**
+先把结论说清楚：在 Claude Code 里，`branch` 不是 Git branch，`fork` 也不是 GitHub 仓库 fork。两者最终都做同一件事——从已有会话复制出一份新的 transcript，分配新的 session ID，让原会话保持不变；差别主要在入口和进程边界。
 
-这次路由可以压缩成四步：
+如果你已经在交互式 REPL 里，并且刚走到一个需要比较方案的决策点，优先用 `/branch [name]`。它从当前对话点复制主链，立即切换到新会话；你可以在新会话里试重构、替换实现或验证另一种排查路径，原来的上下文仍可通过 `/resume` 找回。这种方式适合“先保留现场，再在同一终端继续探索”。
 
-1. 输入层先看当前是普通 prompt、Bash 输入，还是被标记为不解析斜杠命令的远程消息。
-2. 只有允许解析、并且以 `/` 开头的字符串，才交给 `parseSlashCommand()` 拆出命令名和参数。
-3. 解析结果在当前会话已经装配好的 `commands` 中匹配 `name`、用户可见名称或 `aliases`。
-4. 命中以后再根据 `command.type` 分流：`prompt` 生成模型可见消息，`local` 直接执行本地逻辑，`local-jsx` 把交互界面交给 Ink/React 渲染。
+如果你要从另一个终端、脚本或程序中派生会话，则使用 `claude --continue --fork-session`、`claude --resume <session-id> --fork-session`，或 SDK 的 `forkSession: true`。这里的 fork 是更通用的会话复制机制：调用方明确提供来源 session，得到独立的 session ID，适合并行运行多个尝试、批量自动化，或在启动新进程时复用已有上下文。
 
-因此，斜杠命令和普通消息的分界线并不在 Claude API，也不在模型的 system prompt 里，而在 `processUserInputBase()` 这一层。只有 `prompt` 命令把 `shouldQuery` 设为 `true` 时，扩展后的内容才继续进入 Query Loop。大部分 `local` 与 `local-jsx` 命令都可以在不调用模型的情况下结束。
+因此可以按三个问题选择：
 
-这个设计解决的是“谁应该拥有控制权”的问题。普通消息把下一步交给模型；本地命令把下一步交给 Claude Code 自己；交互式命令把下一步交给终端 UI。三条路径共用同一份会话状态，但不会假装它们都是聊天。
+1. **还在当前 REPL、只想从此刻试另一条路？** 用 `branch`（`/branch`）。
+2. **需要新进程、另一个终端或程序化调用？** 用 `fork`（`--fork-session` / `forkSession`）。
+3. **只是继续原来的工作？** 用 `--continue` 或 `--resume`，不要额外复制会话。
+
+还有一个必须提前设定的边界：session fork 只复制对话历史，不复制工作目录，也不会撤销已经执行的 Bash、网络请求、部署或其他外部副作用。要让两条实现真正同时改动而互不覆盖，还需要 Git worktree、独立目录或 checkpoint；`branch`/`fork` 解决的是“上下文分叉”，不是“文件系统分叉”。
+
+从 2.1.88 的实现看，`/branch` 对应 `createFork()`：它立即复制主链 JSONL，并给复制记录附上 `forkedFrom`；`--fork-session` 则在恢复流程里保留 fresh session ID，后续由正常写入路径落到新 transcript。理解这层关系后，`branch` 可以看成一个交互式 fork 入口，而不是与 fork 并列的另一种会话类型。
 
 本文继续限定在 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码。还原路径用于定位证据，不代表 Anthropic 内部仓库的原始目录结构。下面只摘录能证明控制流的真实短代码，省略无关字段、遥测和实验分支。
 
@@ -423,3 +426,9 @@ Claude Code 的 Command 系统是一层 REPL 内部路由。
 - [Claude Code Commands](https://code.claude.com/docs/en/commands)
 
 - [Claude Code 交互模式](https://code.claude.com/docs/en/interactive-mode)
+
+- [Manage sessions - Claude Code Docs](https://code.claude.com/docs/en/sessions)
+
+- [Work with sessions - Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/sessions)
+
+- [Claude Code /branch: Fork Sessions to Test Multiple Paths](https://claudcod.com/blog/claude-code-branch-sessions/)
