@@ -382,7 +382,7 @@ Claude Code 的插件系统可以压缩成三层：settings 声明启用意图�
 
 ## 留给下一篇的问题
 
-既然 Claude Code 同时提供 Grep 和 LSP，它分别会在什么情况下被使用？
+为什么在这个版本的代码里，自己编写的 Skill 如果需要作为 Slash 命令使用，就必须把它当作 Plugin 安装？
 
 ## 参考资料
 
