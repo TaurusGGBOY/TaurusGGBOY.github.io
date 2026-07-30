@@ -60,7 +60,7 @@ isEnabled() {
 }
 ```
 
-`isLspConnected()` 要求 Manager 已建立、至少有一个 server，并且至少一个 server 的状态不是 `error`。server 配置来自已启用插件；所以“安装了 LSP 插件”不等于本轮已经有可调用的 `LSP` 工具。初始化仍在 `pending` 或尚未开始时，API 层会把 LSP 标记为 deferred，等 Manager 完成初始化后再决定是否提供。
+`isLspConnected()` 要求 Manager 已建立、至少有一个 server，并且至少一个 server 的状态不是 `error`。server 配置来自已启用插件；所以“安装了 LSP 插件”不等于本轮已经有可调用的 `LSP` 工具。在启用 Tool Search 的请求路径中，初始化仍在 `pending` 或尚未开始时，API 层会把 LSP 标记为 deferred，等 Manager 完成初始化后再决定是否提供。
 
 这解释了很多看似矛盾的现象：你明明安装了 language server，模型却继续调用 Grep。可能是 `ENABLE_LSP_TOOL` 没开、插件没有 enabled、文件扩展名没有匹配 server、进程启动失败，或者 server 还没完成握手。此时不是模型“拒绝使用 LSP”，而是 LSP 根本没有通过工具可用性检查。
 
