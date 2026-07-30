@@ -24,15 +24,76 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：**交互式 REPL 之外，Claude Code 如何在 `-p`、SDK 与结构化输入输出模式下运行同一套 Agent 循环，并处理不可交互的权限请求？**
+上一篇留下的问题是：**如果想自定义 Claude Code 的快捷键，应该如何实现？**
 
-答案先说：`-p`、Agent SDK 和远程结构化入口共享同一套 Agent 内核。它们绕过 Ink/React REPL，创建无头 `AppState` store，再进入 `runHeadless()`；`StructuredIO` 把命令行字符串或 NDJSON 输入归一化成 SDK message，`runHeadlessStreaming()` 最终调用前文一直追踪的 `ask()`。模型流、`tool_use`、权限检查、工具执行、`tool_result` 和继续推理都沿用原路径。
+先给结论：不要去改发布包里的 `DEFAULT_BINDINGS`，而是运行 `/keybindings`，编辑它创建或打开的 `~/.claude/keybindings.json`。2.1.88 的快捷键系统把“配置文件、解析器、上下文和事件拦截器”串成了一条热加载链：保存文件后重新解析，用户绑定追加到默认绑定之后，匹配时优先采用用户配置。
 
-真正变化的是 Agent 循环两端的“宿主协议”。普通 `claude -p` 可以只给一段 prompt，最后拿文本或单个 JSON；SDK 使用 `stream-json` 发送、接收一行一个 JSON 的事件，还能通过 `control_request` / `control_response` 处理权限、取消和运行时控制。权限规则得出 `ask` 时，SDK 或 MCP 宿主负责返回决定；普通 `-p` 则把该调用按未允许处理，并以错误 `tool_result` 回到循环。已有 allow 规则直接执行，deny 规则直接拒绝。
+## 先用 `/keybindings` 生成正确的文件
 
-这也回答了系列前面关于 `claude -p` 的问题：两种入口的核心差别是交互宿主。交互模式由 React REPL 展示权限弹窗并等待键盘；`-p` 把需要人决定的分支提前写成规则，或委托给 SDK/MCP 宿主。
+命令实现位于 `restored-src/src/commands/keybindings/keybindings.ts`。`call()` 先检查 `isKeybindingCustomizationEnabled()`；功能开关关闭时，它会明确返回“Keybinding customization is not enabled”，这不是 JSON 写错，而是该版本构建尚未获得功能 rollout。开关开启时，命令调用 `getKeybindingsPath()`，把路径解析为 Claude 配置目录下的 `keybindings.json`（通常是 `~/.claude/keybindings.json`），用独占创建避免覆盖已有文件，然后交给编辑器打开。
 
-本篇仍以 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码为边界。下文代码行均从 `restored-src/` 摘取；为了突出执行主线，无关字段和分支会被裁掉，代码块中的中文“省略”注释是本文标记，不属于原始源码。SDK 的公开类型和 Claude Code 这一侧的协议可以由仓库确认，外部 SDK 包内部怎样拉起或管理进程，不在这份 source map 的证据范围内。
+模板由 `generateKeybindingsTemplate()` 生成。它包含 `$schema`、`$docs` 和 `bindings` 三个字段，并且会先过滤不能重绑定的快捷键。建议保留这两个元数据字段，这样编辑器可以提供上下文、action 和按键格式提示。
+
+最小可用配置可以这样写：
+
+```json
+{
+  "$schema": "https://www.schemastore.org/claude-code-keybindings.json",
+  "$docs": "https://code.claude.com/docs/en/keybindings",
+  "bindings": [
+    {
+      "context": "Chat",
+      "bindings": {
+        "ctrl+e": "chat:externalEditor",
+        "ctrl+k ctrl+c": "command:compact",
+        "ctrl+u": null
+      }
+    },
+    {
+      "context": "Global",
+      "bindings": {
+        "ctrl+shift+t": "app:toggleTodos"
+      }
+    }
+  ]
+}
+```
+
+这里有三种不同意图：把 `ctrl+e` 映射到内置 action，把两步 chord `ctrl+k ctrl+c` 映射到 `/compact`，以及用 `null` 解除一个默认绑定。`command:<name>` 不是任意 action 字符串：源码校验它只能由字母、数字、冒号、连字符和下划线组成，而且 command binding 必须放在 `Chat` context 中。
+
+## 配置格式如何变成可匹配的按键
+
+`KeybindingBlockSchema` 要求顶层 `bindings` 是数组；每个 block 必须有 `context` 和 `bindings` 对象。2.1.88 能识别的上下文包括 `Global`、`Chat`、`Autocomplete`、`Confirmation`、`Help`、`Transcript`、`HistorySearch`、`Task`、`ThemePicker`、`Settings`、`Tabs`、`Attachments`、`Footer`、`MessageSelector`、`DiffDialog`、`ModelPicker`、`Select` 和 `Plugin`。同一个按键放在不同 context，可以在不同界面触发不同动作；`Global` 则参与所有界面。
+
+动作值有三类：
+
+| 写法 | 含义 |
+| --- | --- |
+| `chat:externalEditor`、`app:toggleTodos` 等枚举值 | 调用源码已注册的 action；可用列表由 schema 静态定义 |
+| `command:compact` | 在 Chat 输入上下文执行一个 slash command |
+| `null` | 在该 context 解除匹配到的默认快捷键 |
+
+按键字符串先由 `parseChord(input)` 按空格切成多个步骤，再由 `parseKeystroke(input)` 按 `+` 解析修饰键。源码确认的别名包括 `ctrl`/`control`、`alt`/`opt`/`option`、`shift`、`meta`、`cmd`/`command`/`super`/`win`，特殊键包括 `esc`、`return`、`space` 和方向键。单独的空格会被识别成 Space，而不是 chord 分隔符。因此 `ctrl+k ctrl+c` 是“先按 Ctrl+K，再按 Ctrl+C”，不是一个名字里带空格的按键。
+
+加载顺序也很关键。`loadKeybindings()` 先得到 `DEFAULT_BINDINGS`，再把用户解析结果拼到数组末尾：
+
+```ts
+const mergedBindings = [...defaultBindings, ...userParsed]
+```
+
+解析器反向查找匹配项，所以用户绑定可以覆盖默认绑定；`null` 则会让默认 action 不再被调用。快捷键解析不是只看一组全局字符串，`ChordInterceptor` 会把当前注册的 handler context、组件激活 context 和 `Global` 组合起来，再调用 `resolveKeyWithChordState()`。前缀匹配会进入 pending 状态，完整匹配才触发 handler，失配或取消才把事件继续交给输入组件。
+
+## 保存后为什么不用重启
+
+`KeybindingSetup` 首次渲染时同步加载配置，并在 effect 中启动 `initializeKeybindingWatcher()`。watcher 使用 chokidar 监听同一个 `keybindings.json`，等待文件写入稳定后重新读取；热更新结果会替换 React context 中的 bindings，并把新的 warnings 显示到 UI。文件不存在时继续使用默认绑定；JSON 结构错误、未知 context、非法 action、重复绑定或保留快捷键冲突，则回退到默认绑定并记录警告。可以运行 `/doctor` 集中查看这些问题。
+
+这里有三个常见陷阱：
+
+1. **把快捷键写进 `settings.json`。** 2.1.88 的这条路径读取的是独立的 `keybindings.json`，不是设置合并器。
+2. **把 `/compact` 直接当 action。** slash command 需要写成 `command:compact`，并放在 `Chat` context；内置 action 才使用 `chat:*`、`app:*` 等命名空间。
+3. **忽略终端和 Vim。** Ctrl+C、Ctrl+D 等硬编码或终端保留快捷键不能可靠重绑定；tmux、screen 也可能先截获 Ctrl+B、Ctrl+A。Vim 模式在文本输入层处理 normal/insert，keybindings 在组件 action 层处理，Escape 在 Vim 中通常先负责切换模式，不会被当成普通的 `chat:cancel`。
+
+因此，实际实现步骤就是：运行 `/keybindings` → 选择正确 context 和 action → 用显式修饰键写 chord → 保存 → 看热更新提示 → 必要时用 `/doctor` 修复 warning。这个机制让用户只替换绑定数据，快捷键解析、优先级和事件传播仍由 Claude Code 的统一运行时负责。
 
 ## 先补三个概念：Headless、SDK 与 Structured IO
 
@@ -430,3 +491,7 @@ Claude Code 的交互式 REPL 与无头模式共享 Agent 内核，差别集中�
 - [Claude Code 非交互模式](https://code.claude.com/docs/en/headless)
 
 - [Agent SDK Structured Outputs](https://code.claude.com/docs/en/agent-sdk/structured-outputs)
+
+- [Claude Code Keybindings](https://code.claude.com/docs/en/keybindings)
+
+- [Claude Code Keybindings: Complete Keyboard Shortcuts Guide](https://claudefa.st/blog/tools/keybindings-guide)

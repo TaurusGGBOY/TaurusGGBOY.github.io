@@ -24,17 +24,45 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：REPL 能显示与接收输入以后，Claude Code 如何解析按键、管理快捷键上下文，并实现 Vim 的 normal、insert 与 operator-pending 状态？
+上一篇留下的问题是：**Claude Code 当前以 16ms 为渲染节流间隔，用户能否把它调成 120Hz（约 8.33ms）？**
 
-先给结论：Claude Code 把这件事拆成了两台状态机。
+先给结论：在 `@anthropic-ai/claude-code@2.1.88` 这份还原源码中，普通用户不能通过 `/config`、`settings.json` 或环境变量把渲染间隔调成 120Hz。`restored-src/src/ink/constants.ts` 直接定义了：
 
-第一台是快捷键解析器。终端字节先被归一化成 `input + Key`，再拿“当前激活的上下文、默认绑定、用户覆盖和未完成的 chord”做匹配。完整匹配会调用 action handler；前缀匹配暂存 1 秒；零匹配才把事件继续传给输入组件。
+```ts
+export const FRAME_INTERVAL_MS = 16
+```
 
-第二台是 Vim。它在 Chat 输入落到 `VimTextInput` 后工作。源码的顶层 `VimState` 只有 `INSERT` 和 `NORMAL` 两种模式；operator-pending 由 `NORMAL.command` 中的 `operator`、`operatorCount`、`operatorFind`、`operatorTextObj` 等等待态表达。按下 `d` 先记住 operator，再等 `w`、`f<char>` 或 `i"` 补齐范围后执行删除。
+这个常量被 `Ink` 构造函数用于：
 
-也就是说，`ctrl+x ctrl+e` 等待第二键，和 Vim 的 `d` 等待 motion，看起来都像“pending”，但属于两套不同的状态机。前者解决“哪个应用动作被触发”，后者解决“怎样编辑 prompt 文本”。
+```ts
+this.scheduleRender = throttle(deferredRender, FRAME_INTERVAL_MS, {
+  leading: true,
+  trailing: true,
+})
+```
 
-![快捷键解析与 Vim 状态机手绘图](/images/posts/claude-code-source-reading-33/33-keybindings-vim-mode-handdrawn.png)
+因此，16ms 表示的是“连续状态变化时，正常渲染最多大约每 16ms 排一帧”，上限约为 62.5fps，而不是保证每帧都能在 16ms 内完成。`leading: true` 让一串更新的第一帧立即执行，`trailing: true` 保证这一串更新的最后状态也会补渲染；如果布局、diff 或 `stdout` 写入耗时更长，实际帧率只会更低。
+
+120Hz 的理想间隔是 `1000 / 120 ≈ 8.33ms`。维护自己的源码构建时，当然可以把常量改成 `8`（整数毫秒）或 `8.33` 后重新打包；但这属于修改源码，不是用户配置，官方发布包更新后也会覆盖这个改动。更重要的是，这个常量不只控制 `scheduleRender`：`ClockProvider` 在终端获得焦点时也用它作为时钟间隔，失焦时则使用 `FRAME_INTERVAL_MS * 2`。单独改一个数，实际上会同时改变一批订阅了这个时钟的动画与计时器。
+
+还不能把“渲染上限”误解成“菊花每秒转 120 次”。源码里有多套时钟：
+
+| 层次 | 2.1.88 中的节奏 | 把 `FRAME_INTERVAL_MS` 改成 8ms 后 |
+| --- | --- | --- |
+| Ink 外层渲染节流 | `throttle(..., 16)`，约 62.5fps 上限 | 只把这一层的上限提高到约 125fps |
+| `ClockProvider` | 聚焦 16ms，失焦 32ms | 聚焦 8ms，失焦 16ms |
+| `SpinnerAnimationRow` | `useAnimationFrame(..., 50)` | 仍然由显式的 50ms 间隔驱动 |
+| 菊花帧选择 | `Math.floor(time / 120)`，约每 120ms 换一帧 | 仍然约每 120ms 换一帧 |
+
+这里的 `useAnimationFrame(intervalMs)` 接受 `number | null`：传入 `50` 表示每 50ms 检查一次时钟，传入 `null` 则关闭动画；它不会自动继承你对外层 renderer 做的假设。
+
+也就是说，若目标是让菊花本身达到 120Hz，还要另改 `SpinnerAnimationRow` 的 50ms 动画间隔和 `SpinnerGlyph` 的 120ms 换帧逻辑；这会显著增加 React 更新、Yoga 布局、屏幕 diff 和终端写出的次数，已经不是“把显示器切到 120Hz”这么简单。
+
+这也解释了为什么不能只看显示器规格。上游 Ink 的文档把 `maxFps` 描述成渲染更新的上限，并明确提醒更高值可能增加性能开销；Claude Code 2.1.88 的内置 renderer 并没有把这个上游选项暴露成自己的配置项。Claude Code 的全屏渲染文档也指出，真正的瓶颈可能在 VS Code 集成终端、tmux 或 iTerm2 的终端吞吐；即使程序请求 120fps，终端也可能合并、延迟或来不及绘制这些 ANSI 更新。JavaScript 定时器同样只是“至少等待指定延迟”，事件循环繁忙时回调会晚于目标时间。
+
+所以答案分三层：**用户配置不能调；自己维护源码可以改，但要连带检查所有时钟消费者；改完也只能提高上限，不能保证终端实际达到 120Hz。**
+
+接下来回到本章主题：Claude Code 把终端按键先归一化成 `input + Key`，再用快捷键上下文和 Vim 的编辑状态机解释它们。
 
 ## 一个按键包含字符与控制信息
 
@@ -356,10 +384,16 @@ Vim 层复用普通文本输入，只增加 `INSERT | NORMAL` 顶层状态、NOR
 
 ## 留给下一篇的问题
 
-交互式 REPL 之外，Claude Code 如何在 `-p`、SDK 与结构化输入输出模式下运行同一套 Agent 循环，并处理不可交互的权限请求？
+如果想自定义 Claude Code 的快捷键，应该如何实现？
 
 ## 参考资料
 
 - [Claude Code Keybindings](https://code.claude.com/docs/en/keybindings)
 
 - [Claude Code Interactive Mode](https://code.claude.com/docs/en/interactive-mode)
+
+- [Ink README：`maxFps` 与动画时钟](https://github.com/vadimdemedes/ink#render)
+
+- [Claude Code Fullscreen rendering](https://code.claude.com/docs/en/fullscreen)
+
+- [MDN：`Window.setInterval()` method](https://developer.mozilla.org/en-US/docs/Web/API/Window/setInterval)

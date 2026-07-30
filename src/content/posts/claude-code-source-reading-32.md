@@ -412,7 +412,7 @@ REPL 提供长生命周期交互循环；React 让消息、进度、输入、弹
 
 ## 留给下一篇的问题
 
-REPL 能显示与接收输入以后，Claude Code 如何解析按键、管理快捷键上下文，并实现 Vim 的 normal、insert 与 operator-pending 状态？
+Claude Code 当前以 16ms 为渲染节流间隔，用户能否把它调成 120Hz（约 8.33ms）？
 
 ## 参考资料
 
