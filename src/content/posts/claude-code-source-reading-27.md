@@ -24,27 +24,53 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：当本地工具还不够用时，Claude Code 如何通过 MCP 发现外部服务器、加载工具与资源，并把调用接回权限和消息链？
+上一篇留下的问题是：
 
-先给结论。Claude Code 在本地工具边界上增加 MCP 协议适配，外部能力继续复用同一条 Agent 循环。
+> 当 teammate 的代码合并回主线发生冲突时，lead 是怎么处理的？
 
-启动或配置变化时，它读取 MCP server 配置，按 `stdio`、HTTP、SSE、WebSocket 或 SDK 等 transport 建立连接。只有连接进入 `connected`，客户端才会依据 server capability 请求 `tools/list`、`prompts/list` 和 `resources/list`。每个外部工具随后被包装成普通 `Tool`：名称变成 `mcp__server__tool`，server 给出的 JSON Schema 进入模型可见的工具契约，读写、破坏性和 open-world 提示也被映射到本地元数据。
+先给结论：在 `@anthropic-ai/claude-code@2.1.88` 的还原源码里，lead 没有调用某个 Team 专用 API 自动把两份代码揉成一份。Team control plane 负责成员身份、task、mailbox 和 worktree 生命周期；真正的 `merge`、`rebase`、冲突选择与测试，仍然由 lead 在 Git 工作树里完成。lead 可以让原 teammate 协助判断或修复，但最终整合结果和是否继续推进由 lead 负责。
 
-真正执行时，这个 Tool 仍然先走 Claude Code 的权限链。权限规则匹配的是完整 MCP 名称，不能因为能力来自外部 server 就绕过 allow、ask、deny。通过后，适配层才发送 `tools/call`，把协议结果转换成文本、图片、资源或结构化内容，最后由 `MCPTool.mapToolResultToToolResultBlockParam()` 生成标准 `tool_result`，交还同一个 `queryLoop()` 继续推理。
+### 先区分两种“冲突”
 
-资源走的是一条平行路径：连接阶段缓存资源目录，Claude Code 再提供 `ListMcpResourcesTool` 和 `ReadMcpResourceTool` 两个宿主工具。模型仍然通过普通工具调用读取资源，二进制内容不会直接把 base64 塞进上下文，而会先落盘再返回路径。
+第一种是**共享工作区冲突**：几个 teammate 没有隔离 worktree，直接在同一个 cwd 写文件，未提交修改互相可见。这不是 Git merge 失败，而是执行阶段已经发生了覆盖风险。第二种才是**分支合并冲突**：每个 teammate 在独立 worktree 完成了 commit，lead 把这些分支按顺序合回主线时，Git 发现双方修改了同一片内容，或者一边修改、一边删除了同一个路径。
 
-所以最小模型可以写成：
+worktree 只能把冲突推迟到一个可审查的合并点，不能替 lead 做语义判断。文本冲突通常会被 Git 立刻标出来；接口契约相互矛盾、重复实现和锁文件不一致，则可能可以编译，却需要 lead 对照任务目标和测试才能发现。
 
-```text
-MCP config -> transport -> connected client -> discovery
-tools/list -> local Tool wrapper -> permission -> tools/call -> tool_result
-resources/list -> List/ReadMcpResourcesTool -> tool_result
+### 2.1.88 的代码边界：团队负责保存成果，不负责合并
+
+`AgentTool.call()` 的团队分支通过 `spawnTeammate()` 启动成员，并把成员身份、task owner、mailbox 以及可选的 `worktreePath` 交给团队控制面。这里没有把 teammate 的 branch 自动合并到 lead cwd 的步骤。
+
+更直接的证据在清理路径。`TeamDeleteTool` 先拒绝仍有 active non-lead member 的团队，然后调用 `cleanupTeamDirectories()`。后者只读取成员保存的 `worktreePath`，逐个调用 `destroyWorktree()`，最后删除 team 和 task 目录；`destroyWorktree()` 执行的是 `git worktree remove --force`，失败时再删除目录。它处理的是回收，不是合并。
+
+普通 Agent worktree 的自动清理也采用同样的边界：
+
+```ts
+if (!changed) {
+  await removeAgentWorktree(worktreePath, worktreeBranch, gitRoot)
+  return {}
+}
+
+return { worktreePath, worktreeBranch }
 ```
 
-这是本文对调用链的概括：第一行解决“外部能力怎样进来”，后两行解决“进来以后怎样服从本地执行规则”。
+`cleanupWorktreeIfNeeded()` 只判断 worktree 相对 `headCommit` 是否有变化：没有变化才删除，有变化就把路径和分支留下。源码里对 `git merge`、`git rebase` 的识别出现在 Git 操作统计，而不是 Team 的冲突解决器。因此 lead 必须在清理前完成合并或把成果转移到主线；过早 `TeamDelete` 可能把仍有价值的 worktree 一并强制移除。
 
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的代码块会省略无关日志、埋点和特例分支，但都来自 `restored-src/`；还原路径不代表 Anthropic 内部仓库的原始目录。
+### lead 实际上的处理顺序
+
+| 阶段 | lead 要做什么 | 为什么不能交给 Team 自动完成 |
+| --- | --- | --- |
+| 1. 固定边界 | 根据 team file、task owner、commit 和 worktree 路径确认每个改动属于哪个任务；让相关 teammate 暂停继续写 | task list 记录“谁负责什么”，不记录哪一侧的业务语义应该胜出 |
+| 2. 选择基线 | 在干净的集成 worktree 中更新主线，决定采用 `git merge`、先 `git rebase`，还是按依赖从底层分支开始合并 | Team 没有替 lead 选择集成顺序的策略 |
+| 3. 阅读三方 | 对照 merge base、主线版本和 teammate 版本，查看 `git status`、三方 diff 与冲突标记；不要机械执行 ours/theirs | Git 能定位文本冲突，但不能判断接口契约、产品行为和测试意图 |
+| 4. 求证语义 | 通过 mailbox 问原 teammate 说明设计意图，必要时让它在自己的分支修复；lead 仍要审查这份修复 | teammate 能提供上下文，却没有主线的最终所有权 |
+| 5. 完成并验证 | 编辑冲突文件，`git add` 后执行 `git merge --continue` 或提交 rebase 结果；重新跑测试、类型检查、lint，并检查完整 diff | 合并成功只说明 Git 接受了文件内容，不说明组合后的行为正确 |
+| 6. 收敛团队 | 先更新 task 状态、通知依赖任务，再请求 teammate shutdown；确认没有 active member 后才运行 `TeamDelete` 清理目录 | 清理会删除 worktree 和 task/team 文件，必须放在成果落盘之后 |
+
+如果冲突发生在有依赖的分支栈上，先处理最底层分支，再让上层分支 rebase 到已经稳定的结果。冲突已失去意义时，lead 可以 `git merge --abort` 或 `git rebase --abort`，保留原分支，重新给 teammate 一个基于最新主线的窄任务；这通常比让一个过时补丁继续堆叠更安全。
+
+还有一个容易误判的地方：Git 报告“无冲突”不等于没有合并问题。两个 teammate 可能分别实现了同一个 helper，或者一个修改了 API 返回值、另一个仍按旧契约调用；这类语义冲突不会出现在 `<<<<<<<` 标记里。lead 的职责是把任务说明、接口约束、测试和运行结果放在同一个审查闭环里，而不是只看 merge 命令的退出码。
+
+本文后续仍回到 MCP 的连接与能力发现；这里要记住的边界是：Agent Teams 提供协作控制面，Git 提供版本整合机制，lead 负责在两者之间做最后的工程判断。
 
 ## MCP 是一条带生命周期的协议连接
 
@@ -459,3 +485,13 @@ MCP 提供外部能力以后，Claude Code 的插件系统如何把命令、Skil
 - [Claude Code MCP](https://code.claude.com/docs/en/mcp)
 
 - [MCP 官方规范](https://modelcontextprotocol.io/specification/latest)
+
+- [Agent Teams - Claude Code Docs](https://code.claude.com/docs/en/agent-teams)
+
+- [How to Run a Multi-Agent Coding Workspace (2026)](https://www.augmentcode.com/guides/how-to-run-a-multi-agent-coding-workspace)
+
+- [How to Fix Merge Conflicts Created by Coding Agents](https://treq.dev/learn/how-to/merge-conflicts-with-coding-agents/)
+
+- [Git - git-merge Documentation](https://git-scm.com/docs/git-merge.html)
+
+- [About merge conflicts - GitHub Docs](https://docs.github.com/en/pull-requests/reference/merge-conflicts)

@@ -467,7 +467,7 @@ Plan mode 用 `mode: 'plan'`、`prePlanMode`、只读 reminder、plan file 和 `
 
 ## 留给下一篇的问题
 
-当本地工具还不够用时，Claude Code 如何通过 MCP 发现外部服务器、加载工具与资源，并把调用接回权限和消息链？
+当 teammate 的代码合并回主线发生冲突时，lead 是怎么处理的？
 
 ## 参考资料
 
