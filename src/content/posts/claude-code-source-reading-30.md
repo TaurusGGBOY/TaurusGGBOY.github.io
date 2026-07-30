@@ -450,7 +450,7 @@ Claude Code 接入外部宿主的主线，可以压缩成五步：
 
 ## 留给下一篇的问题
 
-这些外部事件进入主进程以后，Claude Code 的 AppState 如何组织会话、工具、任务、权限和 UI 共享状态，并保证更新可追踪？
+没有开启 Chrome 调试模式时，Claude Code 还能使用 Chrome MCP 吗？
 
 ## 参考资料
 

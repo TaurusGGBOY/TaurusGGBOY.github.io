@@ -24,20 +24,51 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇最后留下的问题是：这些外部事件进入主进程以后，Claude Code 的 AppState 如何组织会话、工具、任务、权限和 UI 共享状态，并保证更新可追踪？
+上一篇最后留下的问题是：**没有开启 Chrome 调试模式时，Claude Code 还能使用 Chrome MCP 吗？**
 
-先说结论：Claude Code 用一个稳定的轻量 store 保存需要跨组件、工具与任务共享的状态，用函数式 updater 改变快照，用 selector 订阅局部切片，再由统一的 `onChangeAppState` 比较前后状态，把明确列出的变化同步到配置、CCR 或 SDK。REPL 消息、缓存和任务磁盘输出继续使用各自的存储路径。
+先给结论：**能，但要先区分 `claude-in-chrome` 和单独的 `chrome-devtools-mcp`。**2.1.88 随 Claude Code 提供的 `claude-in-chrome` 走“浏览器扩展 + Native Messaging/Bridge”这条链路，不把 `--remote-debugging-port` 或 DevTools Protocol 端口作为前置条件。只有当你配置的是另一个直接连接 CDP 的 Chrome DevTools MCP，才需要按那个 server 的连接方式开启远程调试。
 
-这套结构可以压缩成四层：
+## 2.1.88 的 Claude in Chrome 不依赖 Chrome 调试端口
 
-1. `AppState` 定义共享数据平面，放权限上下文、MCP 能力、任务表、文件历史和 UI 协调字段。
-2. `createStore()` 只提供 `getState()`、`setState(updater)` 和 `subscribe(listener)`。
-3. `AppStateProvider` 把同一个 store 交给 React 组件树；非 React 代码也可以直接拿到它的读写函数。
-4. `onChangeAppState()` 比较 `oldState` 与 `newState`，只对明确字段执行持久化或外部通知。
+`setupClaudeInChrome()` 不接收参数，返回 `mcpConfig`、`allowedTools` 和系统提示词。它在 native build 与普通 CLI build 两个分支中都注册同一个动态 stdio MCP server；差别只是启动命令是否需要附带还原出的 `cli.js` 路径：
 
-2.1.88 的“可追踪”依靠前后快照和集中 diff：每次有效更新都同时保留 `oldState` 与 `newState`，React 订阅者在写入后统一收到通知，需要外部同步的字段再经过同一个 hook。
+```ts
+const mcpConfig = {
+  [CLAUDE_IN_CHROME_MCP_SERVER_NAME]: {
+    type: 'stdio',
+    command: process.execPath,
+    args: ['--claude-in-chrome-mcp'],
+    scope: 'dynamic',
+  },
+}
+```
 
-REPL 的 `messages` 保留在 `REPL.tsx` 的局部 React state；bootstrap 全局量、缓存、transcript 和任务磁盘输出也各有存储机制。AppState 的职责是协调跨消费者状态。
+同一个函数还会异步创建 `--chrome-native-host` wrapper，并调用 `installChromeNativeHostManifest()`。这个 manifest 的 `type` 固定为 `'stdio'`，`allowed_origins` 固定放行 Claude in Chrome 扩展 ID；源码没有读取或拼接 `--remote-debugging-port`。因此这里的“调试”只是浏览器工具能读取 console、DOM 等调试信息，并不表示 Chrome 必须以 DevTools 远程调试模式启动。
+
+Native host 的运行路径也很直接：`runChromeNativeHost()` 启动 `ChromeNativeHost`，持续读取 Chrome Native Messaging 的 stdin，直到 Chrome 关闭连接；`ChromeNativeHost.start()` 随后创建安全的本地 socket listener。`getAllSocketPaths()` 在 Windows 返回 named pipe，在 macOS/Linux 扫描 `*.sock` 并保留旧路径作为 fallback。整条链路没有连接 `9222` 或 CDP websocket 的分支。
+
+`createChromeContext(env?)` 的可选 `env` 只用来覆盖权限模式，不是调试开关。省略时回退到 `process.env`；`CLAUDE_CHROME_PERMISSION_MODE` 只有源码列出的 `'ask'`、`'skip_all_permission_checks'`、`'follow_a_plan'` 会被接受。这个 context 默认记录 `Bridge URL: none (using native socket)`，只有 `tengu_copper_bridge` feature flag 或 ant 构建等条件满足时才添加 `ws://` / `wss://` bridge 配置。无论选择 native socket 还是 bridge，浏览器侧仍是扩展连接，而不是 Chrome 远程调试端口。
+
+## 普通 Chrome 仍有几个必要条件
+
+“不需要调试模式”不等于“什么都不用配置”。要让这条链路真正可用，至少要满足：
+
+1. Chrome 中安装并启用 Claude in Chrome 扩展，并登录与 Claude Code 相同的 Claude 账户；
+2. Claude Code 能把 `com.anthropic.claude_code_browser_extension.json` 写入对应的 Native Messaging 目录（Windows 是注册表）；
+3. 首次安装或 manifest 改写后重启 Chrome，让 Chrome 重新读取 host 配置；
+4. 扩展的站点权限允许当前页面，且扩展 service worker 没有处于断开状态。
+
+这几个条件中的任意一个缺失，失败点都在“扩展发现、Native Messaging host 启动、socket/bridge 配对或鉴权”阶段，模型还没有拿到浏览器 tools；不是因为 Chrome 没有开启调试端口。Chrome 官方的 Native Messaging 文档也把 host manifest、`allowed_origins`、`nativeMessaging` 权限和 stdio 协议列为连接前提，并把“host not found / forbidden / pipe broken”列为典型错误。
+
+## 不同 MCP 的边界
+
+| 连接方式 | 普通 Chrome 是否可用 | 是否要求远程调试 | 最先失败的位置 |
+| --- | --- | --- | --- |
+| Claude Code 内置 `claude-in-chrome` + Native Messaging | 可以 | 不要求 | 扩展检测、host manifest/注册表、Native Messaging handshake 或本地 socket |
+| Claude Code 内置 `claude-in-chrome` + Bridge | 可以 | 不要求 | bridge WebSocket、OAuth 或扩展配对 |
+| 单独的 `chrome-devtools-mcp` 连接已运行 Chrome | 取决于连接参数 | 通常需要 `--remote-debugging-port` 或 `chrome://inspect/#remote-debugging` | CDP HTTP/WebSocket discovery 或 handshake |
+
+所以排查时先运行 `/chrome`：如果显示扩展未连接，检查扩展、manifest、账户和重启；如果你实际配置的是 `chrome-devtools-mcp`，再去检查它自己的 remote debugging 设置。不能因为后者需要调试端口，就反推 Claude Code 内置 Chrome MCP 也需要。
 
 本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的代码块只保留证明主路径所需的字段和分支，省略了无关 import、实验字段与日志；还原路径只表示本仓库的恢复组织方式。
 
@@ -432,3 +463,9 @@ Claude Code 2.1.88 的 AppState 可以理解为运行时共享数据平面：
 - [Claude Code 的工作方式](https://code.claude.com/docs/en/how-claude-code-works)
 
 - [Dive into Claude Code：生产级 Agent 的设计空间](https://arxiv.org/abs/2604.14228)
+
+- [Use Claude Code with Chrome](https://code.claude.com/docs/en/chrome)
+
+- [Native messaging | Chrome for Developers](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging)
+
+- [Chrome DevTools MCP troubleshooting](https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/troubleshooting.md)
