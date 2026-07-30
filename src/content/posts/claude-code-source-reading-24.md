@@ -653,7 +653,7 @@ Agent 定义决定“这个子线程是什么角色”，Tool Pool 决定“它�
 
 ## 留给下一篇的问题
 
-单个 subagent 能够委派以后，Claude Code 如何把多个 Agent 组织成团队，并由 Coordinator 分派、同步和收敛工作？
+Claude Code 中手动创建 sub-agent 的适用时机和最佳实践是什么？
 
 ## 参考资料
 

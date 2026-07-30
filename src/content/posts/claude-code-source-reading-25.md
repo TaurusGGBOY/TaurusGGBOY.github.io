@@ -24,15 +24,53 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：单个 subagent 能够委派以后，Claude Code 如何把多个 Agent 组织成团队，并由 Coordinator 分派、同步和收敛工作？
+上一篇留下的问题是：Claude Code 中手动创建 sub-agent 的适用时机和最佳实践是什么？
 
-答案先说：**Claude Code 建立了一个文件化的协作控制面：Team config 记录成员身份，Task list 记录工作所有权与依赖，Mailbox 传递普通消息和控制协议；Coordinator 负责拆分、分派、理解结果与决定终态。成员各自维护独立对话历史。**
+先把“手动创建”分成两种动作：**一次性委派**和**定义可复用的角色**。前者是在当前任务里明确指定一个 sub-agent 去完成副任务；后者是在 `.claude/agents/` 或 `~/.claude/agents/` 写下稳定的 `AgentDefinition`，让以后遇到同类任务时可以重复使用。一次性工作不必为了“看起来专业”先写一个配置文件；只有角色、工具边界和提示词会反复出现时，才值得把它固化下来。
 
-成员各自运行 query loop，拥有自己的上下文、工具调用和权限状态。团队层只共享协作所需的信息。因此，`researcher` 可以在自己的上下文里读代码，`implementer` 可以处理另一组文件，`verifier` 可以独立验证；任务状态和邮箱负责交换“谁做什么”“做到哪了”“接下来该怎么办”。
+### 什么时候适合手动创建
 
-这里还要提前拆开两个容易混淆的词：**team-lead 是团队身份，Coordinator mode 是一种更严格的运行角色。** 普通 team-lead 处在 `teamContext` 中，可以拥有完整工具池；Coordinator mode 则会改写系统提示词并过滤工具，强迫主会话把研究、实现和验证交给 worker，自己主要做编排与综合。源码把二者建模为独立状态。
+我会用下面这个判断：**任务能否被交代成一个相对独立的交付物？** 如果答案是肯定的，而且主线程只需要结论、补丁或一份验证报告，就适合委派。例如：
 
-这就是本篇的主线：建队，生成成员，分配任务，通过邮箱同步，依据状态收敛，最后安全清理。本文仍以仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原的 `restored-src/` 为边界。下面展示的都是短的真实源码片段，只省略与当前结论无关的字段、埋点和 UI 分支。
+- 大量搜索、读日志、跑测试或查文档。噪声留在子 Agent 的上下文里，主线程只接收失败用例、证据路径和结论；
+- 一个清楚的专项审查，如只读检查认证、性能、依赖升级或测试覆盖率；
+- 几条互不依赖的研究路线，可以分别交给不同 Agent，最后由主线程综合；
+- 需要独立的工具或权限边界，例如研究 Agent 只允许 `Read`、`Grep`、`Glob`、`Bash`，实现 Agent 才允许写文件；
+- 任务会持续较久，但主线程可以继续工作。此时可用 `run_in_background: true`，把完成结果作为通知重新交给父线程。
+
+反过来，以下情况留在主线程通常更快：任务很小、需要频繁来回确认、计划—实现—测试共享大量即时上下文，或者多个执行者会同时改同一文件。Anthropic 的多 Agent 实践也提醒，依赖密集的编码任务并不天然适合拆分；并发会带来额外 token、协调和合并成本，不是 Agent 数量越多越好。
+
+### 一次性委派的提示词要像交接单
+
+不要只写“去看看这个模块”。交接至少应包含五项：目标、范围、已知事实、禁止事项、交付格式。例如：
+
+```text
+请只读审查 src/auth/ 的 token 校验。
+不要修改文件；关注过期、重放和错误处理。
+返回：问题分级、文件与行号、复现或验证命令、仍未确认的风险。
+```
+
+这份交接单同时解决了三个问题：子 Agent 不会因为缺少父会话历史而猜错背景；多个 Agent 不会重复同一条路线；父 Agent 能按统一格式比较结果。Anthropic 的经验是，明确目标、工具、来源、边界和输出格式，比笼统地要求“研究一下”可靠得多。对于报告、代码或数据这类大结果，最好让子 Agent 把完整产物写到文件，只把路径和摘要交回父线程，避免多轮转述造成信息损失。
+
+### 2.1.88 中哪些参数真正影响行为
+
+`AgentTool` 的 `baseInputSchema` 要求 `description` 和 `prompt` 都是字符串；其中 `description` 的源码说明是简短的 3—5 个词。`subagent_type` 可以指定内置或自定义类型；省略时，在非 fork 路径会回退到 `general-purpose`。`model` 的静态可选值是 `sonnet | opus | haiku`，省略时沿用 Agent 定义或父会话的模型；`run_in_background` 是可选布尔值，严格为 `true` 才请求后台运行。
+
+`call()` 随后按类型找到 `AgentDefinition`，组装它的 system prompt、模型、工具和权限上下文，再进入同一套 `runAgent() → query()` 循环。因此，手动委派时最重要的不是给 Agent 起一个花哨的名字，而是选对类型并把约束写清楚。自定义 Agent 的定义还可以声明 `tools`/`disallowedTools`、`permissionMode`、`maxTurns`、`skills`、`background` 和 `isolation: 'worktree'`。源码中的 `isReadOnly()` 只表示外层 Agent tool 把权限检查交给底层工具，并不意味着子 Agent 自动不能写文件；是否可写仍由它实际拿到的工具和权限决定。
+
+### 前台、后台和 worktree 怎么选
+
+- **前台**：结果马上用于下一步，或可能需要你回答权限/澄清问题；
+- **后台**：任务独立、耗时、主线程可以继续，而且提示词已经足够完整。后台 Agent 如果遇到本应弹窗的权限请求会自动拒绝，所以不能把需要人工确认的步骤藏在后台；
+- **worktree**：子 Agent 会修改代码，且你准备并行运行多个工作单元，或者它们可能碰到同一批文件。只读调查不必付出 worktree 的创建和合并成本。
+
+如果任务需要成员之间共享任务列表、互相发消息并持续协调，那已经超出普通 sub-agent 的边界，应考虑 Agent Teams；如果只是多个独立副任务向同一个父线程回报，普通 sub-agent 更轻。多个会话各自改代码时，则优先使用 worktree 隔离，而不是依赖大家自觉避开同一文件。
+
+### 最后一定由父 Agent 验收
+
+`status: 'completed'` 只说明子 Agent 的执行循环结束，不等于结论正确。父 Agent 至少要检查返回的文件、行号和命令，必要时重新运行测试；写文件的任务还要查看 diff，确认没有越过范围。一个实用的返回格式是：**结论 → 证据 → 已执行的验证 → 未解决风险 → 可直接消费的产物路径**。这样手动创建 sub-agent 才是一次可审计的委派，而不是把上下文和责任一起丢出去。
+
+本文后续仍回到仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原的 `restored-src/`，继续解释当多个 Agent 同时存在时，Team config、Task list、Mailbox 和 Coordinator 如何把这些独立委派组织成一个团队。
 
 ## 团队在 subagent 之上增加持久协作控制面
 
@@ -359,3 +397,9 @@ Coordinator 的价值也不在于比 worker 更会写代码。它要守住全局
 - [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams)
 
 - [Dive into Claude Code：生产级 Agent 的设计空间](https://arxiv.org/abs/2604.14228)
+
+- [Create custom subagents - Claude Code Docs](https://code.claude.com/docs/en/sub-agents)
+
+- [Run agents in parallel - Claude Code Docs](https://code.claude.com/docs/en/agents)
+
+- [How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system)
