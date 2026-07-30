@@ -478,7 +478,7 @@ MCP 的价值是把跨进程、跨网络能力放进一个可发现、可授权�
 
 ## 留给下一篇的问题
 
-MCP 提供外部能力以后，Claude Code 的插件系统如何把命令、Skill、Hook、Agent、MCP 与 LSP 打包、安装并按作用域加载？
+在第一次对话时，Claude Code 会把哪些 MCP 信息发送给 LLM？
 
 ## 参考资料
 

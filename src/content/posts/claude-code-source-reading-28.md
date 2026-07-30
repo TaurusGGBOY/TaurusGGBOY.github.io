@@ -24,17 +24,61 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：MCP 提供外部能力以后，Claude Code 的插件系统如何把命令、Skill、Hook、Agent、MCP 与 LSP 打包、安装并按作用域加载？
+上一篇留下的问题是：
 
-先说答案：**插件是一种能力分发和生命周期容器，命令、Skill、Hook、Agent、MCP 与 LSP 仍按各自协议运行。**
+> 在第一次对话时，Claude Code 会把哪些 MCP 信息发送给 LLM？
 
-MCP 解决的是“运行中的 Claude Code 怎样连接一个外部 server，并把它提供的工具、资源和提示词接入会话”。插件解决的是另一层问题：这些配置和配套文件从哪里来，以什么版本安装到本机，在哪个用户或项目中启用，什么时候进入当前会话，禁用或更新后又怎样退出运行时。
+这里的“第一次对话”指 Claude Code 发出的第一个模型 API 请求，不是启动时本地打印的 `system/init` 事件。结论是：**Claude Code 不会把 `.mcp.json` 或 MCP 初始化响应原样转发给 LLM，而是把已经连接成功的能力重新组织到 `system`、`tools` 和 `messages` 三个位置。**
 
-因此，一个插件可以同时携带六类能力：命令、Skill、Hook、Agent、MCP server 和 LSP server。安装时，Claude Code 先把“想启用什么”写入某个配置作用域，再把插件物化到版本化缓存；加载时，它解析 manifest 和约定目录，把不同组件送进各自的注册表。修改安装状态以后，还需要一次显式或宿主触发的刷新，当前会话才会用新组件替换旧组件。
+| MCP 信息 | 首个模型请求中的形态 | 什么时候会出现 |
+| --- | --- | --- |
+| 工具定义 | 工具名、描述、输入 JSON Schema，以及部分 annotation；通常命名为 `mcp__server__tool` | server 已 `connected`，且工具发现成功。开启 Tool Search 时，大多数延迟工具不会携带完整 Schema，只先暴露工具名和搜索入口；关闭延迟或 `alwaysLoad` 时才会把 Schema 一起发送 |
+| Server instructions | 一段按 server 分组的文本，例如 `## github\n...`；可以位于 system prompt，也可以作为 `mcp_instructions_delta` 附件进入消息历史 | server 已连接且返回了非空 `instructions`。没有 instructions 的 server 不会凭空生成一段说明 |
+| 资源能力 | `ListMcpResourcesTool`、`ReadMcpResourceTool` 这两个宿主工具的定义；它们本身也可以被延迟加载 | server 声明 `capabilities.resources` 时加入本地 Tool 池。资源 URI 的清单和正文不会因为连接成功就自动塞进首个上下文 |
+| MCP prompts | 不会作为普通 system prompt 自动发送；先变成本地 `/mcp__server__prompt` 命令 | 用户真正调用这个 slash 命令后，prompt 结果才会作为新的消息注入对话 |
+| 连接配置与握手元数据 | 不会原样发送 | command、URL、headers、环境变量、OAuth token、scope、transport、`serverInfo` 和完整 capabilities 只供 Claude Code 建立连接、鉴权和筛选能力；它们不是 LLM 的 MCP 上下文 |
 
-这条链最重要的边界是：**发现只产生候选，安装只完成声明与物化，激活才把组件接入当前会话。** Marketplace 来源策略、项目信任、manifest Schema、相对路径、组织策略、组件自己的配置校验，都会在不同阶段拒绝或降级插件。
+这张表也解释了“连接了一个 server”与“模型立刻看到了 server 的全部内容”之间的差异：连接层先保存状态，模型层只接收经过筛选和规范化的能力。
 
-本篇仍然只讨论仓库中从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的代码。后面的源码块会省略与当前机制无关的日志、遥测和 UI 分支。
+### 工具和 instructions 是怎样进入首个请求的
+
+`restored-src/src/services/mcp/client.ts` 的 `getMcpToolsCommandsAndResources()` 会为每个配置建立连接。内部 `processServer` 先检查 `client.type`：`failed`、`needs-auth`、`pending` 和 `disabled` 不会继续执行正常的能力发现，只有 `connected` 才会并行请求 `tools/list`、prompts 和 resources。因而，首个请求能看到哪些 MCP 工具，首先取决于 server 是否已经在首轮构建前完成连接；未完成的 server 不是“发送了空信息”，而是暂时没有进入本轮的工具池。
+
+工具发现结果会被包装成 Claude Code 的本地 `Tool`。`fetchToolsForClient()` 保存完整工具名、原始 server/tool 坐标、描述和 `inputJSONSchema`，再把 `readOnlyHint`、`destructiveHint`、`openWorldHint` 映射成调度和风险判断。`queryModel()` 随后根据 Tool Search 的开关构造 `filteredTools`，调用 `toolToAPISchema()` 生成真正发给 Anthropic API 的 `tools` 数组。
+
+默认的延迟加载很容易造成误解：它不是“不告诉模型有 MCP”，而是首轮只让模型知道有哪些可搜索的工具，完整参数 Schema 等模型决定使用某个工具时再加载。源码中的 `getDeferredToolsDeltaAttachment()` 会把尚未宣布的延迟工具名作为 `deferred_tools_delta` 附件加入消息；如果当前模型或 provider 不支持 Tool Search，筛选逻辑会退回到把工具 Schema 直接放进请求。Claude Code 文档也明确把这种策略概括为“首轮加载工具名和 server instructions，工具定义按需进入上下文”。
+
+Server instructions 的路径由 feature gate 决定。普通路径调用 `getMcpInstructionsSection()`，而 `getMcpInstructions()` 只保留 `type === 'connected'` 且 `instructions` 非空的连接，并生成：
+
+```text
+# MCP Server Instructions
+
+## github
+<github server 返回的 instructions>
+```
+
+启用 MCP instruction delta 后，`getSystemPrompt()` 会跳过这段每轮重算的 system section，`getMcpInstructionsDeltaAttachment()` 改为把新增或移除的 server instructions 记录在消息附件中。这样 server 在会话中晚连接或断开时，只需发送变化部分，不必让整段 system prompt 失去缓存命中。若用户通过 `customSystemPrompt` 或更高优先级的 system prompt 覆盖默认 system prompt，`fetchSystemPromptParts()` 会跳过默认 prompt 的构建；这条路径下，内置的 MCP instructions section 也不会自动补回，但工具 schema 仍由工具池和 API 请求流程单独决定。
+
+### 资源、prompt 与“没有发送”的信息
+
+资源采用间接引用。连接阶段可以为了 UI 和 `@` 补全读取 `resources/list` 的元数据，但 `resources/read` 的正文只在用户引用 `@server:uri` 或模型调用 `ReadMcpResourceTool` 时读取。文本、JSON、图片或二进制结果随后才作为 tool result 或附件进入上下文；否则首轮不会因为某个 server 有资源，就把整个数据库 schema 或文件树塞进 prompt。
+
+MCP prompt 也走另一条路径。`fetchCommandsForClient()` 返回的是 Claude Code 的 `Command[]`，它们注册为 `/mcp__server__prompt`，并不是 API `tools` 数组或默认 system prompt 的一部分。只有用户执行命令后，带参数的 prompt 结果才会成为新的对话消息。这正是 MCP 中 tools、resources、prompts 三种 primitive 分工不同的体现：工具可被模型调用，资源按需取内容，prompt 由用户显式选择。
+
+因此，可以把首个模型请求抽象成下面三块：
+
+```text
+system:   Claude Code 基础 system prompt
+          + 已连接 server 的 instructions（或 instruction delta 附件）
+tools:    可立即使用的 MCP Tool Schema
+          + Tool Search 入口/延迟工具名（取决于 feature gate）
+messages: 用户首条输入
+          + 首轮产生的 deferred_tools_delta、mcp_instructions_delta 等附件
+```
+
+真正不会出现的是 MCP 配置文件本身、访问令牌、进程启动命令、远端 URL、未连接 server 的工具，以及没有被引用的资源正文。外部文章常把“客户端向 server 做能力发现”和“客户端把筛选后的能力交给 LLM”画成同一步；从这份源码看，它们中间还隔着连接状态、工具延迟加载、权限与 prompt-cache 处理，这也是第一次请求里 MCP 信息并不固定的原因。
+
+本篇后续仍然只讨论仓库中从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的插件代码。上面的 MCP 行为用于说明插件如何把 MCP 配置交给连接层；插件本身不会改变这些能力进入 LLM 的协议边界。
 
 ## 三层状态共同决定插件是否生效
 
@@ -345,3 +389,11 @@ Claude Code 的插件系统可以压缩成三层：settings 声明启用意图�
 - [Claude Code Plugins](https://code.claude.com/docs/en/plugins)
 
 - [Claude Code Plugins Reference](https://code.claude.com/docs/en/plugins-reference)
+
+- [Connect Claude Code to tools via MCP](https://code.claude.com/docs/en/mcp)
+
+- [Connect to external tools with MCP](https://code.claude.com/docs/en/agent-sdk/mcp)
+
+- [Architecture overview - Model Context Protocol](https://modelcontextprotocol.io/docs/learn/architecture)
+
+- [Server Instructions: Giving LLMs a user manual for your server](https://blog.modelcontextprotocol.io/posts/2025-11-03-using-server-instructions/)
