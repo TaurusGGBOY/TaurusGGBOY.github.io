@@ -382,7 +382,7 @@ Claude Code 的插件系统可以压缩成三层：settings 声明启用意图�
 
 ## 留给下一篇的问题
 
-插件能够携带语言能力以后，Claude Code 如何启动 LSP 服务器、同步文档，并把诊断与代码导航结果注入 Agent？
+既然 Claude Code 同时提供 Grep 和 LSP，它分别会在什么情况下被使用？
 
 ## 参考资料
 

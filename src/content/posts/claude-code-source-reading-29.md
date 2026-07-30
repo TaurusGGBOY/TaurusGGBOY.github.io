@@ -24,18 +24,44 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇最后留下的问题是：插件能够携带语言能力以后，Claude Code 如何启动 LSP 服务器、同步文档，并把诊断与代码导航结果注入 Agent？
+上一篇最后留下的问题是：既然 Claude Code 同时提供 Grep 和 LSP，它分别会在什么情况下被使用？
 
-先说结论：Claude Code 把这件事拆成了两条反馈路径。
+先澄清一个容易混淆的名字：这里的 **Grep** 是 Claude Code 的专用工具，2.1.88 的实现会调用 `ripgrep`（命令通常写作 `rg`）。它不是检索增强生成（RAG）；很多文章把 `rg` 写成 “grep”，说的是同一类词法搜索。
 
-第一条是**主动查询**。模型调用 `LSP` 工具，Claude Code 根据文件扩展名选择语言服务器，按需启动进程，发送 definition、references、hover、symbol 或 call hierarchy 请求，再把格式化结果包装成普通 `tool_result`。模型可以像消费 Read、Grep 的结果一样消费代码语义。
+结论是：**Grep 和 LSP 不是谁取代谁，而是回答两类不同的问题。**Grep 看文件里的字符，LSP 看语言里的符号关系。更重要的是，源码里没有一个“看到函数名就必定调用 LSP、看到字符串就必定调用 Grep”的硬编码分类器；模型根据当前可用的工具描述和任务语义选择工具。因此“什么时候会用到”要同时看工具是否已装配，以及用户的问题究竟是在找文本还是在问代码关系。
 
-第二条是**被动诊断**。Edit、Write 修改文件后，运行时向语言服务器发送 `didOpen / didChange / didSave`；服务器稍后推送 `publishDiagnostics`。这些诊断先进入注册表，等主线程下一次收集 attachments 时，再作为 `diagnostics` 附件加入 Agent 上下文。
+### 先看两种能力是否真的可用
 
-所以，LSP 是一个按文件类型路由、按需启动的外部进程，并通过两种明确的数据路径回流代码语义：
+`getAllBaseTools()` 只在没有内置搜索实现时加入 `GrepTool`；某些构建会使用内置的搜索工具，工具名不一定仍然显示为 Grep。`LSPTool` 则只有在 `ENABLE_LSP_TOOL` 为真时才会加入工具池，并且 `isEnabled()` 还要求 LSP manager 已经连接成功。manager 处于 `not-started` 或 `pending` 时，LSP 工具会被延迟；没有匹配当前文件扩展名的 server 时，调用也只能返回 “No LSP server available”。所以配置了插件不等于模型已经拥有可调用的 LSP。
 
-- Agent 主动问，结果走 `tool_use → tool_result`。
-- Language Server 主动推，结果走 `publishDiagnostics → Registry → Attachment`。
+### 按问题类型选择
+
+| 你真正想问的问题 | 更合适的工具 | 原因 |
+| --- | --- | --- |
+| “`API_URL` 在哪些 `.env`、YAML 和文档里出现？” | Grep | 这是跨文件、跨语言的字面量搜索，LSP 不会索引配置键和普通文本。 |
+| “所有包含 `TODO` 或某条日志的地方在哪里？” | Grep | 注释、字符串和日志不是语言符号；正则、glob、文件类型和上下文行也由 Grep 直接提供。 |
+| “`createSession` 定义在哪里？” | LSP（如果已连接） | `goToDefinition` 按符号和作用域解析，避免把同名注释、字符串或另一个模块的函数混在一起。 |
+| “重命名 `createSession` 前，谁真正调用了它？” | LSP（如果已连接） | `findReferences`、`incomingCalls` 和 `outgoingCalls` 返回语义引用，适合评估改动范围。 |
+| “这个表达式的类型是什么、有哪些实现？” | LSP（如果已连接） | `hover`、`goToImplementation` 和 symbol 查询需要语言服务器的类型和索引。 |
+| “刚刚 Edit 之后有没有类型错误？” | 被动 LSP 诊断 | server 推送 `publishDiagnostics`，运行时把它们作为 `diagnostics` attachment 交给 Agent，不需要模型先发起一次 LSP 查询。 |
+
+### Grep 什么时候反而是首选
+
+Grep 不只是 LSP 失效时的备用方案。它启动成本低，不要求项目有语言服务器，也不要求文件属于某种编程语言。首次接手陌生仓库时，先用精确字符串、正则、`glob` 或 `type` 做一次范围扫描，通常比等待语言索引更直接；查找配置、JSON、Markdown、模板、生成文件、错误信息和注释时，LSP 根本没有可解析的符号可返回。需要统计命中数、只列出文件、限制上下文或处理多行正则时，`GrepTool` 也有对应的 `output_mode`、上下文参数、`multiline`、`head_limit` 和 `offset`。
+
+这也是源码 prompt 强调“搜索任务使用 Grep、不要把 `grep`/`rg` 当 Bash 命令直接执行”的原因：权限、忽略目录、结果截断和输出格式由宿主工具统一处理。这里的“搜索任务”是词法层面的搜索，并不意味着语义导航也必须用 Grep。
+
+### LSP 什么时候值得优先
+
+当问题里出现“定义、引用、调用者、实现、类型、符号、重构影响范围”这些关系词时，LSP 的价值在于先过滤再把结果交给模型。Grep 会把同名文本、注释和测试夹具一并返回，模型还得打开文件判断哪些是真的引用；LSP 则让语言服务器在索引和类型系统中完成这一步。对大型仓库或准备修改公共 API 的任务，这个差别会直接影响上下文消耗和误改风险。
+
+LSP 还有一条不容易被注意到的被动路径：Edit/Write 后，服务器可以异步推送诊断。它不是“模型决定搜索时才使用”的一次性工具调用，而是编辑事件触发的反馈。诊断仍然只是辅助证据，最终要用 Read、编译器和测试确认。
+
+### 为什么你有时仍会看到 Grep
+
+即使安装了 LSP，模型也可能因为 server 尚未启动、扩展名没有映射、初始化失败、当前请求只是文本搜索，或者模型误判了任务，而继续调用 Grep。外部实践文章也把这种“静默回退”视为常见陷阱：可以直接要求“对这个符号执行 go to definition”，再看工具轨迹是否出现 `LSP`；如果只看到大量文本命中，就应检查 `ENABLE_LSP_TOOL`、插件的 `.lsp.json`、语言服务器进程和连接状态。
+
+因此，最实用的记忆方式是：**找字面量用 Grep，找符号关系用 LSP；改完代码看诊断；LSP 不可用时再让模型退回 Grep。**两者组合起来，才同时覆盖“代码之外的文本”和“代码内部的语义”。
 
 本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块都是短摘录，省略了与当前结论无关的日志和分支；还原路径只用于定位本文引用的源码。
 
@@ -470,4 +496,12 @@ server 启动后通过 stdio JSON-RPC 完成 `initialize → initialized` 握手
 
 - [Claude Code Tools Reference：LSP](https://code.claude.com/docs/en/tools-reference)
 
+- [Claude Code Plugins Reference：LSP servers](https://code.claude.com/docs/en/plugins-reference)
+
 - [Language Server Protocol Specification](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/)
+
+- [Claude Code: Grep vs LSP, and When to Use Each One](https://www.amazingcto.com/grep-or-lsp-in-claude-code/)
+
+- [LSP for Claude Code: Symbol Search at Scale](https://claudefa.st/blog/tools/mcp-extensions/lsp-mcp-server)
+
+- [Code Search for AI Agents: ripgrep, ast-grep, or Semantic?](https://ceaksan.com/en/code-search-for-ai-agents-which-tool-when)
