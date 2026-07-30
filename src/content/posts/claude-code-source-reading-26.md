@@ -26,17 +26,32 @@ imagePosition: "left"
 
 上一篇留下的问题是：
 
-> 团队协作确定以后，Plan mode 与 Git worktree 如何把“先规划、再并行实现、最后安全合并”落到代码与工作区？
+> Agent Teams 中的 teammate 与用户通过 Agent tool 手动创建的 sub-agent 有什么区别？
 
-直接说结论：这条工程流程由行为边界和文件边界配合完成。
+先把名称说清楚：这里 Agent Teams 中的“agent”指 **teammate**，不是团队 lead；“手动创建的 sub-agent”指当前会话通过 `Agent` tool 普通路径委派出的子 Agent。二者都会拿到独立上下文去执行任务，但它们不是同一种生命周期。
 
-Plan mode 管的是**行为边界**。它把当前权限模式切到 `plan`，要求 Agent 先读代码、问问题、写计划，并通过 `ExitPlanMode` 把执行权交回用户或 team lead 审批。Git worktree 管的是**文件边界**。它给每个任务准备独立的目录、分支和 cwd，让几个 Agent 可以同时改代码，而不在同一个 working tree 里互相覆盖。
+直接说结论：**sub-agent 是一次有边界的委派，teammate 是团队控制面中的持久成员。** 前者完成副任务后把结果或摘要交回父 Agent；后者加入 team roster，围绕共享 task list 和 mailbox 工作，可以领取后续任务、接收其他成员的消息，并由 lead 统一观察和回收。自定义 `AgentDefinition` 只是角色配置，可能被两种路径复用，并不会改变运行实体的生命周期。
 
-最后的“安全合并”位于后续 Git 流程：这份 2.1.88 还原源码负责创建、保留或删除 worktree，把并行修改隔开并保留可审查分支；`merge`、`rebase`、审查和冲突处理由协调者继续执行。
+### 2.1.88 源码里的分流点
 
-如果把整条链路压缩成一句话，就是：
+`AgentTool.call()` 同时接收 `prompt`、`subagent_type`、`description`、`model`、`run_in_background` 等普通委派参数，以及团队路径才会使用的 `name`、`team_name`、`mode`、`isolation` 和 `cwd`。当 `team_name` 显式提供，或调用上下文能够解析出团队名，并且提供了可寻址的 `name` 时，代码进入 `spawnTeammate()`；否则先解析 `AgentDefinition`，再走 `runAgent() → query()` 的普通 sub-agent 循环。
 
-> Plan mode 决定什么时候可以动手，worktree 决定去哪里动手，Git 审查与合并决定这些改动什么时候进入主线。
+这两个分支的返回语义也不同：普通路径返回执行完成或后台启动的结果，父 Agent 负责消费结果；团队路径返回 `teammate_spawned`，带有 teammate 的 ID、名称和 team 名称，后续状态通过 team task 与 mailbox 继续流转。`name` 不是装饰字段，它让成员能够被 task owner、消息路由和 shutdown 协议准确寻址。
+
+| 维度 | Agent tool 手动创建的 sub-agent | Agent Teams 中的 teammate |
+| --- | --- | --- |
+| 创建路径 | 解析 `subagent_type` 对应的 `AgentDefinition`，调用 `runAgent()` | 在团队上下文中用 `team_name + name` 进入 `spawnTeammate()` |
+| 生命周期 | 完成一个清晰副任务后返回结果；需要更多工作时由父 Agent 再次委派 | 作为 team 成员保留身份，可继续收消息、领取任务并报告状态，最后由团队协议关闭 |
+| 协调方式 | 父 Agent 收集结果、判断是否重试或综合；没有共享 team roster、task list 和 mailbox | 共享 team config、task list、mailbox；成员可直接联系 lead 或其他 teammate，任务也有 owner、依赖和终态 |
+| 上下文 | 从任务提示开始的独立上下文，适合把搜索、审查等噪声隔离出去 | 同样拥有独立上下文，但成员身份和通信通道让它能跨多轮协作保留工作连续性 |
+| 文件边界 | 默认仍可能在当前 cwd 写文件；需要时显式使用 `isolation: 'worktree'` | 团队控制面本身不等于文件隔离；要并行改代码仍应为成员准备 worktree 或明确文件所有权 |
+| 成本与适用场景 | 协调开销较低，适合短小、低耦合、输出格式明确的任务 | token 和协调开销更高，适合多个相对独立、需要持续多步推进的任务 |
+
+这个差别也解释了为什么“把几个 sub-agent 同时放到后台”不自动等于 Agent Teams：后台只是执行时机，不能凭空产生共享任务所有权、成员寻址和直接消息。反过来，Team 也不会替你解决文件冲突；多个 teammate 仍然写同一工作区时，必须靠 worktree、文件分工或串行合并控制风险。
+
+Anthropic 对两类模式的实践区分与源码边界相互印证：orchestrator-subagent 适合清晰、短小、低耦合的结果，由父 Agent 负责综合；agent team 适合独立任务的持续推进，让 worker 在多轮工作中保持上下文并相互协调，但要承担更高的 token 和通信成本。因此选择标准不是“哪个更强”，而是任务是否需要持久身份和团队控制面。
+
+最后再强调一个容易混淆的点：同一个自定义 Agent 定义可以作为 `subagent_type` 被普通路径使用，也可以作为 teammate 的角色模板；定义里的模型、工具和提示词描述“它是谁”，而 `spawnTeammate` 还是 `runAgent` 决定“它以什么协作关系存在”。本文后续仍以 `@anthropic-ai/claude-code@2.1.88` 的还原源码为边界，继续看 Plan mode 和 worktree 如何分别隔离行为与文件。
 
 ## 两种隔离，解决的是两个不同问题
 
@@ -459,3 +474,11 @@ Plan mode 用 `mode: 'plan'`、`prePlanMode`、只读 reminder、plan file 和 `
 - [Claude Code Permission Modes](https://code.claude.com/docs/en/permission-modes)
 
 - [Claude Code Worktrees](https://code.claude.com/docs/en/worktrees)
+
+- [Subagents - Claude Code Docs](https://code.claude.com/docs/en/sub-agents)
+
+- [Agent Teams - Claude Code Docs](https://code.claude.com/docs/en/agent-teams)
+
+- [Multi-agent coordination patterns](https://claude.com/blog/multi-agent-coordination-patterns)
+
+- [How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system)

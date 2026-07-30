@@ -390,7 +390,7 @@ Coordinator 的价值也不在于比 worker 更会写代码。它要守住全局
 
 ## 留给下一篇的问题
 
-团队协作确定以后，Plan mode 与 Git worktree 如何把“先规划、再并行实现、最后安全合并”落到代码与工作区？
+Agent Teams 中的 teammate 与用户通过 Agent tool 手动创建的 sub-agent 有什么区别？
 
 ## 参考资料
 
