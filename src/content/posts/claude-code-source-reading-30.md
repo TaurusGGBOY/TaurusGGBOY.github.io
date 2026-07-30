@@ -24,17 +24,100 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：语言服务器解决代码语义以后，Claude Code 如何与 IDE、浏览器和其他外部客户端建立连接，并同步选区、文件与操作结果？
+上一篇留下的问题是：我们经常看到文章说 Claude Code 使用 Grep 而不是 RAG；那么在同时拥有 Grep 和 LSP 的情况下，Claude Code 什么时候会使用 Grep，什么时候会使用 LSP？
 
-先说结论：**Claude Code 把 IDE、Chrome 和普通外部工具适配成 MCP 连接，再在 MCP 之上补各自需要的发现、通知和权限协议，使它们复用同一套 Agent 内核。**
+先说结论：**2.1.88 没有实现一个按照问题语义在 Grep、LSP 和 RAG 之间自动切换的统一路由器。**Grep 是默认的文本搜索能力，LSP 是满足开关和连接条件后才出现的语义工具；两者同时可用时，模型根据工具描述、已经掌握的文件位置和当前任务选择调用哪个。RAG 也不是这个版本内置的代码搜索工具，外部 MCP 或插件可以额外提供它，但不能把它和源码里的 Grep、LSP 混成同一条控制流。
 
-IDE 这一边，扩展先把 workspace、端口、传输方式和可选认证令牌写进 lockfile。Claude Code 找到与当前工作目录匹配的那一个，把它转换成动态的 `sse-ide` 或 `ws-ide` MCP 配置。连接成功后，扩展可以用 `selection_changed`、`at_mentioned` 等通知把编辑器现场推给终端；Claude Code 也能通过 `openDiff`、`close_tab` 等 RPC 把操作发回 IDE，并把保存、关闭或拒绝结果重新映射成运行时决策。
+## 三种能力先不要混成一个概念
 
-Chrome 走的是另一条入口。Claude Code 启动一个进程内 Chrome MCP server，它再通过 Native Messaging socket 或 Bridge 与浏览器扩展配对。浏览器操作仍然以 MCP tool call / result 进入工具链，但权限不只看 Claude Code：运行时权限模式、扩展配对状态和站点级权限共同组成边界。
+可以把它们看成三个不同的坐标：
 
-其他外部客户端则使用普通 MCP 的 `stdio`、SSE、HTTP、WebSocket、SDK 或代理配置。握手后，Claude Code 只根据服务端实际声明的 tools、prompts、resources 等 capabilities 装配能力。换句话说，传输解决“怎么连”，MCP 解决“怎么说”，宿主适配解决“哪些本地状态值得同步”。
+| 能力 | 它回答的问题 | 是否需要预先建立代码索引 |
+| --- | --- | --- |
+| Grep | 哪些文件或行包含这个字符串/正则？ | 不需要；每次对当前文件树即时搜索 |
+| LSP | 这个位置上的符号定义在哪里、谁引用它、它是什么类型？ | 需要语言服务器维护语义状态，但不是向量索引 |
+| RAG | 哪些代码片段在语义上与这段自然语言最相关？ | 通常需要 embedding、分块和向量索引 |
 
+因此，“Claude Code 使用 Grep 而不是 RAG”讨论的是**词法搜索和预索引检索的工程取舍**；“Claude Code 有了 LSP 以后什么时候不用 Grep”讨论的是**文本搜索和编译器语义查询如何分工**。LSP 既不是 RAG，也不是把整个代码库提前向量化。
 
+## 源码先决定哪些工具能被模型看到
+
+2.1.88 的工具注册顺序已经给出第一层答案。没有可用的嵌入式搜索实现时，工具列表加入专用的 `GlobTool` 和 `GrepTool`；LSP 则必须显式满足环境开关：
+
+```ts
+...(hasEmbeddedSearchTools() ? [] : [GlobTool, GrepTool])
+...
+...(isEnvTruthy(process.env.ENABLE_LSP_TOOL) ? [LSPTool] : [])
+```
+
+前一行的含义不是“没有 Grep”，而是某些 ant-native 构建把 `find`/`grep` 通过 shell alias 接到内嵌搜索程序，因而省掉专用工具对象。通常构建仍会暴露 `GrepTool`，它的 `call()` 最终组装参数并调用 `ripGrep()`，没有先读取向量数据库。
+
+LSP 工具注册后还有第二道门：
+
+```ts
+isEnabled() {
+  return isLspConnected()
+}
+```
+
+`isLspConnected()` 要求 Manager 已建立、至少有一个 server，并且至少一个 server 的状态不是 `error`。server 配置来自已启用插件；所以“安装了 LSP 插件”不等于本轮已经有可调用的 `LSP` 工具。初始化仍在 `pending` 或尚未开始时，API 层会把 LSP 标记为 deferred，等 Manager 完成初始化后再决定是否提供。
+
+这解释了很多看似矛盾的现象：你明明安装了 language server，模型却继续调用 Grep。可能是 `ENABLE_LSP_TOOL` 没开、插件没有 enabled、文件扩展名没有匹配 server、进程启动失败，或者 server 还没完成握手。此时不是模型“拒绝使用 LSP”，而是 LSP 根本没有通过工具可用性检查。
+
+## Grep 什么时候是正确选择
+
+`GrepTool` 的输入是正则模式 `pattern`，`path` 省略时回退当前工作目录；`glob` 和 `type` 可以缩小文件集合。`output_mode` 的源码可确认取值如下：
+
+| `output_mode` | 返回内容 | 适合的问题 |
+| --- | --- | --- |
+| `'files_with_matches'`（默认） | 命中文件路径 | 先找可能相关的文件 |
+| `'content'` | 命中行，可带上下文和行号 | 阅读字符串出现位置 |
+| `'count'` | 每个文件的命中次数 | 统计影响范围 |
+
+`head_limit` 未提供时默认 250；显式传 `0` 才表示不限制；`offset` 默认 0，用来分页。`multiline` 默认 `false`，只有显式开启才允许跨行匹配；`-n` 在 content 模式下默认显示行号。它仍然是对当前文件树的即时匹配，不知道一个名字究竟是定义、调用、注释还是测试桩。
+
+所以这些任务应该先用 Grep：
+
+- 搜索错误信息、日志、注释、TODO、配置键、feature flag 或字符串字面量；
+- 用户只给出一个模糊的文本线索，需要先找出可能的目录和文件；
+- 代码使用的语言没有已配置的 language server，或目标是 Markdown、YAML、JSON、脚本和生成文件；
+- 需要对整个仓库做一次新鲜的宽范围扫描，不能接受索引滞后。
+
+Grep 的代价也很明确：同名变量、注释和字符串会制造噪声，Agent 往往要经历“搜索—Read—再搜索”的循环。它适合建立候选集合，不适合单独证明“所有调用点都已经找到”。
+
+## LSP 什么时候更有价值
+
+`LSPTool` 的输入不是关键词，而是 `filePath`、1-based 的 `line` 和 `character`，再选择一个源码固定的 operation：
+
+```text
+goToDefinition       findReferences       hover
+documentSymbol        workspaceSymbol      goToImplementation
+prepareCallHierarchy  incomingCalls        outgoingCalls
+```
+
+这意味着 LSP 最适合“我已经知道一个符号位于哪里，现在要问它的语义关系”：跳到真实定义、找精确引用、查看类型与文档、找接口实现，或分析调用者和被调用者。工具在第一次处理文件时会先让 server `didOpen`；文件超过 10 MB、扩展名没有匹配 server、server 不健康或协议请求失败，都会落入错误/空结果路径。
+
+编辑后的诊断还形成另一条路径。Claude Code 的 LSP Manager 会同步打开、修改和保存的文档，server 通过 `publishDiagnostics` 返回类型或语法问题；这些诊断可以作为 Agent 的辅助证据，但仍应由编译和测试完成最终确认。换句话说，LSP 不只在模型主动调用 `goToDefinition` 时有用，也会在编辑后的反馈阶段参与工作。
+
+## 三者放在一条实际工作流里
+
+一个更接近真实会话的顺序是：
+
+```text
+自然语言线索
+    │
+    ├─ “哪里出现这个错误字符串/配置键？” ──> Grep
+    │                                           │
+    │                                           └─ 得到文件与位置
+    │                                                       │
+    ├─ “这个符号定义、引用和调用关系是什么？” ────────> LSP
+    │                                                       │
+    └─ “修改后哪里坏了？” <── LSP diagnostics ── Edit/Write ─┘
+```
+
+如果问题是“实现认证流程的代码在哪里”，外部 RAG/语义索引可能比纯文本更快找到候选；但它返回的是相关片段，不等于真实的定义或调用图。找到候选文件后，仍然应该用 LSP 验证符号关系，再用 Read、编译器和测试确认行为。没有外部 RAG 时，Grep 通过多个文本线索和 Agent 的逐步阅读承担发现阶段。
+
+最后可以把选择规则压缩成一句话：**不知道名字或搜索的是文本，用 Grep；知道符号位置并要语义关系，用 LSP；只知道“它大概做什么”且项目另有向量索引时，才考虑 RAG。**三者不是替代关系，真正稳妥的路径通常是 Grep（或外部 RAG）找入口，LSP 做精确导航，诊断与测试做闭环。
 
 本文继续以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的代码只保留证明主路径所需的部分；省略的 import、日志和平台分支会明确标出，还原路径只用于定位本文引用的源码。
 
@@ -374,3 +457,9 @@ Claude Code 接入外部宿主的主线，可以压缩成五步：
 - [Claude Code Chrome Integration](https://code.claude.com/docs/en/chrome)
 
 - [Claude Code IDE Integrations](https://code.claude.com/docs/en/ide-integrations)
+
+- [Claude Code: Grep vs LSP, and When to Use Each One](https://www.amazingcto.com/grep-or-lsp-in-claude-code/)
+
+- [Claude Code Has Been Navigating Your Codebase Like a Tourist With No Map](https://lakshminp.com/2026/03/claude-code-lsp-semantic-context-agents/)
+
+- [How AI Searches Through Your Codebase](https://priyanshumahey.github.io/blog/how-ai-indexes-your-codebase)

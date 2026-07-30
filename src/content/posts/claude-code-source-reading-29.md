@@ -517,7 +517,7 @@ server 启动后通过 stdio JSON-RPC 完成 `initialize → initialized` 握手
 
 ## 留给下一篇的问题
 
-语言服务器解决代码语义以后，Claude Code 如何与 IDE、浏览器和其他外部客户端建立连接，并同步选区、文件与操作结果？
+我们经常看到文章说 Claude Code 使用 Grep 而不是 RAG；那么在同时拥有 Grep 和 LSP 的情况下，Claude Code 什么时候会使用 Grep，什么时候会使用 LSP？
 
 ## 参考资料
 
