@@ -43,6 +43,8 @@ imagePosition: "left"
 
 外层 Host 不同。普通模式由 React/Ink REPL 管理键盘、消息列表、权限弹窗、取消和下一轮输入；`-p` 使用 `StructuredIO` 与 `QueryEngine` 管理输入输出和会话，得到结果后结束进程。headless 路径直接订阅 settings change，以替代 React tree 中对应 hook 的职责。
 
+这里的 `StructuredIO` 是 **Structured Input/Output（结构化输入输出）** 的缩写：它把 prompt、stdin 或远程消息整理成带 `type` 的协议消息，再把 assistant、工具进度、权限控制请求和最终 result 序列化给宿主。它属于无头入口的消息适配层，Agent 模型仍由后面的查询循环承载；后文会继续拆解它如何处理这些消息。
+
 内层 Agent 能力仍然复用。两条路径最终都会进入 `query()` / `queryLoop()`，使用相同的模型流、工具契约、权限结果和 `tool_result` 回环。`-p` 保留完整 Agent 内核，把交互职责从本地 REPL 转交给命令行参数、stdin、配置规则或外部 SDK 宿主。
 
 这点很容易读错。`QueryEngine.ts` 的注释明确说，2.1.88 里的 `QueryEngine` 用于 headless/SDK，REPL 接入仍属于 “a future phase”。所以“一套内核”应该理解成**分层复用**：宿主层可以分叉，会话包装也可能不同，但进入 Agent 查询循环以后，模型、工具和消息语义重新汇合。

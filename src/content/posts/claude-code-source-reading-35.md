@@ -24,19 +24,35 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：同一套运行时支持多种入口以后，Claude Code 如何合并用户、项目、本地、策略、CLI 设置与功能开关，并决定最终行为？
+上一篇留下的问题是：当你的代码需要调用 Claude Code 时，相比 Agent SDK，`claude -p` 在哪些场景下更有优势？
 
-先给结论：Claude Code 通过构建能力、settings cascade 和运行时功能开关连续完成三次裁决。
+先给结论：`claude -p` 的优势来自一个清晰的进程边界。调用方准备 prompt、stdin、cwd 和权限参数，再读取 stdout、stderr 与退出码；当任务是一次性的、结果可序列化、权限在启动前可以确定时，这条边界通常比在宿主程序里管理 SDK 生命周期更省事。Agent SDK 仍然复用同一套 Agent 内核，但它把会话、事件、权限回调和控制消息交给你的程序管理，适合需要持续控制的产品。
 
-第一次发生在构建时。`bun:bundle` 的 `feature('VOICE_MODE')`、`feature('BRIDGE_MODE')` 等开关决定一段代码是否进入当前产物。被构建裁掉的模块无法通过 JSON、环境变量或远端实验恢复。
+### 2.1.88 的分叉点在 headless 宿主
 
-第二次是 settings cascade。默认情况下，插件设置先做最低优先级底座，然后依次合并 `userSettings → projectSettings → localSettings → flagSettings → policySettings`；越靠后的来源覆盖越靠前的普通字段，数组则拼接并去重。`--setting-sources` 既能关闭 user、project、local，也用参数顺序决定这三者的遍历顺序；flag 与 policy 总是在其后补入。托管策略内部采用首个有效来源：Remote、MDM、managed file、HKCU 依次检查，命中后停止。
+`restored-src/src/cli/print.ts::runHeadless()` 的参数已经把两种用法的边界写出来了：`inputPrompt` 可以是字符串或 `AsyncIterable<string>`，`options` 则携带 `outputFormat`、`jsonSchema`、`permissionPromptToolName`、`maxTurns`、`sdkUrl`、`replayUserMessages` 与 `includePartialMessages` 等控制项。字符串 prompt 会在 `getStructuredIO()` 中包装成一条 SDK user message；省略 `sdkUrl` 时使用本地 `StructuredIO`，提供 URL 时切换到 `RemoteIO`。
 
-第三次才是运行时功能开关。GrowthBook getter 按“环境覆盖、内部配置覆盖、进程内远端值、磁盘缓存、调用方默认值”取值。它可以打开或关闭已经存在于构建产物里的路径，却不能改变 settings 的来源优先级。
+随后 `runHeadless()` 把输入交给 `runHeadlessStreaming()`，再把同一条 Agent 查询链产生的消息按输出格式写出：`text` 只取最终结果，`json` 输出一个可供脚本解析的 result 对象，`stream-json` 在 `verbose` 下逐条写出 NDJSON 事件。循环结束后，源码还依据最后一条 result 的 `is_error` 设置进程退出码，再执行 graceful shutdown。对 Shell 来说，这就是一份熟悉的命令契约：输入、输出、错误流和退出状态都有明确位置。
 
-最终行为由三层条件共同决定：
+### `claude -p` 更占优的场景
 
-`build capability ∩ effective settings ∩ runtime gate ∩ 当前宿主与权限上下文`。
+| 场景 | `claude -p` 的优势 | 选择 SDK 的信号 |
+| --- | --- | --- |
+| Shell、Make、cron、CI | 一条命令即可接入现有管道；stdin、stdout、stderr、退出码都能交给现有工具处理 | 需要把每个中间事件送入应用状态或业务队列 |
+| 一次性检查或生成报告 | `--output-format json` 与 `--json-schema` 直接给出机器可读结果，失败可以由退出码触发重试 | 结果之外还要持续消费 assistant、tool progress、partial message 或 system event |
+| 权限在启动前固定 | 用 settings、`--allowed-tools`、`--disallowed-tools` 和 `--permission-mode` 先划定边界，脚本不需要实现审批 UI | 工具执行中要由网页、IDE 或业务审批服务动态返回 allow/deny |
+| 独立任务批处理 | 每个进程天然隔离 cwd、环境和会话，操作系统层的并行、超时和取消都容易接入 | 多轮任务共享同一个 session、需要精细 interrupt 或在轮次之间改写配置 |
+| 快速原型与故障复现 | 用户可以把完整命令复制到终端重跑，版本、参数和输入都容易记录 | 宿主已经需要维护 pending request、事件分发和断线恢复，继续堆命令行 glue code 会变成自制协议层 |
+
+这里的“独立任务”是一个运行方式上的推论：源码能证明每次 `claude -p` 都在一个 headless 进程里完成输入归一化、查询和收尾；至于批量启动多少个进程、并发是否合适，仍取决于机器资源、账号限流和任务之间是否互相读写文件。
+
+### SDK 何时值得承担额外控制面
+
+Agent SDK 的价值在于把 `StructuredIO` 背后的协议细节提升成语言层对象。宿主可以持续发送 user message，消费类型化的 assistant/result/system 事件，监听工具进度，响应 `control_request`，并在会话中主动 interrupt、切换模型或恢复 session。对 IDE、Web 服务、多人协作后台和需要审计的自动化系统，这些控制点本身就是产品功能。
+
+公开资料也给出了一个与源码边界一致的使用层判断：headless CLI 适合把任务接到脚本和流水线；SDK 适合把 Agent 嵌入由别人使用的程序。SDK 文档还提醒，默认 system prompt 与 `claude -p` 的完整 Claude Code 提示词并不等价；如果产品确实要复刻 CLI 行为，需要显式选择 `claude_code` preset，再按需追加自己的规则。这个差异来自当前公开文档，不能反推 2.1.88 每个构建的运行时配置，但足以提醒我们：迁移到 SDK 时，除了改 API，还要检查 settings、CLAUDE.md、skills、hooks 和 prompt 是否仍然按预期加载。
+
+因此可以用一句工程判断收束：**把 Claude Code 当作一个可复现的命令行工件时，优先 `claude -p`；把它当作应用中的长期会话和可编排组件时，再选择 Agent SDK。** 如果只是需要实时文本而不需要回调，先尝试 `claude -p --output-format stream-json --verbose`；当宿主开始手写事件类型分发、权限请求表、取消传播和断线恢复时，迁移到 SDK 才真正省下维护成本。
 
 下图的 Settings Cascade 画的是未用 `--setting-sources` 重排时的默认顺序；显式参数怎样改变前三层，会在正文展开。
 
@@ -379,3 +395,11 @@ Feature Flags 则有两层：`bun:bundle feature()` 决定代码是否存在，G
 - [Claude Code Settings](https://code.claude.com/docs/en/settings)
 
 - [Debug Claude Code Configuration](https://code.claude.com/docs/en/debug-your-config)
+
+- [Run Claude Code programmatically](https://code.claude.com/docs/en/headless)
+
+- [Use Claude Code features in the SDK](https://code.claude.com/docs/en/agent-sdk/claude-code-features)
+
+- [Modifying system prompts](https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts)
+
+- [Claude Agent SDK vs Claude Code: when to use which](https://onautopilot.com.au/claude-code/claude-agent-sdk-vs-claude-code-when-to-use-which/)

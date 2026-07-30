@@ -484,7 +484,7 @@ Claude Code 的交互式 REPL 与无头模式共享 Agent 内核，差别集中�
 
 ## 留给下一篇的问题
 
-同一套运行时支持多种入口以后，Claude Code 如何合并用户、项目、本地、策略、CLI 设置与功能开关，并决定最终行为？
+当你的代码需要调用 Claude Code 时，相比 Agent SDK，`claude -p` 在哪些场景下更有优势？
 
 ## 参考资料
 
