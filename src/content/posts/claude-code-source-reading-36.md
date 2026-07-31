@@ -24,13 +24,46 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：**配置确定以后，Claude Code 如何选择模型、处理认证，并在 Anthropic、Bedrock、Vertex 与 Foundry 等 provider 之间适配请求？**
+上一篇留下的问题是：**在 `/config` 中修改配置后，`settings.json` 中对应的配置也会同步修改吗？**
 
-答案先说：Claude Code 先从会话覆盖、启动参数、`ANTHROPIC_MODEL` 和 settings 中选出一个“模型设置”，再把 `opus`、`sonnet`、`haiku`、`best` 等别名解析为当前 provider 对应的真实模型 ID。provider 由环境开关按 `Bedrock → Vertex → Foundry → firstParty` 的固定优先级确定。随后，`getAnthropicClient()` 为四条路径分别装配 AWS、Google、Azure 或 Anthropic 凭证，最后暴露成近似统一的 Anthropic client 接口，交给同一个 `queryModel()` 构造 `model`、`messages`、`tools`、`thinking` 等请求字段。
+先给结论：**有些设置会写入某个 `settings.json`，但 `/config` 不会把整份“当前生效配置”统一同步回一个 `settings.json`。** 在 `@anthropic-ai/claude-code@2.1.88` 中，`/config` 只是打开设置界面；每个控件自己的 `onChange` 决定写入全局配置文件、哪一层 settings 文件，还是只更新当前会话。
 
-这里有两个边界必须提前说清楚。第一，别名解析只得到候选模型 ID；真实可用性还受区域、部署名、IAM、组织权限和服务端容量影响。第二，切模降级只由连续 529、已提供的 `fallbackModel` 和额外触发条件共同启动；404 返回替代建议并终止当前失败路径。
+入口本身没有“保存全部配置”的逻辑：
 
-本篇仍以 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码为边界。下文代码均摘自 `restored-src/`；为突出主线，代码块省略了无关日志、遥测和分支，省略处不冒充完整源码。
+```tsx
+export const call: LocalJSXCommandCall = async (onDone, context) => {
+  return <Settings onClose={onDone} context={context} defaultTab="Config" />
+}
+```
+
+`Config` 组件同时读取两种数据：`getGlobalConfig()` 得到全局应用状态，`getInitialSettings()` 得到按来源合并后的 settings。因为后者已经是合并结果，界面显示的一个值并不能反推出它原来来自 user、project、local 还是 policy；真正的写入目标要看该选项绑定的函数。
+
+### `/config` 中的控件到底写到哪里
+
+| 控件使用的写入路径 | 2.1.88 的实际文件或状态 | 可以观察到的典型选项 | 是否会改 `settings.json` |
+| --- | --- | --- | --- |
+| `saveGlobalConfig(...)` | `getGlobalClaudeFile()`，通常是 `~/.claude.json` | `verbose`、自动 compact、主题、编辑器模式、通知、部分界面偏好 | 不会；这是全局应用状态文件 |
+| `updateSettingsForSource('userSettings', ...)` | 通常是 `~/.claude/settings.json`；cowork 模式可能是 `cowork_settings.json` | 权限默认模式、`alwaysThinkingEnabled`、fast mode、语言、自动更新通道、提示建议 | 会，写用户层 settings |
+| `updateSettingsForSource('localSettings', ...)` | 当前项目的 `.claude/settings.local.json` | spinner tips、减少动画、output style、默认视图等本机偏好 | 会写 settings 文件，但不是共享的 `.claude/settings.json` |
+| `setAppState(...)` 或会话状态更新 | 当前进程的 AppState / session | 模型选择的即时状态、当轮 thinking 状态等 | 不一定；没有对应的磁盘写入调用 |
+
+这里的“全局”容易造成误解：`~/.claude.json` 确实是跨项目的 JSON 文件，但它不是用户 settings 文件。源码中的 `saveGlobalConfig()` 通过锁写入 `getGlobalClaudeFile()`，并过滤默认值、保护认证状态；它和 `updateSettingsForSource()` 的 settings 写入链是两套 API。相反，`userSettings` 的路径由 `getSettingsFilePathForSource()` 计算，正常才是 `~/.claude/settings.json`；project 与 local 则分别落在项目目录的 `.claude/settings.json` 和 `.claude/settings.local.json`。
+
+因此，若你在界面里切换“主题”或“自动 compact”，看到 `~/.claude.json` 变化是预期行为；若切换权限默认模式或语言，才应检查 `~/.claude/settings.json`。Config 面板在这版源码中没有直接调用 `updateSettingsForSource('projectSettings', ...)`，所以不能把它理解成会替你改写团队共享的项目 settings。
+
+### 写入是在什么时候发生的
+
+这些控件不是点击“保存”后统一提交。大多数 `onChange` 在用户切换选项时就调用写入函数，同时更新 AppState 让界面立即反馈。`updateSettingsForSource()` 会先读取目标文件，再按 `mergeWith` 合并：对象字段深合并，数组用新数组替换，传入 `undefined` 表示删除键；如果原文件有 JSON 语法错误，它会返回错误而拒绝覆盖，避免一次设置操作抹掉原文件。写入后还会重置 settings 缓存；local settings 的写入则异步把 `.claude/settings.local.json` 加入 gitignore。
+
+按 Escape 也不是“什么都没发生”。Config 在打开时保存了全局、user/local settings 和 AppState 的快照；已经发生过改动时，`revertChanges()` 会把这些快照重新写回对应位置。所以取消操作可能再次触碰磁盘，但目标仍然是各自原来的文件，不是把合并后的结果写入一个总文件。
+
+### 版本边界与实际判断方法
+
+当前官方文档已经描述了更新版本中 `/config key=value` 的命令形式，但那是 2.1.181 之后的能力，不能倒推到本系列分析的 2.1.88。对 2.1.88，源码能确认的是 `/config` 打开 `Settings` UI，以及每个设置项分别选择上述写入路径。
+
+实际排查时可以按这条规则走：团队共享的规则编辑项目 `.claude/settings.json` 并提交；跨项目的个人默认值编辑 `~/.claude/settings.json`；只想让本机当前项目生效就编辑 `.claude/settings.local.json`；界面主题、认证和项目历史等应用状态则检查 `~/.claude.json`。最后还要看来源优先级：某个文件即使被改了，也可能被 local、CLI flag 或 policy 层覆盖，界面显示的是合并后的有效值，而不是某个文件的原样内容。
+
+本篇仍以 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码为边界；下文原有的模型路由与 provider 代码保持不变。这里新增的结论只涉及 `/config` 的写入分流，不把“当前值生效”误写成“所有 settings 文件都同步”。
 
 ## 先把三个容易混在一起的概念拆开
 
@@ -412,3 +445,11 @@ Claude Code 的模型调用由两条独立选择链在 client 工厂汇合：一
 - [Claude Code Model Configuration](https://code.claude.com/docs/en/model-config)
 
 - [Claude Code Organization Setup](https://code.claude.com/docs/en/admin-setup)
+
+- [Claude Code settings](https://code.claude.com/docs/en/configuration)
+
+- [Explore the .claude directory](https://code.claude.com/docs/en/claude-directory)
+
+- [The Definitive Guide to Every Claude Code Configuration File](https://wittmannf.github.io/blog/claude-code-config-guide/)
+
+- [Claude Code settings.json: the configuration guide](https://scalably.io/blog/claude-code-settings-json)
