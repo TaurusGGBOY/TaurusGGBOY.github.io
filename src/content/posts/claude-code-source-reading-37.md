@@ -24,19 +24,99 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-模型与认证准备好以后，Claude Code 的 Bridge、Remote Control 与 Server 模式如何连接本地运行时和远端客户端，并转发消息与控制事件？
+上一篇留下的问题是：**为什么 Claude Code 要区分不同的 provider？**
 
-答案是：Claude Code 把本地运行时注册成可领取工作的 environment，再用带 `sessionId` 的事件通道，把本地 query loop 产生的 `SDKMessage` 发到会话服务；远端客户端订阅这些事件，并把新 prompt、interrupt、权限结果反向送回来。工具执行和项目状态继续留在本地运行时。
+先给结论：`provider` 不是“同一个 API 的几个别名”，而是一次请求的承载方和运行时契约。它决定请求发到哪里、用谁的身份签名、模型名称如何解析、哪些 beta header 和能力参数可以发送，以及数据、账单、区域和组织策略落在哪个边界。把这些路径强行当成同一个 provider，最容易出现的不是代码重复，而是拿错凭证、把错误的模型 ID 发给后端，或者把一个后端不支持的参数送出去。
 
-这里至少有三种角色，先别混在一起：
+## 2.1.88 里的 provider 是一个路由上下文
 
-- `ReplBridge` 在真正执行代码的机器上。它知道 `cwd`、本地工具和 query loop。
-- `RemoteSessionManager` 在远端控制客户端一侧。它订阅会话、发送用户消息、显示并回复权限请求。
-- `DirectConnectSessionManager` 面向 direct-connect server。它使用 server 返回的 `wsUrl`，把同一套结构化消息协议接到自托管入口。
+源码把 provider 定义成封闭联合类型：`'firstParty' | 'bedrock' | 'vertex' | 'foundry'`。`getAPIProvider()` 不接收参数，只读取三个环境开关：
 
-所以 Bridge 解决的是分布式会话问题：谁拥有执行环境，谁保存会话身份，消息怎样关联，权限由谁确认，连接断掉以后从哪里继续。
+```ts
+export function getAPIProvider(): APIProvider {
+  return isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK)
+    ? 'bedrock'
+    : isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX)
+      ? 'vertex'
+      : isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY)
+        ? 'foundry'
+        : 'firstParty'
+}
+```
 
-本文仍以仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原的源码为边界。下面的片段为突出主线省略了日志、UI 和部分错误分支；路径是还原路径，不代表 Anthropic 内部源码的原始目录结构。
+`isEnvTruthy()` 把布尔 `true`，以及忽略大小写、去掉首尾空白后为 `1`、`true`、`yes`、`on` 的字符串视为真；`undefined`、空字符串和其他字符串视为假。三个开关同时为真时，优先级是 Bedrock、Vertex、Foundry；都不成立时回退 `firstParty`。这个函数只做本地路由选择，不会先发请求测试哪个后端可达。
+
+provider 之所以必须在这么早的阶段确定，是因为后面的模型表、client 工厂、能力判断和错误处理都会读取它。它不是请求末尾的一个标签，而是贯穿调用链的上下文。
+
+## 同一个 Claude 模型，四套“前门”
+
+在 `getAnthropicClient({ apiKey?, maxRetries, model?, fetchOverride?, source? })` 中，`maxRetries` 是必需的重试预算，其他字段可选；函数返回 `Promise<Anthropic>`，但内部会依据 provider 选择不同 SDK 构造器：
+
+| provider | 2.1.88 中的 client 与认证材料 | 模型/部署边界 | 典型组织诉求 |
+| --- | --- | --- | --- |
+| `firstParty` | `new Anthropic(...)`；订阅 OAuth 或 API key | Anthropic 模型 ID，第一方 API 的 beta 与服务端策略 | 最快获得第一方模型和能力更新 |
+| `bedrock` | `new AnthropicBedrock(...)`；AWS region、临时凭证或 `AWS_BEARER_TOKEN_BEDROCK` | Bedrock model ID、inference profile、IAM 和区域可用性 | AWS 身份、VPC/区域边界、统一账单与审计 |
+| `vertex` | `new AnthropicVertex(...)`；Google ADC/`GoogleAuth`、project 和 region | Vertex 的模型名称、项目授权和区域可用性 | GCP 项目治理、服务账号和数据驻留 |
+| `foundry` | `new AnthropicFoundry(...)`；API key 或 Azure AD token provider | Azure deployment name、租户与 endpoint | Azure 资源、租户策略和企业网络 |
+
+源码中的分支可以压缩成下面的形状：
+
+```ts
+if (useBedrock) return new AnthropicBedrock(bedrockArgs)
+if (useFoundry) return new AnthropicFoundry(foundryArgs)
+if (useVertex) return new AnthropicVertex(vertexArgs)
+return new Anthropic(firstPartyArgs)
+```
+
+四个构造器最后都被包装成近似统一的 Anthropic client 类型，所以上层 `queryModel()` 可以复用消息、工具和流式处理；但这只是接口复用，不代表四个后端的认证、地区、模型目录和能力完全相同。比如 Bedrock 分支会先刷新 AWS 凭证并选择 region，Vertex 分支会创建 `GoogleAuth` 并按模型计算 region，Foundry 分支则在缺少 API key 时创建 Azure AD token provider。
+
+## provider 还决定“同名模型”到底发什么字符串
+
+别名 `sonnet` 或 `opus` 只表达用户意图，不能直接当作所有后端都接受的 ID。`getBuiltinModelStrings(provider)` 遍历 canonical model key，并读取 `ALL_MODEL_CONFIGS[key][provider]`：
+
+```ts
+function getBuiltinModelStrings(provider: APIProvider): ModelStrings {
+  const out = {} as ModelStrings
+  for (const key of MODEL_KEYS) {
+    out[key] = ALL_MODEL_CONFIGS[key][provider]
+  }
+  return out
+}
+```
+
+因此同一个 `/model` 选项可能落成不同字符串：Bedrock 需要带 Anthropic 前缀或 inference profile 的 ID，Vertex 使用自己的模型/版本格式，Foundry 可能直接使用 deployment name。源码和官方配置说明都把“模型别名”和“provider-specific model ID”分成两层；企业还可以用 `modelOverrides` 把某个 Anthropic 模型 ID 映射到指定 ARN、Vertex 版本名或 Foundry deployment。
+
+这也是为什么不能只看到 UI 显示 `Sonnet` 就断言“后端已经找到同一个模型”。模型可能没有在该 region 开通、deployment 尚未创建、inference profile 没权限，或者该 provider 的默认别名仍指向较旧版本。provider 选择和模型可用性是两次不同的判断。
+
+## provider 会裁剪能力和请求参数
+
+2.1.88 的源码明确把 provider 放进 capability gate，而不是只用它构造 client：
+
+| 源码 gate | provider 相关行为 |
+| --- | --- |
+| `modelSupportsStructuredOutputs(model)` | 先要求 provider 是 `firstParty` 或 `foundry`；Bedrock 与 Vertex 在这版直接返回 `false`，再继续检查模型家族 |
+| `getToolSearchBetaHeader()` | Vertex/Bedrock 使用第三方 beta header，其他 provider 使用第一方 header |
+| `modelSupportsContextManagement(model)` | Foundry 直接允许；firstParty 排除 Claude 3；其他 provider 只对 Claude 4 家族允许 |
+| `vertexModelSupportsWebSearch(model)` | Vertex 只对 Claude 4 家族开放 Web Search 能力 |
+| `shouldIncludeFirstPartyOnlyBetas()` | 只有 `firstParty` 或 `foundry` 且未关闭实验 beta 时返回真 |
+
+这些判断的含义不是“某个云平台永远不支持某能力”，而是 **2.1.88 这份客户端选择的安全发送范围**。如果不区分 provider，Claude Code 就无法在发请求前决定是否添加 beta header、structured output 参数、context-management 字段或 Web Search 相关配置；结果要么被后端拒绝，要么把实验性参数发到错误的入口。
+
+## 为什么企业通常更在意 provider，而不是只看模型名
+
+外部资料里反复出现的共同点是：模型权重可能相同，但调用前门不同会改变身份、网络、账单、可用时间和限流边界。直连 Anthropic 通常更快拿到新模型；Bedrock、Vertex 或 Foundry 则把请求纳入各自云的 IAM、区域、VPC、审计、采购和费用体系。对企业来说，“Claude Sonnet”回答得是否相似只是第一层问题，更重要的是代码和提示词经过谁的网络、由谁记录、在哪个区域计费，以及哪个组织可以撤销访问。
+
+因此 provider 区分还承担治理作用：它让管理员可以固定模型版本、给不同云账户分配预算、限制网络出口，并把认证刷新放进既有身份系统。代价是各平台的模型上线时间、部署名、限额和功能支持不会完全同步，Claude Code 必须把这些差异显式建模。
+
+## provider 选择不是跨云自动故障转移
+
+最后要把一个容易误会的边界说清楚：`getAPIProvider()` 只选出一条路径，`getAnthropicClient()` 也只创建这一条路径的 client。后面的普通重试或 529 model fallback 主要处理当前 provider 中的请求和模型，不会因为 Bedrock 失败就自动切到 Vertex 或 firstParty。
+
+跨 provider 切换会同时改变凭证、endpoint、region、模型 ID、能力 gate、费用和数据边界，不能像换一个字符串那样安全地隐式完成。如果产品确实需要多云容灾，应在更外层显式配置路由、验证每个 provider 的模型映射和权限，再决定哪些错误允许切换。
+
+所以可以用一句话收束：**model 回答“调用哪个模型”，provider 回答“通过谁的基础设施、身份和规则调用它”。** 只有把两者分开，Claude Code 才能在复用同一套 Agent/query 内核的同时，诚实地面对四个后端的实际差异。
+
+本文仍以仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原的源码为边界；后文原有的 Bridge、Remote Control 与 Server 代码保持不变。这里新增的回答只解释 provider 分层的必要性，不把最新文档中的 provider 能力表倒推成 2.1.88 的源码事实。
 
 ![Claude Code Bridge、Remote Control 与 Direct Connect 的协作关系](/images/posts/claude-code-source-reading-37/37-bridge-remote-server-handdrawn.png)
 
@@ -489,3 +569,13 @@ Claude Code 的远程能力可以理解为“本地执行，服务端协调，�
 - [Claude Code Remote Control](https://code.claude.com/docs/en/remote-control)
 
 - [Claude Code Sessions](https://code.claude.com/docs/en/sessions)
+
+- [Claude Code Model Configuration](https://code.claude.com/docs/en/model-config)
+
+- [Claude Code on Amazon Bedrock](https://code.claude.com/docs/en/amazon-bedrock)
+
+- [Cloud Providers](https://github.com/anthropics/claude-code-action/blob/main/docs/cloud-providers.md)
+
+- [Multi-provider configuration](https://claude-codex.fr/en/advanced/multi-provider/)
+
+- [Anthropic API vs AWS Bedrock Claude (2026): Which to Use](https://www.respan.ai/articles/claude-vs-bedrock-claude)

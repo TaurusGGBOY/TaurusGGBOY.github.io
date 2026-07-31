@@ -438,7 +438,7 @@ Claude Code 的模型调用由两条独立选择链在 client 工厂汇合：一
 
 ## 留给下一篇的问题
 
-模型与认证准备好以后，Claude Code 的 Bridge、Remote Control 与 Server 模式如何连接本地运行时和远端客户端，并转发消息与控制事件？
+为什么 Claude Code 要区分不同的 provider？
 
 ## 参考资料
 
