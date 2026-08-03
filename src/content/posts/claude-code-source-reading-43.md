@@ -12,17 +12,46 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-Dream 把经验沉淀下来以后，Assistant 与 KAIROS 如何利用这些记忆主动规划、提醒并推进用户任务？
+上一篇的问题是：**从用户角度看，AutoDream 有什么实际作用？**
 
-先把“主动”拆成三件事：Assistant/KAIROS 仍复用主 Agent 的模型循环，只是增加长生命周期、定时唤醒和远程消息入口。记忆给上下文，触发器给下一轮机会，权限决定这一轮能否产生副作用。
+先给结论：**AutoDream 不会替你完成当前的编码任务，它维护的是“下一次会话能否快速恢复上下文”的基础设施。** 它把多个会话里零散、重复、过期或互相矛盾的记忆，在后台整理成更短的 `MEMORY.md` 索引和更清晰的 topic 文件。下一次打开同一个项目时，你少解释几遍背景，Claude 也更容易找到真正相关的长期信息。
 
-记忆负责给它连续性。KAIROS 模式仍加载 `MEMORY.md`，新信息先追加到按日期分片的 daily log；夜间 `/dream` 再把日志蒸馏回 topic 文件和 `MEMORY.md`。它醒来时得到的是用户偏好、项目背景和历史决策，正在执行的任务状态则由 Task/AppState 提供。
+### 用户真正能感受到的四个变化
 
-主动性来自另外三条链路：`<tick>` 让长驻会话在空闲期间重新进入主循环；Cron 把“稍后提醒我”或“定期检查”变成排队的 prompt；后台 Agent/Skill 执行完以后，再把结果作为隐藏的 meta prompt 放回主队列。主 Agent 最后决定是否继续行动，以及是否通过 `SendUserMessage` 把结论发给用户。
+| 你遇到的问题 | AutoDream 做的事 | 对用户的实际收益 |
+| --- | --- | --- |
+| 同一条经验在多个会话里重复出现 | 把新信号合并到已有 topic，而不是不断创建近似文件 | 长期记忆不容易变成重复清单 |
+| 旧结论和新事实冲突 | 删除被推翻的事实，解决文件之间的矛盾，并把“昨天”“上周”改成绝对日期 | 新会话更少引用已经过期的判断 |
+| `MEMORY.md` 越写越长 | 只保留指向 topic 文件的短索引，删除失效指针，并控制行数和大小 | 启动时进入上下文的内容更紧凑，相关细节再按需读取 |
+| 过去很多会话都留下了线索 | 按 transcript 的修改时间挑选上次整合后的会话，排除当前会话后再交给后台 Agent 判断 | 不需要每次把所有历史记录重新塞进模型窗口 |
 
-这里要拆开三个职责：**记忆提供上下文，触发器创建下一轮，权限决定动作能否执行。** `MEMORY.md` 本身不调度任务，Cron 到点后仍要经过工具授权。KAIROS 复用原来的 Query Loop、Tool、Task、权限上下文和消息队列，改变的是“下一轮从哪里来”“工作能否在后台继续”“结果通过什么通道抵达用户”。
+这里的“收益”不是一次运行就能量化的准确率提升，而是让记忆目录保持可读、可检索、可继续维护。源码能确认整理动作和写入边界，不能从静态代码保证模型每次都挑对事实。
 
-所以它不是一套新的 Agent 内核，而是把“下一轮从哪里来”搬到了体验层：Dream 产出的记忆提供上下文，tick/Cron/远程输入重新入队，后台任务保持前台可响应，`SendUserMessage` 再把结果送回用户。
+### 一个具体场景
+
+假设你连续几天处理同一个项目：第一次会话确认测试必须使用 `pnpm`，第二次会话记录本地 Redis 依赖，第三次会话又纠正了某个 API 的兼容性限制。每轮结束后的记忆提取可能先把这些线索写入不同文件；满足时间和会话门槛后，AutoDream 才会把它们合并成稳定的主题记忆，并让 `MEMORY.md` 只留下短指针。
+
+下次新建会话时，Claude 先看到索引，需要时再读取对应主题文件。用户看到的不是“AutoDream 替我做了一个功能”，而是 Claude 少问了一些已经解释过的问题，并更快进入项目真正的工作状态。
+
+### 它具体整理什么，又不会碰什么
+
+`buildConsolidationPrompt()` 把后台任务分成四个阶段：Orient 读取当前索引和已有主题，Gather 从 daily log 或窄范围 transcript 搜索新线索，Consolidate 合并和纠错，Prune/Index 最后压缩 `MEMORY.md`。后台 forked Agent 的 Bash 只允许只读命令，Edit 和 Write 也被限制在 auto-memory 目录，因此 AutoDream 不应该直接改动你的源代码、配置或 Git 历史。
+
+这也解释了它为什么不是聊天记录备份：提示词要求对 JSONL transcript 做窄范围搜索，而不是把每个会话完整读回上下文；它要保存的是能帮助未来判断的经验，不是所有原始对话。
+
+### 什么时候你几乎感觉不到它？
+
+AutoDream 默认并不每轮运行。源码里的静态默认值是距上次整合至少 `24` 小时、至少有 `5` 个其他会话被修改；同一进程的扫描还有 `10` 分钟节流，且需要拿到 `.consolidate-lock`。这些正数阈值可能由 GrowthBook 的 `tengu_onyx_plover` 提供覆盖，所以默认值不能当成所有线上用户永远不变的承诺。
+
+此外，`isGateOpen()` 会在 KAIROS 模式、Remote 模式或 auto memory 关闭时跳过这条 AutoDream 路径；`autoDreamEnabled` 被显式设置为 `false` 时也不会启动。任务成功且确实改动了文件时，主 transcript 才会收到一条类似 `Improved …` 的摘要；失败或用户终止则回滚锁的时间戳，让后续机会可以重试。
+
+后台运行也意味着可能产生额外的模型调用和 token 消耗。源码只能确认它调用了 `runForkedAgent()` 并记录 usage，实际费用和耗时仍取决于触发次数、记忆规模以及运行时 provider。
+
+### AutoDream 与 `CLAUDE.md` 不是一回事
+
+如果一条规则必须每次都告诉 Claude，例如“提交前必须运行某个检查”，应该写进项目 `CLAUDE.md` 或 hook；AutoDream 面向的是 Claude 在工作过程中发现的偏好、项目背景和经验线索。前者是你明确维护的指导，后者是可检查、可编辑但仍需复核的长期记忆。
+
+外部资料也从用户体验角度得到类似结论：官方文档把 auto memory 定义为跨会话积累的 notes，并强调主题文件按需读取；实践文章则把它描述成可读、可编辑、会随会话积累的 Markdown 工作文档。关于 AutoDream 本身的报道进一步指出，它试图在后台处理“上下文熵”，但 source-map 中的 2.1.88 实现才是本文判断触发条件和安全边界的依据，不能把报道里的“空闲时运行”直接当成源码事实。
 
 ## 本章先建立三个概念
 
@@ -377,3 +406,9 @@ Dream 与 `MEMORY.md` 提供长期判断依据，daily log 承接尚未蒸馏的
 - [Claude Code Remote Control](https://code.claude.com/docs/en/remote-control)
 
 - [Dive into Claude Code：生产级 Agent 的设计空间](https://arxiv.org/abs/2604.14228)
+
+- [How Claude remembers your project](https://code.claude.com/docs/en/memory)
+
+- [Claude Code's Auto-Memory: Building Persistent Context Across Sessions](https://www.claudedirectory.org/blog/claude-code-auto-memory-guide)
+
+- [Claude Code's source code appears to have leaked: here's what we know](https://venturebeat.com/ai/claude-codes-source-code-appears-to-have-leaked-heres-what-we-know)
