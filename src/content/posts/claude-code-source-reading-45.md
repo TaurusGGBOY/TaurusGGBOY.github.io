@@ -12,15 +12,39 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-陪伴式体验建立以后，Claude Code 如何接入语音输入、转写、按键与音频状态，并把语音重新送回普通消息流程？
+如何 100% 抽到最稀有的 Buddy？
 
-先看输入链的终点：**Voice 是一条适配链，把“按住一个键”展开成录音、WebSocket 转写和文本插入，最后回到原来的 PromptInput。Agent 只在用户提交文本后开始工作。**
+先给结论：在不修改源码、也不更换用户身份的前提下，做不到 100% 抽到 `legendary`。2.1.88 的可见源码里，“抽取”不是每次执行 `/buddy` 都重新进行一次独立随机，而是由用户身份派生的确定性结果；同一身份在同一套源码规则下会一直得到同一套 `bones`。重复打开、退出或读取 Buddy，不会把 1% 慢慢累积成保底。
 
-完整链路可以压缩成一句话：`VoiceKeybindingHandler` 识别按住动作，`useVoice()` 驱动 `idle → recording → processing → idle`，本地录音后端产生 16 kHz、16 bit、单声道 PCM，`connectVoiceStream()` 把二进制音频帧发到语音转写端点，临时与最终文本再由 `useVoiceIntegration()` 插回光标位置。用户随后按 Enter，走的仍是普通消息提交与 QueryEngine 链路。
+最稀有档是 `legendary`。`RARITY_WEIGHTS` 的总和为 100，`rollRarity()` 先取一个 `[0, 1)` 的伪随机数，再按 `RARITIES` 的顺序扣除权重：
 
-这也是 Voice 和上一篇 Buddy 最重要的区别。Buddy 在一次回合结束后观察消息、画出气泡；Voice 发生在回合开始前，只负责把另一种输入介质变成文本。Voice 复用普通 PromptInput 的提交链，工具池、`canUseTool` 和 query loop 都在用户提交后才参与。语音识别错误会直接表现为输入文本错误。
+| 稀有度 | 权重 | 对应区间 |
+| --- | ---: | --- |
+| `common` | 60 | `[0, 60)` |
+| `uncommon` | 25 | `[60, 85)` |
+| `rare` | 10 | `[85, 95)` |
+| `epic` | 4 | `[95, 99)` |
+| `legendary` | 1 | `[99, 100)` |
 
-本篇只沿客户端可见链路追踪：按键怎样启动 session，音频怎样缓冲，WebSocket 怎样结束，以及迟到回调怎样被丢弃。服务端留存政策不在还原源码内。
+所以从“所有可能身份”的统计角度看，`legendary` 的比例是 1%。但这不是同一个账号反复抽取时的 1% 独立试验：`roll(userId)` 把 `userId + SALT` 送进 `hashString()` 和 `mulberry32()`，第一段伪随机序列就固定下来了。`companionUserId()` 又按 `oauthAccount.accountUuid → userID → 'anon'` 的顺序选择身份；`rollCache` 只是缓存同一个 key 的结果，不会改变它。
+
+这正是 seeded PRNG 和普通“每次重新抽卡”的区别：相同种子会产生相同序列，因此结果可复现；真正能把概率变成 100% 的抽卡系统，必须另有 hard pity、计数器或显式选择逻辑。当前 `StoredCompanion` 只保存模型生成的 `name`、`personality` 与 `hatchedAt`，没有抽取次数、失败次数或 pity 状态，源码也没有“失败后重抽直到 legendary”的循环。
+
+如果只是做本地测试，可以利用导出的 `rollWithSeed()` 找一个已知会落入 `legendary` 区间的种子：
+
+```ts
+for (let i = 0; ; i++) {
+  const seed = `test-${i}`
+  if (rollWithSeed(seed).bones.rarity === 'legendary') {
+    console.log(seed)
+    break
+  }
+}
+```
+
+这段代码只能说明“在测试 harness 中可以预先挑种子”。生产读取路径仍然是 `getCompanion() → roll(companionUserId())`，不是 `rollWithSeed()`；如果要让真实 Buddy 100% 命中，就必须控制生产使用的身份、让目标运行时的 `hashString()` 与搜索环境一致，或者直接修改 `rollRarity()` / 增加保底逻辑。这些都属于测试或源码改造，不是普通用户通过 `/buddy` 能完成的操作。尤其是已有 OAuth `accountUuid` 时，修改 fallback 的 `config.userID` 也不会改变实际种子。
+
+直接编辑配置里的 `rarity` 同样无效。`getCompanion()` 返回 `{ ...stored, ...bones }`，重新生成的 `bones` 位于后面，会覆盖配置中残留的 `rarity`、`species` 等字段。这种设计把 Buddy 做成“稳定身份”，而不是可以靠改配置或反复重开刷新的 loot box。
 
 ## 本章先建立三个概念
 
@@ -385,3 +409,9 @@ Claude Code 的 Voice 是一条很薄的适配链：终端自动重复事件推�
 - [Claude Code Voice Dictation](https://code.claude.com/docs/en/voice-dictation)
 
 - [Claude Code Settings](https://code.claude.com/docs/en/settings)
+
+- [Random Number Generators and Seeding](https://finsberg.github.io/IN1910/docs/lectures/stochastic_processes/random_number_generators.html)
+
+- [Seeds and Deterministic Generation](https://www.abratabia.com/procedural-generation/seeds-and-determinism.php)
+
+- [Gacha Probability Calculator：Pull Odds & Pity System](https://www.hakaru.io/tools/gacha-probability-calculator)
