@@ -68,6 +68,16 @@ Native host 的运行路径也很直接：`runChromeNativeHost()` 启动 `Chrome
 
 下文引用的 AppState 行为均来自 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/`；代码块只保留共享状态、更新和订阅所需的字段。
 
+## YNM-9527 同时改变了哪些共享状态
+
+当用户一边处理事故，一边输入：
+
+> 集成测试放到后台；出现权限询问时停下来等我，teammate 有结果就通知我。
+
+系统同时变化的有 Task 状态、权限请求、MCP 连接、Mailbox、输入队列和 spinner。AppState 保存跨模块必须共享的事实，UI 只订阅自己需要的切片；后台任务、工具和远程控制不会直接依赖某个 React 组件。
+
+下面从这组同时发生的状态变化开始，说明 AppState、store、provider 和 selector 如何贯穿 YNM-9527。
+
 ## AppState 围绕“必须共享的状态”建立边界
 
 AppState 的调用链是 `setAppState(updater) → createStore.setState() → synchronous listeners → selector snapshot → React render`。Context 只提供稳定 store 引用；真正变化的快照留在 external store，`useSyncExternalStore` 再让组件订阅。selector 取出的切片若保持同一引用，任务更新不会把整个消息列表一起刷新。

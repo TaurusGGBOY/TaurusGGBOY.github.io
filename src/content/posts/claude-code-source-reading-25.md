@@ -85,6 +85,16 @@ Coordinator 执行拆分、分配、观察、综合和收敛，但不替 worker 
 
 底部的 `in-process | tmux | iTerm2` 是执行后端。它决定成员在哪里运行、如何展示和终止，不改变 Team config、Task list、Mailbox 这三层协作契约。
 
+## YNM-9527 需要一个小型 Agent Team
+
+用户输入：
+
+> 把金额计算、回调解析和前端复现分别交给三个 teammate；让他们互发进度，最后由 lead 汇总并验收。
+
+Claude Code 先建立 Team config 和共享命名空间，再创建成员身份与任务项。成员通过 mailbox 传递业务结果和控制消息，lead 根据测试、依赖和冲突决定哪些结果可以合并；这不是三次短暂的 Agent 调用，而是一组有持久协作状态的执行者。
+
+下面从 Team config 开始，追踪身份、任务列表、Mailbox 和 coordinator 如何把同一事故收敛起来。
+
 ## 第一层：Team config 先建立身份和共享命名空间
 
 Agent Teams 的运行资格由 `restored-src/src/utils/agentSwarmsEnabled.ts` 中的集中守卫决定：

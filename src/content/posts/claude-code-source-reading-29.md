@@ -98,6 +98,16 @@ LSP 把文件、行号和字符位置映射到语言语义；JSON-RPC 中 reques
 
 Claude Code 需要这套机制，是因为 Grep 可以找到同名字符串，却不知道它是局部变量、重载方法还是接口实现；LSP 能利用语言自己的索引和类型系统回答语义问题。反过来，LSP 也不能替代 Read、编译器和测试：服务器可能没安装、能力不完整、索引未完成，诊断还可能滞后。
 
+## YNM-9527 修复后，文本搜索还不够
+
+核心任务的验证阶段要求：
+
+> 完成后使用 LSP、Chrome 和相关测试验证。
+
+Claude Code 可以先用 Grep 找到金额字段，再调用 LSP 跳到定义、查引用和读取 diagnostics。LSP 配置只有在 Plugin 已启用后才进入 Manager；第一次使用还要启动 server、完成握手、同步文档，结果最后仍作为 tool_result 回到事故调查。
+
+下面从“什么时候由文本搜索升级为语言服务”开始，追踪配置、握手、didOpen 和诊断回流。
+
 ## 第一层：LSP 配置只来自已启用插件
 
 2.1.88 只从已启用插件收集 LSP 命令。`restored-src/src/services/lsp/config.ts` 的入口写得很直接：

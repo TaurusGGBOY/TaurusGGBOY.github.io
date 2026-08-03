@@ -36,6 +36,16 @@ imagePosition: "left"
 
 先区分持久身份、回合事件和瞬时动画状态，再读 `CompanionSprite` 的渲染分支。
 
+## YNM-9527 调查时，旁边还有一个 Buddy
+
+用户在启动准备阶段输入：
+
+> /buddy
+
+随后继续处理 YNM-9527。Buddy 不负责决定用哪个工具，也不替主 Agent 修复金额问题；它在回合结束后观察结果，把短期 reaction 投影到输入框旁的 UI。主 Agent 只收到一次关于陪伴身份的说明，真正的动画、tick、静音和窄屏布局留在产品层。
+
+下面从 /buddy 这个发现入口开始，追踪 observer 和 UI 怎样叠加在已有 Agent 内核之上。
+
 ## Buddy 由观察器与 UI 组成
 
 先建立一个够用的基础模型。

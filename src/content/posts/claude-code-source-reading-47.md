@@ -34,6 +34,16 @@ imagePosition: "left"
 
 先区分“模型如何生成”“Agent 如何收到”和“用户如何被唤回”，后面的队列与输出分支就不会混成一条消息管道。
 
+## YNM-9527 的结果怎样回到用户身边
+
+用户最后输入：
+
+> 报告根因、改动、测试、成本和遗留风险；后台测试完成、Agent Team 出现合并冲突或部署前仍有风险时主动通知我。
+
+Output Style 决定最终报告“怎么说”，UI Notification 只显示短暂状态，OS Notification、Hook 和 Mailbox 则负责在用户离开当前界面后把重要结果送回来。teammate 忙时，消息先进入 inbox 或进程内队列，空闲后才成为下一轮可消费的输入。
+
+前面章节已经产生了 task、team、memory 和远程连接，本章把这些结果收束到三条不同反馈通道，说明它们为什么不能混成一条普通 assistant 文本。
+
 ## 三种反馈通道，解决三个不同问题
 
 ![Claude Code 的 Output Style、Mailbox、Notification 与宿主输出闭环](/images/posts/claude-code-source-reading-47/47-notifications-mailbox-output-styles-handdrawn.png)

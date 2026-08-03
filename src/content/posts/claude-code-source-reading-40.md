@@ -67,6 +67,16 @@ npm view @anthropic-ai/claude-code versions --json
 
 先把 transcript、summary 文件和 compaction 的职责分开，后文的阈值、游标和权限限制才容易读懂。
 
+## YNM-9527 的根因怎样留到下一次会话
+
+事故处理结束前，用户输入：
+
+> 更新事故 runbook，记住这次金额单位错误的根因、最终方案和回归测试命令。
+
+这句话不会立刻把整段对话永久塞进 prompt。Session Memory 在会话和项目边界内，通过 hook、token 门槛和受限 fork 提炼少量可复用事实；下一次 /resume 或新会话启动时，记忆文件才可能作为上下文重新注入。
+
+前面我们已经看过 transcript 如何恢复，本章继续追问另一种“保留”：哪些知识会脱离原始对话留下来。
+
 ## Session Memory 以项目和会话划定作用域
 
 先看完整链路。

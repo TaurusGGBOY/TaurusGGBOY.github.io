@@ -95,6 +95,16 @@ API 层的 `tool_use/tool_result` 契约与后台 Agent 的产品语义只用于
 
 图中最重要的是两条返回线：同步结果属于原来的 `tool_use → tool_result`；后台结果属于后续的 task notification。后台 Agent 启动时只返回任务坐标，答案要等终态通知。
 
+## YNM-9527 怎样拆给 sub-agent
+
+用户要求：
+
+> 把金额计算、回调解析和前端复现分别交给合适的 sub-agent；先返回各自证据，再决定是否合并。
+
+Claude Code 先按名称找到 Agent 定义，再为每个子任务建立独立 Query Loop、模型配置、system prompt、工具集合和权限上下文。子 agent 的结果以 tool_result 回到父会话；它继承的是明确传入的边界，不是父 agent 的全部历史和权限。
+
+下面从这次委派开始，追踪 AgentTool 如何创建上下文、选择前台或后台路径，并把结果交还父循环。
+
 ## Agent 定义先被发现，再按名称覆盖
 
 Claude Code 启动时并不只加载一组固定角色。`getAgentDefinitionsWithOverrides()` 会读取 `agents` 子目录中的 Markdown，加载插件 Agent，再与 built-in 合并：

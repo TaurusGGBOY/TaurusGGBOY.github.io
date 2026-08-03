@@ -64,6 +64,18 @@ this.scheduleRender = throttle(deferredRender, FRAME_INTERVAL_MS, {
 
 这三个概念分别对应输入归一化后的按键序列、Vim 的顶层状态，以及“先按 operator、后等 motion”的中间状态。后文读到具体函数时，先判断它属于哪一层，快捷键与文本编辑就不会混成同一个状态机。
 
+## YNM-9527 为什么能用一个 chord 触发 compact
+
+用户先输入：
+
+> /keybindings
+
+然后在生成的配置里把 ctrl+k ctrl+c 绑定到 command:compact，再继续处理事故。
+
+Claude Code 先把终端事件解析成 keystroke 和 chord，按当前 context、Vim 模式和全局绑定寻找动作；完整匹配后触发 /compact，未完成的前缀则进入 pending 状态。这个输入不是普通 prompt，而是从配置文件热加载到按键拦截器的另一条路径。
+
+下面从一次保存配置和按键触发开始，追踪绑定、冲突校验与 Vim 状态机。
+
 ## 一个按键包含字符与控制信息
 
 用户按下 `Alt+B` 时，程序收到的可能是 ESC 前缀、Kitty keyboard protocol 的 CSI u 序列，甚至是一段无法识别的控制字节。快捷键系统若直接比较原始字符串，同一个动作会因终端不同而落入不同分支；所以第一步不是匹配 action，而是先把输入收口成统一事件。

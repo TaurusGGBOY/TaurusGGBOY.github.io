@@ -80,6 +80,16 @@ MCP 规定 client/server 用 JSON-RPC 风格消息握手、列出 tools/resource
 
 这也解释了 MCP 与插件的区别。MCP 处理运行时连接和远程调用；插件处理一组文件怎样被发现、安装、启停和按作用域装配。插件可以携带 MCP 配置，但 MCP server 不必来自插件。下一篇再处理这个打包边界。
 
+## YNM-9527 的事故单从 MCP 进来
+
+核心任务明确要求：
+
+> 通过 issue-tracker MCP 读取事故记录，必要时搜索 Stripe 官方文档，核对 amount 的单位和舍入规则。
+
+Claude Code 先读取 MCP 配置，选择 transport 和来源作用域；连接完成握手与 capability 协商后，远端工具才会进入本地 Tool 注册表，资源仍走独立读取路径。模型提出调用时，还要经过本地权限，远端返回值才映射成 tool_result。
+
+下面从 issue-tracker 的配置和连接状态开始，追踪 MCP 如何把外部工具和资源接入 YNM-9527 的调查。
+
 ## 第一步：配置先决定 transport 和来源作用域
 
 `restored-src/src/services/mcp/types.ts` 用 Zod 把可配置的连接形态写成联合类型：

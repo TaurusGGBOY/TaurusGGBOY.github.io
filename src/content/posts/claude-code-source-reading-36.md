@@ -65,6 +65,16 @@ export const call: LocalJSXCommandCall = async (onDone, context) => {
 
 这三个概念分别回答“走哪扇前门”“拿什么证明身份”“把别名解析成哪个部署名”。后文所有 provider 分支都围绕这三个问题展开。
 
+## YNM-9527 的同一请求可能走不同 provider
+
+用户没有改事故内容，只改变运行配置后再次提交核心任务。
+
+> 请检查项目中的 YNM-9527，查清金额单位问题，修复并运行测试。
+
+Claude Code 会先从配置、模型名和环境中确定 provider 与真实 model ID，再选择认证材料、endpoint、区域和请求能力；同一句 prompt 在 Anthropic、Bedrock 或 Vertex 路径上可能拥有不同的请求骨架与失败边界。
+
+下面从这次“同一任务、不同 provider”开始，拆开模型路由、认证、client 和降级，而不是把 provider 当成模型名的别名。
+
 ## 先把三个容易混在一起的概念拆开
 
 ### 模型设置先经过别名与 provider 映射

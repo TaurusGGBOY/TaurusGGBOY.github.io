@@ -65,6 +65,16 @@ AutoDream 默认并不每轮运行。源码里的静态默认值是距上次整�
 
 先区分“记忆保存了什么”“触发器何时入队”和“主 Agent 是否愿意执行”，再看 Assistant 的长期体验层。
 
+## YNM-9527 之后，助手还会记得下一步
+
+用户收尾时输入：
+
+> 明天上午十点提醒我复查支付监控；如果后台测试或 teammate 出现新结果，主动告诉我。
+
+这条请求不一定由主 Coding Agent 当场完成。Assistant/KAIROS 可以把提醒保存成未来 prompt，把后台任务完成变成再次运行 Query Loop 的机会，再通过 SendUserMessage 把结果送回用户。它复用了原来的 session、memory 和 task 内核，却增加了长期调度和主动消息层。
+
+下面从这句“明天再提醒我”开始，区分主 Agent 的当前回合与长期助手的再次入队。
+
 ## Assistant/KAIROS 在现有内核上增加长期体验层
 
 本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码片段只保留证明控制流所需的分支，省略日志、遥测和无关参数；还原路径不代表 Anthropic 内部仓库的原始目录结构。

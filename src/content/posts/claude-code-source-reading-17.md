@@ -48,6 +48,18 @@ imagePosition: "left"
 
 这三个概念放在一起，就能理解实现为何采用结构化重建：简单保留最后 N 条会切断一组 `tool_use` / `tool_result`，丢掉计划模式和已读取文件，也会挤占摘要的生成空间。
 
+## YNM-9527 变成长会话以后
+
+完成多轮调查、Team 协作和测试后，用户输入：
+
+> /compact
+
+稍后从 Remote Control 继续：
+
+> 继续处理 YNM-9527。先恢复已经确认的根因、当前 worktree、后台测试、teammate 状态和待决权限，再完成验证；不要重新执行已经成功的副作用。
+
+第一次输入会让 Claude Code 根据窗口预算选择 microcompact 或完整 compact，重建摘要和可用上下文；远端继续时读取的是已经持久化的 transcript、摘要和 session memory，不是被中断的内存循环。下面从 token 预算开始，解释这场可继续的上下文重建。
+
 ### 第一步：先算“真正可用”的窗口
 
 `restored-src/src/services/compact/autoCompact.ts` 先为摘要输出预留 token，再返回有效窗口：

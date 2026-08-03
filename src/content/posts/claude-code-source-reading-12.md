@@ -57,6 +57,16 @@ if (estimatedTokens > maxTokens) {
 
 这张图把权限判断的返回值接到执行边界：规则和 Hook 可能改写输入，宿主只能决定 `ask`，只有最终的 `allow` 才能进入 `tool.call()`。
 
+## YNM-9527 真的写入文件前，要先问谁
+
+计划批准后的用户输入是：
+
+> 所有 Bash、文件写入、网络访问和外部工具调用都遵守当前权限规则与 Hook；遇到需要确认的权限时停下来等我。
+
+因此 Edit、Bash 或 MCP 调用即使已经被模型提出，也不会直接越过副作用边界。Schema 和业务校验先处理输入，Hook 可能拒绝或改写，permission mode 为 ask 时再把未决请求交给宿主；用户批准后，执行器才拿着最终输入继续。
+
+上一章说明了一次调用有哪些门，本章只聚焦其中最容易改变路线的一道：权限引擎怎样在 allow、ask、deny 和 updatedInput 之间作出决定。
+
 ## 权限引擎逐次判断具体工具输入
 
 本文只引用 `@anthropic-ai/claude-code@2.1.88` 的可见源码；`restored-src/` 是定位证据的路径，不等同于内部仓库结构，也不意味着每个 feature-gated 分支都默认启用。

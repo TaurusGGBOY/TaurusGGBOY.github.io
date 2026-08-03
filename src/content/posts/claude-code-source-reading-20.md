@@ -109,6 +109,20 @@ if (innerError instanceof FallbackTriggeredError && fallbackModel) {
 
 ![Claude Code 会话写入、恢复与分叉流程](/images/posts/claude-code-source-reading-20/20-session-history-resume-handdrawn.png)
 
+## YNM-9527 怎样分出另一条会话
+
+用户在当前事故会话里输入：
+
+> /branch integer-cents
+
+随后继续说明：
+
+> 在这个会话分支里比较“全链路使用整数分”和“保留 Decimal”两种方案，不要覆盖原会话。
+
+Claude Code 会复制可恢复的消息主链，生成新的 session ID 和 transcript 关系；原会话保留，新的分支从同一段调查历史继续。真正的文件副作用仍在工作区里，所以剧本同时要求独立 worktree。后续 /resume 恢复的是会话状态，不是把已经发出的网络请求重新执行一遍。
+
+下面从这次可见的分支动作进入 JSONL、parentUuid、resume 和 fork。
+
 ### 四个概念怎样组成恢复坐标
 
 `session ID` 决定追加到哪个文件；普通 resume 复用旧 ID，fork 则必须换成 fresh ID。transcript 是一行一个 JSON 对象的追加账本，消息和元数据可以以新 entry 表达。数组顺序只能表示写入先后，`uuid/parentUuid` 才能在同一文件里区分多个叶子；恢复时从目标叶子回溯到根，得到当前分支。

@@ -90,6 +90,18 @@ Plugin 安装成功后，命令、Skill、Hook、MCP 和 LSP 并不会一起变�
 
 注意图中的 `reload`。它会清缓存、重读已启用插件，并把命令、Agent、Hook、MCP 和 LSP 状态切换到当前会话。下载与版本化缓存由安装阶段负责；两阶段拆分让交互式会话避免在首屏阶段被一次 Git clone 卡住。
 
+## YNM-9527 为什么先安装 Plugin
+
+用户在开始验证前依次输入：
+
+/plugin install playwright@claude-plugins-official
+
+/reload-plugins
+
+安装阶段先确定作用域、写入启用意图、物化版本化缓存，再由 reload 清理旧缓存并重新装配命令、Skill、Hook、MCP、LSP 等组件。安装成功不等于当前进程立即看到全部能力；只有 active layer 刷新后，Chrome、Hook 或新命令才会进入运行时。
+
+下面沿这两个命令的生命周期，说明 Plugin 怎样把多个扩展入口带进 YNM-9527，而不是把它们误当成一个普通工具。
+
 ## 安装先确定作用域
 
 插件作用域定义在 `restored-src/src/utils/plugins/schemas.ts`：
