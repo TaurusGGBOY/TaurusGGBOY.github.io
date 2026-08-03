@@ -24,13 +24,59 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：远端与本地运行时能够协作以后，Claude Code 如何记录日志、指标、token 与成本，并把运行状态暴露给诊断和观测系统？
+上一篇留下的问题是：**Claude Code 的服务器在整个远程流程中究竟承担什么作用？**
 
-Claude Code 把观测拆成几条用途不同的旁路：本地 debug log 保存排错细节，diagnostic JSONL 为受控环境写结构化且禁止携带 PII 的事件，analytics event 记录产品事件，OpenTelemetry 输出 logs、metrics 和可选 traces，会话状态单独累计 token、成本与耗时，最后由 `/cost`、`/status` 等界面把其中一部分交还给用户。
+先给结论：在 Remote Control 中，服务器更像“控制面”，而不是“执行面”。它负责把本地环境注册成可发现的 worker，为环境和会话分配身份，调度待处理的 work，转发双向消息，维护认证、确认和租约；真正运行 Agent 循环、调用模型、读取文件、执行 Bash、访问 MCP 的仍是本地 Claude Code 进程。远端网页或手机只是控制与展示端，能否看到会话不等于获得了本地 shell。
 
-这些旁路都从同一个运行时取事实，却有不同的字段、开关、生命周期与隐私边界。API 请求失败不会因为遥测 exporter 也失败而变成另一种业务错误。
+这里的“服务器”容易和另外两个概念混在一起：
 
-这就是本篇要建立的模型：**主流程负责执行，观测旁路负责留下可关联、可裁剪、可失败的证据。**
+| 组件 | 所在位置 | 在这条远程链路中的职责 | 是否在这里执行本地工具 |
+| --- | --- | --- | --- |
+| Remote Control 的 session service | Anthropic 远端 | 认证、environment/session 关联、work 调度、事件中继、租约和重连状态 | 否 |
+| 模型 provider 服务 | Anthropic API、Bedrock、Vertex 或 Foundry | 接收本地 query loop 的模型请求并返回模型输出 | 否；它负责推理，不负责本地 `Read`/`Bash` |
+| Bridge/worker 进程 | 用户的本地机器 | 保持工作目录、运行 query loop，启动工具和 MCP，连接远端服务 | 是 |
+
+因此，`claude remote-control` 即使被文档称作 server mode，启动的也是本地 worker；它是在等待远端 work 的执行端，不是把项目目录搬到云端的服务器。Remote Control 和 Claude Code on the web 也不是同一条部署路径：后者可以把执行环境放在云端，而前者的关键承诺是继续使用这台本地机器。
+
+## 服务器参与的完整流程
+
+可以把一次远程请求画成下面这条链：
+
+```text
+远端输入
+  -> session service 校验身份并关联 session
+  -> work 被本地 Bridge 轮询、领取、确认
+  -> 本地 query loop 调用当前 provider 的模型服务
+  -> 本地 Read/Bash/MCP 与权限逻辑执行
+  -> SDK 消息和 control event 经 Bridge 回到 session service
+  -> 远端客户端展示结果或发出下一次控制
+```
+
+源码中的职责边界可以按阶段展开：
+
+| 阶段 | 本地 2.1.88 代码能确认的动作 | 服务器在这一阶段做什么 |
+| --- | --- | --- |
+| 1. 注册 environment | `registerBridgeEnvironment()` 向 `/v1/environments/bridge` 发送 `machine_name`、`directory`、`branch`、`git_repo_url`、`max_sessions` 和 `worker_type` | 建立或复用 `environment_id`，返回 `environment_secret`，让远端知道“哪台机器、哪个目录”可接收 work，并据此做容量与身份校验。服务器拿到的是注册元数据，不是本地文件系统的执行权。 |
+| 2. 创建/关联 session | `createBridgeSession()` 向 `/v1/sessions` 提交 `environment_id`、事件、仓库上下文、模型元数据和可选权限模式 | 保存稳定的 `sessionId`，把远端 UI、environment 和一次 Agent 会话关联起来；会话标题、来源和状态也有了归属。 |
+| 3. 调度 work | `pollForWork()` 长轮询 `/v1/environments/{id}/work/poll`；拿到 work 后解出 session ingress token，再调用 `acknowledgeWork()` | 暂存待处理的会话任务，并通过 work ID、ACK 和租约避免同一任务被多个 worker 无序消费。ACK 失败时本地允许服务器重新投递，再由 Bridge 去重和处理。 |
+| 4. 转发消息与控制 | `RemoteSessionManager` 用 WebSocket 接收 `SDKMessage`、权限请求和取消事件；用户消息通过 HTTP POST 送回 session；`handleServerControlRequest()` 响应 `interrupt`、`set_model`、`set_permission_mode` 等控制 | 作为协议中继和访问边界，把远端输入送到正确的 session，把本地输出和权限请求送回正确的客户端；它不替本地进程调用工具。 |
+| 5. 保活与恢复 | `heartbeatWork()` 定期发送 `workId` 和 session token；收到 401/403 时触发 reconnect，404/410 则视为环境或 work 已失效 | 延长活动 work 的 lease，判断 worker 是否仍然拥有执行权；过期、断线或环境被删除时，服务器可以让任务重新进入可领取状态，Bridge 再重新注册或恢复 session。 |
+
+这里的 ACK 和 heartbeat 不是“网络层 ping”这么简单。ACK 表示本地已经看到某个 work，heartbeat 则表示这个 work 仍由当前 session 执行；服务器据此清理失联 worker 的占用，避免远端一直看到一个实际上已经死掉的会话。源码能确认的是有限重试、重新排队和租约状态，不能据此宣称跨任意网络故障提供 exactly-once 执行。
+
+## 服务器不负责什么
+
+第一，它不替本地 query loop 运行工具。`Read` 的路径解析、`Bash` 的子进程、MCP client 的连接和 workspace trust 都在 Bridge 所在机器上；`runBridgeHeadless()` 甚至在注册前就检查本地 workspace 是否已经被信任。服务器可以拒绝未认证的 work 或控制事件，却不能绕过本地 trust 和权限策略直接打开文件。
+
+第二，它不等同于模型 provider。Remote Control 的 session API 里可以记录当前模型作为会话上下文，但本地 Agent 仍按当前 provider 选择和凭证策略发起模型请求。把“session service”“Anthropic 模型 API”“本地 Bridge”统称为 Claude 服务器，会误以为所有代码和数据都在同一个云端进程里执行。
+
+第三，它不是让浏览器直接暴露一个本地监听端口。典型流程是本地进程主动建立出站连接或轮询远端接口，远端客户端只通过受认证的 session 通道收发协议事件；这样 NAT、防火墙和本地网络都不需要把项目机器暴露到公网。
+
+## 为什么必须有这一层服务器
+
+如果让浏览器直连本地 query loop，就要自行解决端口暴露、身份认证、session 路由、断线重连、重复投递、多个远端设备同时观看和权限请求回传。session service 把这些问题收敛成控制面：本地只需证明“我拥有这个 environment”，远端只需证明“我被允许访问这个 session”，双方不必互相暴露完整运行环境。
+
+所以更准确的总结是：**服务器保存和转发“谁在什么环境里运行哪一个会话、当前有哪些 work、哪些控制需要确认”；本地 Bridge 保存并执行“这个会话具体要对哪些文件、进程和工具做什么”。** 远程能力的核心不是把本地执行搬走，而是用服务器把一次单机交互拆成可认证、可路由、可恢复的分布式协议。
 
 ## 先把“可观测性”拆成五本账
 
@@ -454,3 +500,13 @@ debug log 保存本地排错细节；diagnostic JSONL 用结构化 started/compl
 - [Claude Code Monitoring](https://code.claude.com/docs/en/monitoring-usage)
 
 - [Claude Code Costs](https://code.claude.com/docs/en/costs)
+
+- [Claude Code Remote Control](https://code.claude.com/docs/en/remote-control)
+
+- [How Claude Code works](https://code.claude.com/docs/en/how-claude-code-works)
+
+- [Bridge Loop and Session Spawning](https://deepwiki.com/sanbuphy/claude-code-source-code/6.1-bridge-loop-and-session-spawning)
+
+- [Claude Code Remote Control: A Guide For Beginners](https://www.datacamp.com/tutorial/claude-code-remote-control)
+
+- [Anthropic reveals Remote Control, a mobile version of Claude Code](https://www.techradar.com/pro/anthropic-reveals-remote-control-a-mobile-version-of-claude-code-to-keep-you-productive-on-the-move)
