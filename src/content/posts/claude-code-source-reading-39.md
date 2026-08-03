@@ -12,19 +12,37 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-观测系统能够看见运行状态以后，Claude Code 如何检查更新、执行迁移，并引导新用户完成首次启动与环境准备？
+上一篇留下的问题是：**近来有报道称，Claude Code 的指标上报可能留有后门，甚至被用于识别中国用户；从 2.1.88 的源码中，能看出这类行为吗？**
 
-先看启动顺序。它把兼容性拆成三条链：先迁移旧状态，再按安装归属更新可执行程序，最后在交互入口完成 onboarding 与 workspace trust；三条链各自有失败边界，不会拿默认值覆盖旧认证。
+先给结论：从 2.1.88 的还原源码中，能够确认 Claude Code 存在第一方 analytics/telemetry 上报链路，而且上报字段足以描述运行环境、账号与组织、会话、模型、进程资源以及在开关打开时的工具输入；但看不出一个“专门识别中国用户”的客户端后门。公开报道所指的版本范围是 2.1.91—2.1.196，晚于本系列固定分析的 2.1.88，不能把后续版本的报道直接回填到这里。更不能仅凭客户端静态代码判断服务器收到请求后如何使用 IP、账号或风控规则。
 
-第一条是**版本兼容链路**。CLI 在命令执行前读取全局配置；`migrationVersion !== 11` 时依次运行同步迁移，最后写入新版本标记。标记只有整组迁移完成才更新，下次启动才会跳过。
+### 2.1.88 确实存在两条上报路径
 
-第二条是**更新链路**。更新器先读取 `latest` 或 `stable` 渠道，再识别当前究竟是 native、npm local、npm global，还是由 Homebrew、winget、apk 等包管理器托管。前几类可以走各自的安装器；包管理器托管的安装只提示正确命令，不越权替用户修改系统包。
+第一条是第一方事件日志。`initialize1PEventLogging()` 创建独立的 `FirstPartyEventLoggingExporter`，默认把批量事件 POST 到 `https://api.anthropic.com/api/event_logging/batch`；批量失败后会把 JSONL 暂存到本地，再按退避策略重试。`is1PEventLoggingEnabled()` 并不是“是否开启了用户自定义 OpenTelemetry”，而是检查 `isAnalyticsDisabled()`：测试环境、Bedrock、Vertex、Foundry，或隐私级别关闭时才跳过。也就是说，直接 API/OAuth 用户在默认环境下确实有一方事件记录，这一点不能用“没有显式 `CLAUDE_CODE_ENABLE_TELEMETRY`”来否认。
 
-第三条是**交互式首次启动链路**。交互模式进入 onboarding 和 workspace trust：先完成主题、认证、安全说明、可选终端配置，再确认当前目录是否可信。`claude -p` 跳过这些对话框，并把目录信任责任交给自动化调用方。
+第二条是可配置的 OpenTelemetry。`isTelemetryEnabled()` 只在 `CLAUDE_CODE_ENABLE_TELEMETRY` 为真时返回真，`bootstrapTelemetry()` 再把内部构建时的 `ANT_OTEL_*` 配置映射到标准 `OTEL_*` 变量。它与第一方事件 logger 使用不同的 provider 和 exporter：一个面向 Anthropic 内部事件，另一个面向用户配置的 OTLP endpoint。两者都叫 telemetry，不能混成一条链路。
 
-这三条链路共同维持向后兼容：迁移旧状态，更新可执行程序，再让用户明确接受新环境的认证与信任边界。任何一条失败，都不应该把旧配置悄悄覆盖掉。
+### 源码实际会带走什么
 
-这三条链的共同约束是“旧状态可读、失败可重试、边界需确认”。下面从启动时的状态模型开始，看迁移、更新和信任怎样互相卡位。
+`getEventMetadata()` 和 `buildEnvContext()` 组装的不是“中国用户”字段，而是一组通用的运行画像：
+
+- 平台及原始 `process.platform`、CPU 架构、Node 版本、终端、已检测到的包管理器与运行时；
+- CI/GitHub Actions、WSL 版本、Linux 发行版与内核、VCS、Claude Code 版本、构建时间和部署环境；
+- 模型、session ID、交互/客户端类型、订阅档位、Agent/teammate 关联信息，以及经过哈希的仓库 remote（`rh`）；
+- `buildProcessMetrics()` 读取 uptime、RSS、heap、external、arrayBuffers、受限内存、CPU 使用量和 CPU 百分比；
+- 第一方格式化函数还会把 `accountUuid`、`organizationUuid`，以及用户资料中的 email 放进事件结构。
+
+这些字段当然具有隐私含义，也可以被服务端用于分群或关联；但“能够推断用户属于某个区域”和“客户端代码明确检测中国并触发特殊上报”是两个不同命题。更关键的是，`EnvContext` 中没有国家、地理位置、IP、时区或代理字段，`buildEnvContext()` 也没有读取这些值。对 `China`、`Chinese`、`geolocation`、`Alibaba`、`Beijing`、`prompt steganography` 等专门标记的源码检索，也没有在 telemetry/analytics 这条路径发现对应分支；通用代码里的 `timezone` 命中属于格式化或调度用途，并未进入这套事件环境字段。
+
+工具输入的边界也写在代码里：`extractToolInputForTelemetry()` 只有在 `OTEL_LOG_TOOL_DETAILS` 为真时才序列化输入，随后经过 `truncateToolInputValue()` 和总长度上限截断；默认则返回 `undefined`。这说明“默认不上报工具参数”和“在显式打开详情后可能上报受限参数”必须分开说，不能简单概括成“会上传全部源码”。
+
+### 为什么报道仍然值得核查
+
+新闻报道与研究文章声称，后续的 2.1.91—2.1.196 版本出现过用于识别地理、身份、系统时区、代理或网络特征的机制；报道还转述 Anthropic 将其解释为反滥用实验。这里至少有两个边界：一是这些说法针对的不是 2.1.88，二是新闻是对逆向结果和公司回应的转述，不等于我们已经在本仓库的 2.1.88 源码中复现了同样逻辑。因此，当前证据最多支持“2.1.88 有值得审计的第一方遥测和隐私开关”，不支持“2.1.88 已证实存在识别中国用户的后门”。
+
+还要保留一个静态分析无法消除的盲区。客户端把事件发往可由动态配置改变路径或 base URL 的 exporter；服务器可以根据网络来源、账号或事件组合做二次判断，这些规则不在本地 bundle 中。反过来，看到默认 endpoint、账号字段或 GrowthBook 实验分组，也不能单独把它们定性为后门——需要同时证明隐藏触发条件、未披露的数据用途和绕过用户选择的行为。
+
+如果要验证报道，正确的实验应是：固定 npm 包版本和完整 hash，逐版本 diff `metadata.ts`、第一方 exporter、GrowthBook 配置与网络请求；在隔离环境中抓取实际 POST payload，再分别测试不同账号、时区、代理和出口网络。只有把“客户端采集了什么”“请求发到哪里”和“服务器如何处理”三层证据对齐，才能回答是否存在面向特定地区的后门。
 
 ![Claude Code 更新、迁移、Onboarding 与 Workspace Trust 的启动兼容链路](/images/posts/claude-code-source-reading-39/39-updates-migrations-onboarding-handdrawn.png)
 
@@ -524,10 +542,20 @@ Onboarding 负责用户级准备，Workspace Trust 负责项目级信任。`bypa
 
 ## 留给下一篇的问题
 
-首次启动完成以后，Claude Code 的 Session Memory 如何从长会话中提炼、保存并在后续压缩和恢复中复用长期信息？
+普通用户能只通过修改本地配置，使用其他版本的 Claude Code 吗？
 
 ## 参考资料
 
 - [Claude Code Installation and Updates](https://code.claude.com/docs/en/installation)
 
 - [Claude Code Changelog](https://code.claude.com/docs/en/changelog)
+
+- [Claude Code Data Usage](https://code.claude.com/docs/en/data-usage)
+
+- [Claude Code Monitoring](https://code.claude.com/docs/en/monitoring-usage)
+
+- [Telemetry & Privacy — Claude Code v2.1.88 source analysis](https://sanbuphy-claude-code-source-code.mintlify.app/reference/analysis/telemetry-privacy)
+
+- [China warns users of alleged security backdoor vulnerabilities in Claude Code](https://www.techradar.com/pro/china-warns-users-of-alleged-security-backdoor-vulnerabilities-in-anthropics-claude-code-tells-users-to-uninstall-for-sfaety-reasons)
+
+- [Anthropic and China Clash Over Reported Security Risks in Claude Code](https://expertinsights.com/news/anthropic-and-china-clash-over-reported-security-risks-in-claude-code)
