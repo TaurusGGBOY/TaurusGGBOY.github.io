@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-20/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **事件溯源**：JSONL（JSON Lines）是一种“每行一个 JSON 对象”的纯文本格式。Claude Code 把消息和元数据按行追加进去；读取时逐行解析，再用这些记录重建当前会话状态。
-
-- **逻辑父链**：`parentUuid` 表达对话关系，写入顺序和逻辑顺序可以各自演进。
-
-- **Replay**：恢复会话会重建消息与部分运行状态，同时重新计算当前权限和环境能力。
-
-![JSONL transcript 如何沿父链重放会话](/images/posts/claude-code-source-reading-20/20-transcript-replay-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：Anthropic 提到 Fable 5 遇到一些问题时可以降级到 Opus 4.8 执行；根据 2.1.88 的源码，这种 fallback 是如何实现的？
@@ -107,19 +95,23 @@ if (innerError instanceof FallbackTriggeredError && fallbackModel) {
 
 本文后续仍以 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块只保留证明当前结论所需的部分，省略日志、遥测和无关 provider 分支；还原路径只用于定位本文引用的源码。
 
+## 问题现场
+
+恢复旧会话时，用户期待的是“从中断处继续”，程序手里却只有一份不断追加的 JSONL 文件。文件需要容纳并行工具结果、压缩边界、标题和工作区元数据；加载时还必须判断哪条父链才是当前分支。
+
+![JSONL transcript 如何沿父链重放会话](/images/posts/claude-code-source-reading-20/20-transcript-replay-detail-handdrawn.png)
+
+本文把 transcript 当作事件账本，而不是进程快照：写入端维护 UUID 父链，读取端重建叶子分支，resume 与 fork 再分别决定是否沿用 session ID。
+
 ## 会话历史是一份可重建的事件日志
 
-先把整条路径放在一张图里。
+恢复路径有两个独立阶段：写入端把事件追加进 transcript，读取端先找叶子，再沿 `parentUuid` 重建分支，最后把权限、工作目录和未完成工具重新挂回当前进程。
 
 ![Claude Code 会话写入、恢复与分叉流程](/images/posts/claude-code-source-reading-20/20-session-history-resume-handdrawn.png)
 
 ### 四个概念怎样组成恢复坐标
 
-第一个概念是 **session ID**。它是一段 UUID，用来确定“当前消息应该写进哪份会话文件”。同一个项目可以有很多 session；普通 resume 会重新采用旧 ID，fork 则需要新 ID，否则两条后续历史仍会混进同一份日志。
-
-第二个概念是 **transcript**。它是由消息和元数据组成的 JSONL 文件，每行保存一个 JSON 对象。追加写入时，新消息可以直接落在文件末尾，元数据也能以新记录表达覆盖语义。
-
-第三个概念是 **消息链**。数组顺序只能表示“写入先后”，不能可靠表示“当前活跃分支”。每条消息因此保存 `uuid` 和 `parentUuid`。一份 JSONL 可以存在多个叶子；恢复某条对话时，从选定叶子沿 `parentUuid` 回溯，才能得到那条分支真正的上下文。
+`session ID` 决定追加到哪个文件；普通 resume 复用旧 ID，fork 则必须换成 fresh ID。transcript 是一行一个 JSON 对象的追加账本，消息和元数据可以以新 entry 表达。数组顺序只能表示写入先后，`uuid/parentUuid` 才能在同一文件里区分多个叶子；恢复时从目标叶子回溯到根，得到当前分支。
 
 第四个概念是 **fork**。fork 复制可恢复的对话状态，新会话继承旧消息；旧对话已经产生的文件副作用继续保留，Git 工作区也沿用原现场。`--fork-session`、`/branch` 与后文第 26 篇会讲到的 Git worktree，分别隔离会话 ID、消息来源和文件目录。
 

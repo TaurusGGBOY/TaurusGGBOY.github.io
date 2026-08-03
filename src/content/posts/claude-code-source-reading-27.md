@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-27/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **Transport lifecycle**：stdio、HTTP 等连接从配置、握手、健康状态到断线恢复形成完整生命周期。
-
-- **能力发现**：服务端列出的 tools、resources 与 prompts 会被转换成本地可路由能力。
-
-- **资源间接引用**：资源先以 URI 和元数据暴露，模型按需要读取正文，控制上下文成本。
-
-![MCP 连接生命周期与能力发现](/images/posts/claude-code-source-reading-27/27-mcp-lifecycle-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：
@@ -72,19 +60,23 @@ return { worktreePath, worktreeBranch }
 
 本文后续仍回到 MCP 的连接与能力发现；这里要记住的边界是：Agent Teams 提供协作控制面，Git 提供版本整合机制，lead 负责在两者之间做最后的工程判断。
 
+## 问题现场
+
+配置一个 MCP server 只是把连接放进候选列表。连接可能尚未完成，工具 Schema 可能不符合预期，资源读取还可能需要另一层权限；模型真正看到的能力，是这几道门都通过后的结果。
+
+![MCP 连接生命周期与能力发现](/images/posts/claude-code-source-reading-27/27-mcp-lifecycle-detail-handdrawn.png)
+
+本文沿着 MCP client 的生命周期阅读：配置选择 transport，连接状态决定是否发现能力，工具和资源被包装成 Claude Code 的本地对象，调用结果再回到统一的 `tool_result`。
+
 ## MCP 是一条带生命周期的协议连接
 
-我们先把主线画出来。
+连接主线不是“读配置然后列工具”，而是 `config → transport → initialize → capability discovery → local Tool/Resource → permission → result`。任意一段失败，server 都可能停在 `pending`、`failed` 或 `needs-auth`，不会把半成品能力交给模型。
 
 ![Claude Code MCP 连接、能力发现、权限检查与结果回流](/images/posts/claude-code-source-reading-27/27-mcp-integration-handdrawn.png)
 
 ### 三个概念如何决定 MCP 的装配顺序
 
-**MCP（Model Context Protocol）**约定 client 和 server 怎样通过 JSON-RPC 风格消息协商能力、列出工具与资源、调用工具并返回内容。Claude Code 承担 client，外部进程、远端服务、IDE 或 SDK 内部 server 提供能力。
-
-**Transport** 解决消息从哪里走。本地 server 可以由 Claude Code 启动子进程，通过 stdin/stdout 通信；远端 server 可以走 HTTP、SSE 或 WebSocket；SDK server 则可以在同一进程内通过控制通道传递消息。transport 选择进一步决定认证、断线和清理方式。
-
-**Capability discovery** 发生在连接成功之后。初始化响应里的 `capabilities.tools`、`capabilities.prompts`、`capabilities.resources` 决定客户端是否继续请求对应列表：配置声明连接目标，握手结果声明能力集合。
+MCP 规定 client/server 用 JSON-RPC 风格消息握手、列出 tools/resources/prompts、执行调用。transport 决定消息和生命周期：stdio 启动本地子进程，HTTP/SSE/WebSocket 连接远端，SDK server 可以走同进程通道。只有 `initialize` 返回的 capabilities 确认了某类能力，客户端才继续请求对应列表；配置本身不等于可用工具。
 
 这也解释了 MCP 与插件的区别。MCP 处理运行时连接和远程调用；插件处理一组文件怎样被发现、安装、启停和按作用域装配。插件可以携带 MCP 配置，但 MCP server 不必来自插件。下一篇再处理这个打包边界。
 

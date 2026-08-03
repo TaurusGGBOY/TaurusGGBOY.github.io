@@ -13,7 +13,7 @@ imagePosition: "left"
 
 上一篇留下的问题是：**你知道 Claude Code 自带哪些 tool 吗？**
 
-先给结论：源码在 `restored-src/src/tools.ts::getAllBaseTools()` 定义内置候选集；每次请求再经过 `isEnabled()`、权限 deny 规则、运行模式、provider 能力和功能开关，得到本轮发给模型的工具池。
+先给结论：工具清单不是调度器的输入原样。源码先在 `getAllBaseTools()` 建候选集，再经过 `isEnabled()`、deny 规则、运行模式、provider 能力和 feature gate，最终把本轮真正存在的工具交给模型；调度器只对这份会话快照负责。
 
 ### `getAllBaseTools()` 里的基础清单
 
@@ -94,13 +94,15 @@ return allowedTools.filter((_, i) => isEnabled[i])
 
 ![工具调用如何按冲突域组成并发批次](/images/posts/claude-code-source-reading-10/10-conflict-batches-detail-handdrawn.png)
 
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+这张图的关键不是“开几个 Promise”，而是每个调用能否安全地和相邻调用共享执行窗口；批次边界由工具属性、输入和并发槽位共同决定。
 
 ## 回到多个 tool_use：它们怎样串并行
 
-现在再回答本章的问题：当同一次模型响应包含多个 `tool_use` 时，Claude Code 如何判断哪些工具可以并行执行，哪些必须串行？
+假设一次响应同时给出 `Read A`、`Grep B`、`Edit C` 和 `Read D`。调度器要先回答“这些输入是否安全、是否相邻”，而不是直接把四个 Promise 丢给 `Promise.all`。
 
-Claude Code 根据每次调用动态分类：先查找工具，用输入 Schema 解析参数，再执行工具自己的 `isConcurrencySafe(parsedInput)`。只有返回 `true` 的调用进入并发安全批次；查找失败、解析失败或判断函数抛错都按 `false` 处理。
+当同一次模型响应包含多个 `tool_use` 时，Claude Code 如何判断哪些工具可以并行执行，哪些必须串行？答案不在工具名，而在当前输入经过 Schema 后的冲突判断。
+
+调度器先查找工具，用输入 Schema 解析参数，再调用工具自己的 `isConcurrencySafe(parsedInput)`。只有返回 `true` 的调用进入并发安全批次；查找失败、解析失败或判断函数抛错都按 `false` 处理。
 
 接着，调度器按模型给出的顺序扫描这些调用。相邻的并发安全调用会合并成一个并行批次；任何不安全调用都会单独成为一个串行屏障。批次之间始终按原顺序执行。
 
@@ -123,7 +125,7 @@ Read A → Grep B → Edit C → Read D → Write E → Glob F
 
 注意最后三个调用不会被重新排列。Claude Code 不会为了“跑得更快”，把 `Read D` 和 `Glob F` 越过 `Write E` 合并。这样做的原因很直接：后面的读取可能应该看到前面写入后的文件状态。
 
-这套机制位于 `restored-src/src/services/tools/toolOrchestration.ts`。本文基于仓库还原出的 Claude Code 2.1.88 源码，只讨论静态代码能够确认的控制流。下文源码块均为真实源码的短摘录，未展示的日志、类型和无关分支会在正文中明确说明。
+这套机制位于 `restored-src/src/services/tools/toolOrchestration.ts`。2.1.88 的静态代码没有构建跨文件依赖图，也没有依据工具名做全局排序；它只按本次响应顺序和每个输入的安全声明切批次。下文源码块保留真实控制流，删去的日志、类型和无关分支不改变这一点。
 
 ![Claude Code 多工具串并行调度流程](/images/posts/claude-code-source-reading-10/10-tool-orchestration-handdrawn.png)
 
@@ -203,7 +205,7 @@ validateInput?(
 单次执行：重新 safeParse → validateInput（若有）→ PreToolUse → 权限决策 → tool.call
 ```
 
-`partitionToolCalls` 不会调用 `validateInput`。一次调用可以先被归入并发安全批次，随后在自己的执行链里因值级或上下文校验失败；这只说明它获得了怎样的调度位置，不代表它已经越过校验并真正执行。
+`partitionToolCalls` 不会调用 `validateInput`。一次调用可以先被归入并发安全批次，随后在执行链里因值级或上下文校验失败；批次标签只说明“可以和谁共享调度窗口”，不代表已经越过校验或真正产生副作用。
 
 ## isReadOnly 与 isConcurrencySafe 分别描述副作用和调度
 

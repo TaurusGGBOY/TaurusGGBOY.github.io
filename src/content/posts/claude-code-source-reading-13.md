@@ -55,17 +55,17 @@ if (
 
 ![从命令解析到操作系统沙箱的安全链](/images/posts/claude-code-source-reading-13/13-command-sandbox-detail-handdrawn.png)
 
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+这张图把 Bash 的安全链分成三步：解析命令结构、完成权限判断、再决定是否用 sandbox 包裹真实进程；任何一步失败都不会伪装成执行成功。
 
 ## 从一条 Bash 输入开始
 
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的代码为边界。还原路径便于我们定位实现，但不代表 Anthropic 内部仓库原本也按这些目录组织。下面的源码片段均删去了与当前论证无关的分支和参数，保留的代码不改写控制逻辑。
+本文只引用 `@anthropic-ai/claude-code@2.1.88` 的还原代码。路径用于定位实现，不代表 Anthropic 内部目录；代码片段删去无关分支，但不改写控制逻辑。
 
-先看全链路。模型给出 `command` 后，调用路径先经过解析、权限与沙箱决策，再抵达 shell：
+拿一条 `cd /tmp && cat input.txt | sed 's/a/b/' > result.txt` 作为观察点。模型只提交一个 `command` 字符串，运行时却要拆出子命令、管道、重定向，完成权限判断，再决定是否给最终 shell 包上 sandbox：
 
 ![Bash 命令从解析、权限、沙箱到进程与输出的安全边界](/images/posts/claude-code-source-reading-13/13-sandbox-bash-security-handdrawn.png)
 
-Permission 和 Sandbox 是相邻但职责独立的两层。命令可能获得权限后走 unsandboxed 路径，也可能因沙箱策略满足权限快速路径；两种情况都要继续结合配置与平台分支判断。
+Permission 和 Sandbox 是相邻但独立的两层。权限回答“允许这个动作吗”，Sandbox 回答“允许动作在哪些资源边界内运行”；即使权限通过，也可能因为平台能力、配置或沙箱失败走提示、降级或拒绝。
 
 ## 输入 Schema 先固定可控变量
 
@@ -117,7 +117,7 @@ cd /tmp && cat input.txt | sed 's/a/b/' > result.txt
 
 如果只取第一个空格前的单词，系统只会看到 `cd`。实际上，这里还有两个子命令、一个管道、一个目录变化和一个输出重定向。更复杂的 `$()`、进程替换、`eval` 和控制流，还可能让静态看到的命令与运行时执行的命令不同。
 
-`restored-src/src/tools/BashTool/bashPermissions.ts` 中的 `bashToolHasPermission` 先尝试得到 AST，再把结果归入三类：
+`restored-src/src/tools/BashTool/bashPermissions.ts` 中的 `bashToolHasPermission` 先尝试得到 AST，再把结果归入三类。解析结果不是最终权限，它只是让后续规则知道命令中有哪些真实操作：
 
 ```ts
 let astRoot = injectionCheckDisabled

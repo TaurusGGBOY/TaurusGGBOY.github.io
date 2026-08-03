@@ -10,23 +10,11 @@ image: "/images/posts/claude-code-source-reading-35/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **优先级格**：policy、命令行、环境变量、项目与用户设置按字段类型执行覆盖或合并。
-
-- **来源证明**：有效值需要连同来源层一起观察，才能解释配置为何生效。
-
-- **Runtime gate**：feature flag 在运行时裁剪路径，settings 则提供相对稳定的用户与组织意图。
-
-![Settings 来源优先级与 Feature Flag 裁剪](/images/posts/claude-code-source-reading-35/35-config-precedence-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：当你的代码需要调用 Claude Code 时，相比 Agent SDK，`claude -p` 在哪些场景下更有优势？
 
-先给结论：`claude -p` 的优势来自一个清晰的进程边界。调用方准备 prompt、stdin、cwd 和权限参数，再读取 stdout、stderr 与退出码；当任务是一次性的、结果可序列化、权限在启动前可以确定时，这条边界通常比在宿主程序里管理 SDK 生命周期更省事。Agent SDK 仍然复用同一套 Agent 内核，但它把会话、事件、权限回调和控制消息交给你的程序管理，适合需要持续控制的产品。
+先看调用方真正要接管什么。`claude -p` 把 prompt、stdin、cwd 和权限参数交给一个子进程，再用 stdout、stderr 与退出码收尾；一次性、可序列化、权限可预先确定的任务，天然适合这条边界。Agent SDK 复用同一个 Agent 内核，却把会话、事件、权限回调和控制消息暴露给宿主程序，换来控制力，也换来生命周期成本。
 
 ### 2.1.88 的分叉点在 headless 宿主
 
@@ -52,13 +40,25 @@ Agent SDK 的价值在于把 `StructuredIO` 背后的协议细节提升成语言
 
 公开资料也给出了一个与源码边界一致的使用层判断：headless CLI 适合把任务接到脚本和流水线；SDK 适合把 Agent 嵌入由别人使用的程序。SDK 文档还提醒，默认 system prompt 与 `claude -p` 的完整 Claude Code 提示词并不等价；如果产品确实要复刻 CLI 行为，需要显式选择 `claude_code` preset，再按需追加自己的规则。这个差异来自当前公开文档，不能反推 2.1.88 每个构建的运行时配置，但足以提醒我们：迁移到 SDK 时，除了改 API，还要检查 settings、CLAUDE.md、skills、hooks 和 prompt 是否仍然按预期加载。
 
-因此可以用一句工程判断收束：**把 Claude Code 当作一个可复现的命令行工件时，优先 `claude -p`；把它当作应用中的长期会话和可编排组件时，再选择 Agent SDK。** 如果只是需要实时文本而不需要回调，先尝试 `claude -p --output-format stream-json --verbose`；当宿主开始手写事件类型分发、权限请求表、取消传播和断线恢复时，迁移到 SDK 才真正省下维护成本。
+因此选择标准很简单：把 Claude Code 当作一个可复现的命令行工件时用 `claude -p`，把它嵌进长期运行的应用并需要动态控制时用 Agent SDK。若宿主开始手写事件分发、权限请求表、取消传播和断线恢复，说明它已经在重复 SDK 的职责。
 
 下图的 Settings Cascade 画的是未用 `--setting-sources` 重排时的默认顺序；显式参数怎样改变前三层，会在正文展开。
 
 ![Claude Code 配置级联、动态更新与功能开关手绘图](/images/posts/claude-code-source-reading-35/35-settings-config-flags-handdrawn.png)
 
 本文仍以 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码为边界。还原路径用于定位证据，不假定等同于 Anthropic 内部仓库的原始目录。下面的片段只保留证明当前结论的分支，无关字段与错误上报会省略。
+
+## 本章先建立三个概念
+
+- **优先级格**：policy、命令行、环境变量、项目与用户设置按字段类型执行覆盖或合并。
+
+- **来源证明**：有效值必须连同来源层一起观察，才能解释配置为何生效。
+
+- **Runtime gate**：feature flag 在运行时裁剪路径，settings 则提供相对稳定的用户与组织意图。
+
+![Settings 来源优先级与 Feature Flag 裁剪](/images/posts/claude-code-source-reading-35/35-config-precedence-detail-handdrawn.png)
+
+先把“值从哪里来”“哪一层覆盖它”“代码是否允许这条路径存在”分开，后面的配置排障才有坐标。
 
 ## 这一篇要讲什么，配置机制有什么用
 
@@ -77,7 +77,7 @@ Agent SDK 的价值在于把 `StructuredIO` 背后的协议细节提升成语言
 
 ## 先分清三类经常被叫作“配置”的东西
 
-工程里最容易出现的误判，是看到一个 `if` 就把它统称为 feature flag。实际上这三类机制的生效时间不同。
+排查“写了配置却没生效”时，先问它属于哪一类。一个 `if` 可能是构建裁剪，也可能是运行时实验，或只是 settings 合并结果；三者的生效时间和可观测入口不同。
 
 `SettingsJson` 是用户、项目、CLI 与管理员提供的数据，例如权限规则、hook、sandbox、model、env。它们先通过 schema 校验，再合成一份有效 settings。
 

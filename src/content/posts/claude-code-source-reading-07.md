@@ -9,18 +9,6 @@ image: "/images/posts/claude-code-source-reading-07/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **消息信封与内容块**：外层消息决定角色和去向，内容块表达文本、思考、工具调用等语义单元。
-
-- **关联标识**：`uuid`、模型响应 ID 与 `tool_use_id` 分别连接历史、响应和工具调用。
-
-- **事件投影**：运行时事件会按模型上下文、UI、SDK 与 transcript 的需求保留不同字段。
-
-![消息信封、内容块与关联 ID](/images/posts/claude-code-source-reading-07/07-message-edges-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇的问题是：Claude Code 里的 `turn` 到底算什么？我发一句用户消息后，后续每次“工具调用 + 结果反馈”的往返都算一个新的 turn 吗？`maxTurns` 这个上限能不能手动设置？
@@ -35,7 +23,7 @@ imagePosition: "left"
 
 再说一条边界：在 `query.ts` 里 `turnCount` 从 `1` 开始，`if (maxTurns && ...)` 的实现也意味着 `0` 在该判断中不会触发上限分支（这是源码可观察结果，不代表 CLI 层一定接收 0）。所以“能不能设值”要分成两层：官方参数允许你设置，但是否能接受负值/0，需要以具体入口做参数校验为准。
 
-在回答上面问题后，再补一组本章高频概念，避免术语误读：
+回答上面的 `turn` 问题后，先把本章会反复出现的字段定下来：
 
 - `turn`：本章语境里对应一次“模型决策回合”，即用户触发一次推理/工具闭环到下一次停顿的完整周期。
 - `query`：一次真正要发起“给模型提问或更新上下文”的动作。`QueryEngine` 里这个词常和 `loop`（执行循环）绑定。
@@ -56,8 +44,7 @@ imagePosition: "left"
 - `promptId`：追踪本轮用户输入来源上下文；省略时 transcript 仍按 `uuid/parentUuid` 建链，只缺少这层 prompt 关联。
 - `sessionId`：会话生命周期中的唯一识别 ID，用于和恢复、归档关联。
 
-接下来回答核心关系问题：内部 `user`、`assistant`、`system`、`progress`、`attachment` 与 `tool_use`/`tool_result` 消息，怎样关联成一段可追踪的对话？
-先给结论：**Claude Code 用消息顺序、消息 `uuid`、模型响应 `id` 和工具调用 `id` 分别维护不同关系。**
+核心问题是：内部 `user`、`assistant`、`system`、`progress`、`attachment` 与 `tool_use`/`tool_result` 怎样组成可追踪的对话？答案是四种标识各自维护一条关系：数组保顺序，`uuid` 串本地历史，模型响应 `id` 连接同一 API 响应，`tool_use_id` 配对动作与结果。
 
 这几个 ID 分工不同（先给一个对照）：
 
@@ -67,9 +54,19 @@ imagePosition: "left"
 - `parentToolUseID`（对外是 `parent_tool_use_id`）表示一条 progress 或子 Agent 消息嵌套在哪次工具调用之下；顶层消息写为 `null`，让宿主将其渲染在根层级。
 - `system` 的 `subtype` 区分 compact、api_error、local_command 等内部边界；`attachment` 携带要注入上下文的附加材料；`progress` 描述运行时执行过程，由 UI/SDK 消费。
 
-因此，一段对话是一张带多种边的事件图：数组保存发生顺序，几组 ID 保存语义关系，类型和 subtype 决定一条消息进入模型、UI、SDK 还是磁盘。
+因此，一段对话是一张带多种边的事件图：类型和 subtype 决定消息是否进入模型、UI、SDK 或磁盘，ID 则让不同投影仍能互相定位。本文只引用 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 静态结构，不把还原路径当成 Anthropic 内部目录。
 
-本文继续以 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码为边界。文中路径均指向 `restored-src/`，它能证明这个版本的静态结构与调用关系，不代表 Anthropic 原始仓库的目录组织。
+## 本章先建立三个概念
+
+- **消息信封与内容块**：外层消息决定角色和去向，内容块表达文本、思考、工具调用等语义单元。
+
+- **关联标识**：`uuid`、模型响应 ID 与 `tool_use_id` 分别连接历史、响应和工具调用。
+
+- **事件投影**：运行时事件会按模型上下文、UI、SDK 与 transcript 的需求保留不同字段。
+
+![消息信封、内容块与关联 ID](/images/posts/claude-code-source-reading-07/07-message-edges-detail-handdrawn.png)
+
+这张图把三种关系分开：数组表示发生顺序，`uuid`/`parentUuid` 表示历史链，`tool_use_id` 表示一次工具调用与结果的配对。
 
 ## 先把“消息”拆成三层
 

@@ -10,6 +10,18 @@ image: "/images/posts/claude-code-source-reading-45/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 回答上一篇的问题
+
+陪伴式体验建立以后，Claude Code 如何接入语音输入、转写、按键与音频状态，并把语音重新送回普通消息流程？
+
+先看输入链的终点：**Voice 是一条适配链，把“按住一个键”展开成录音、WebSocket 转写和文本插入，最后回到原来的 PromptInput。Agent 只在用户提交文本后开始工作。**
+
+完整链路可以压缩成一句话：`VoiceKeybindingHandler` 识别按住动作，`useVoice()` 驱动 `idle → recording → processing → idle`，本地录音后端产生 16 kHz、16 bit、单声道 PCM，`connectVoiceStream()` 把二进制音频帧发到语音转写端点，临时与最终文本再由 `useVoiceIntegration()` 插回光标位置。用户随后按 Enter，走的仍是普通消息提交与 QueryEngine 链路。
+
+这也是 Voice 和上一篇 Buddy 最重要的区别。Buddy 在一次回合结束后观察消息、画出气泡；Voice 发生在回合开始前，只负责把另一种输入介质变成文本。Voice 复用普通 PromptInput 的提交链，工具池、`canUseTool` 和 query loop 都在用户提交后才参与。语音识别错误会直接表现为输入文本错误。
+
+本篇只沿客户端可见链路追踪：按键怎样启动 session，音频怎样缓冲，WebSocket 怎样结束，以及迟到回调怎样被丢弃。服务端留存政策不在还原源码内。
+
 ## 本章先建立三个概念
 
 - **流式转写**：音频帧持续发送到服务端，文本假设随识别进度增量返回。
@@ -20,19 +32,7 @@ imagePosition: "left"
 
 ![语音帧、Partial 文本与 Final 文本的回插流程](/images/posts/claude-code-source-reading-45/45-voice-stream-detail-handdrawn.png)
 
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
-## 回答上一篇的问题
-
-陪伴式体验建立以后，Claude Code 如何接入语音输入、转写、按键与音频状态，并把语音重新送回普通消息流程？
-
-先说答案：**Voice 是一条输入适配链：把“按住一个键”展开成录音、WebSocket 转写和文本插入，最后回到原来的 PromptInput。音频先由 STT 转成文本，Agent 只在用户提交文本后开始工作。**
-
-完整链路可以压缩成一句话：`VoiceKeybindingHandler` 识别按住动作，`useVoice()` 驱动 `idle → recording → processing → idle`，本地录音后端产生 16 kHz、16 bit、单声道 PCM，`connectVoiceStream()` 把二进制音频帧发到语音转写端点，临时与最终文本再由 `useVoiceIntegration()` 插回光标位置。用户随后按 Enter，走的仍是普通消息提交与 QueryEngine 链路。
-
-这也是 Voice 和上一篇 Buddy 最重要的区别。Buddy 在一次回合结束后观察消息、画出气泡；Voice 发生在回合开始前，只负责把另一种输入介质变成文本。Voice 复用普通 PromptInput 的提交链，工具池、`canUseTool` 和 query loop 都在用户提交后才参与。语音识别错误会直接表现为输入文本错误。
-
-本文仍限定在本仓库由 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码。下文代码块只保留证明当前机制所需的分支，省略了无关渲染、日志和埋点；文件组织也只代表还原结果，不推断 Anthropic 内部仓库结构。
+先把音频会话、转写会话和输入框状态分开，后文的状态机与失败分支就有了边界。
 
 ## Voice 把语音收敛到普通文本输入
 
@@ -180,7 +180,7 @@ if (bareChar === null || rapidCountRef.current >= HOLD_THRESHOLD) {
 
 ## 录音必须先同步进入 recording，再做异步检查
 
-`useVoice()` 开始一次 session 时，先同步改变状态，再进入麦克风异步初始化：
+录音最容易出错的地方不是 PCM 格式，而是第一个 `await` 之前的状态窗口。`useVoice()` 开始一次 session 时，先同步把状态改成 `recording`，再进入麦克风异步初始化：
 
 ```ts
 async function startRecordingSession(): Promise<void> {

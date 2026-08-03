@@ -10,23 +10,11 @@ image: "/images/posts/claude-code-source-reading-36/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **Provider routing**：运行时根据显式开关选择 Anthropic、Bedrock、Vertex 或 Foundry 客户端。
-
-- **凭据策略**：OAuth、API key、云身份与辅助脚本各自生成不同认证材料和刷新路径。
-
-- **模型身份**：用户别名、Anthropic 模型 ID 与云平台部署名需要分层解析，才能保持功能判断稳定。
-
-![Provider 选择、认证材料与模型 ID 映射](/images/posts/claude-code-source-reading-36/36-provider-routing-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：**在 `/config` 中修改配置后，`settings.json` 中对应的配置也会同步修改吗？**
 
-先给结论：**有些设置会写入某个 `settings.json`，但 `/config` 不会把整份“当前生效配置”统一同步回一个 `settings.json`。** 在 `@anthropic-ai/claude-code@2.1.88` 中，`/config` 只是打开设置界面；每个控件自己的 `onChange` 决定写入全局配置文件、哪一层 settings 文件，还是只更新当前会话。
+先看写入调用，而不是看 UI 上的控件名称：**`/config` 不会把整份“当前生效配置”同步回一个 `settings.json`。** 在 `@anthropic-ai/claude-code@2.1.88` 中，它只挂载 `Settings` 页面；每个控件的 `onChange` 决定写入 `~/.claude.json`、某一层 settings 文件，还是只更新当前会话。
 
 入口本身没有“保存全部配置”的逻辑：
 
@@ -63,7 +51,19 @@ export const call: LocalJSXCommandCall = async (onDone, context) => {
 
 实际排查时可以按这条规则走：团队共享的规则编辑项目 `.claude/settings.json` 并提交；跨项目的个人默认值编辑 `~/.claude/settings.json`；只想让本机当前项目生效就编辑 `.claude/settings.local.json`；界面主题、认证和项目历史等应用状态则检查 `~/.claude.json`。最后还要看来源优先级：某个文件即使被改了，也可能被 local、CLI flag 或 policy 层覆盖，界面显示的是合并后的有效值，而不是某个文件的原样内容。
 
-本篇仍以 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码为边界；下文原有的模型路由与 provider 代码保持不变。这里新增的结论只涉及 `/config` 的写入分流，不把“当前值生效”误写成“所有 settings 文件都同步”。
+把这条分流记住就够了：界面显示的是合并后的有效值，写入函数却仍然知道自己的目标层。接下来再看模型路由时，不要把“哪个文件保存了偏好”和“哪个 provider 发请求”混成同一件事。
+
+## 本章先建立三个概念
+
+- **Provider routing**：运行时根据显式开关选择 Anthropic、Bedrock、Vertex 或 Foundry 客户端。
+
+- **凭据策略**：OAuth、API key、云身份与辅助脚本各自生成不同认证材料和刷新路径。
+
+- **模型身份**：用户别名、Anthropic 模型 ID 与云平台部署名需要分层解析，才能保持功能判断稳定。
+
+![Provider 选择、认证材料与模型 ID 映射](/images/posts/claude-code-source-reading-36/36-provider-routing-detail-handdrawn.png)
+
+这三个概念分别回答“走哪扇前门”“拿什么证明身份”“把别名解析成哪个部署名”。后文所有 provider 分支都围绕这三个问题展开。
 
 ## 先把三个容易混在一起的概念拆开
 
@@ -180,7 +180,7 @@ Bedrock 多了一步异步 inference profile 发现：能列出 profile 时，�
 
 ## 第三步：provider 按开关优先级确定，不做连通性竞赛
 
-`restored-src/src/utils/model/providers.ts` 的选择函数非常短，也因此很容易被过度解读：
+请求还没到 client 工厂，就已经由 `getAPIProvider()` 选定 provider。`restored-src/src/utils/model/providers.ts` 的选择函数很短，但它的“不做连通性探测”正是后续路由稳定的前提：同一进程不会在每次请求间竞赛四个云端点。
 
 ```ts
 export type APIProvider = 'firstParty' | 'bedrock' | 'vertex' | 'foundry'

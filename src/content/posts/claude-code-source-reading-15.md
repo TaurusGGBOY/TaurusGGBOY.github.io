@@ -10,25 +10,13 @@ image: "/images/posts/claude-code-source-reading-15/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **检索流水线**：候选发现、内容读取、相关性裁剪和证据回填是四个独立步骤。
-
-- **有界结果**：分页、截断与范围参数限制一次检索占用的上下文和执行时间。
-
-- **证据局部性**：模型应拿到与问题最接近的路径、行号和片段，以便继续验证。
-
-![本地与网络检索的有界流水线](/images/posts/claude-code-source-reading-15/15-retrieval-pipeline-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：你知道 rewind 的时候哪些东西是无法回滚的吗？
 
-把 rewind 想成“给 Claude Code 加了一个 Ctrl+Z”不算错，但还不够精确。关键要先区分文件快照、会话消息和外部副作用：不同入口可能只恢复其中一层，Bash 或其他进程改动也不一定进入文件历史。
+把 rewind 当成“给 Claude Code 加了一个 Ctrl+Z”很容易误导。真正的问题是：当模型已经改文件、跑命令、推送 Git，又想回到某个消息时，哪一层状态有快照，哪一层根本没有进入文件历史？
 
-本文分析的是 `@anthropic-ai/claude-code@2.1.88` 的还原源码，不能把后来版本的 `/rewind` 菜单选项直接倒灌进这个版本。对这份源码，最准确的结论是：**`fileHistoryRewind` 是文件历史恢复，不是整个 Agent 世界的 Undo。** 它沿着 `fileHistoryRewind → applySnapshot → restoreBackup/unlink` 这条链恢复磁盘文件；它不会自动撤销已经发生的外部副作用，也不会让一次批量恢复获得跨文件事务语义。
+本文只分析 `@anthropic-ai/claude-code@2.1.88` 的还原源码，不把后续版本的 `/rewind` UI 选项倒灌进来。对这一版，结论可以沿调用链落地：`fileHistoryRewind → applySnapshot → restoreBackup/unlink` 只恢复已有备份的磁盘文件，不撤销外部副作用，也不提供跨文件事务。
 
 ## 先把“不能回滚”拆成六类
 
@@ -49,9 +37,21 @@ imagePosition: "left"
 
 本文继续限定在 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码。下面的代码均来自 `restored-src/`，只省略与本段结论无关的字段与分支。
 
+## 本章先建立三个概念
+
+- **检索流水线**：候选发现、内容读取、相关性裁剪和证据回填是四个独立步骤。
+
+- **有界结果**：分页、截断与范围参数限制一次检索占用的上下文和执行时间。
+
+- **证据局部性**：模型应拿到与问题最接近的路径、行号和片段，以便继续验证。
+
+![本地与网络检索的有界流水线](/images/posts/claude-code-source-reading-15/15-retrieval-pipeline-detail-handdrawn.png)
+
+这张图把检索拆成“发现路径、定位内容、读取证据、回填上下文”四步；分页和截断不是装饰，而是控制单次调用的成本和信息范围。
+
 ## 先建立一张检索地图
 
-模型面对代码库时，成本最高的做法是从根目录开始读取所有文件。Claude Code 的工具划分，本质上是在回答三个不同问题：
+当任务只问一个函数时，从根目录读取所有文件既慢又会污染上下文。Claude Code 把检索拆成三个问题：先找候选路径，再定位内容，最后读取能支撑判断的局部证据；网络检索再把“发现来源”和“读取页面”分开。
 
 | 层级 | 工具 | 要回答的问题 | 主要裁剪方式 |
 |---|---|---|---|
@@ -63,7 +63,7 @@ imagePosition: "left"
 
 ![Claude Code 本地与网络分层检索流程手绘图](/images/posts/claude-code-source-reading-15/15-search-retrieval-handdrawn.png)
 
-图里的回箭头很重要。第一次搜索通常只会产生下一次搜索的线索。模型看到文件名以后可以改用更窄的 `Grep`，看到命中行以后再 `Read` 相邻范围；网页搜索同样可能先返回文档入口，再由 `WebFetch` 读取具体页面。检索在 query loop 中反复产生观察结果，每次结果都为下一次更窄的检索提供线索。
+图里的回箭头表示检索不会一次完成。模型先用 `Glob` 确定范围，再用更窄的 `Grep` 找行，最后 `Read` 相邻片段；网页路径同样先用 `WebSearch` 找候选，再交给 `WebFetch` 读取指定页面。每一步的截断结果都必须被模型解释后，才能决定下一步检索。
 
 ## Glob 先找路径，不读取文件内容
 
@@ -215,7 +215,7 @@ function makeToolSchema(input: Input): BetaWebSearchTool20250305 {
 
 搜索流到达时，工具会持续发出 `query_update` 和 `search_results_received` 进度事件。最终输出只保留搜索文本以及每条命中的 `title`、`url`；错误块会转成 `Web search error: <error_code>`。映射成 `tool_result` 时，末尾还会提醒主模型在最终回答中用 Markdown 链接列出来源。
 
-`allowed_domains` 只负责结果过滤。搜索结果的标题、摘要和链接来自外部服务与页面，仍可能过时、错误或带有恶意内容。`WebSearchTool` 提供候选来源，事实校验由主模型通过来源比较与清楚引用完成。
+`allowed_domains` 只负责结果过滤。搜索结果的标题、摘要和链接来自外部服务与页面，可能过时、错误或包含 prompt injection。`WebSearchTool` 只提供候选来源；主模型需要通过 `WebFetch`、来源比较和清楚引用完成事实校验，不能把搜索摘要当成最终证据。
 
 工具是否出现还取决于 provider 与模型。2.1.88 的 `isEnabled()` 对 first-party 和 Foundry 返回 `true`，Vertex 仅对源码列出的 Claude 4 系列名称返回 `true`，其他 provider 返回 `false`。这只是客户端启用条件，不代表当前账号、地区、网络和服务端一定可用。
 

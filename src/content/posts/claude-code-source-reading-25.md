@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-25/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **协作协议**：成员身份、共享任务和 mailbox 让多个会话围绕同一目标交换可追踪状态。
-
-- **任务所有权**：claim、blocked 与 completed 把责任落到具体成员，并显式表达依赖。
-
-- **收敛条件**：Coordinator 根据任务终态和依赖图判断团队何时完成，而非统计消息数量。
-
-![Agent Team 的任务所有权、Mailbox 与收敛](/images/posts/claude-code-source-reading-25/25-team-convergence-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：Claude Code 中手动创建 sub-agent 的适用时机和最佳实践是什么？
@@ -72,18 +60,24 @@ imagePosition: "left"
 
 本文后续仍回到仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原的 `restored-src/`，继续解释当多个 Agent 同时存在时，Team config、Task list、Mailbox 和 Coordinator 如何把这些独立委派组织成一个团队。
 
+## 问题现场
+
+几个 sub-agent 同时返回结果，并不等于它们组成了一个团队。真正的协作还需要稳定身份、任务所有权、成员之间的消息路由，以及一个能判断“现在是否可以收敛”的协调者。
+
+![Agent Team 的任务所有权、Mailbox 与收敛](/images/posts/claude-code-source-reading-25/25-team-convergence-detail-handdrawn.png)
+
+本文把 Agent Teams 看成加在 subagent 之上的控制面：Team config 管身份，task list 管所有权，mailbox 管消息，Coordinator 负责把这些状态变成下一步调度。
+
 ## 团队在 subagent 之上增加持久协作控制面
 
-上一篇的 subagent 更像一次有边界的委派：父 Agent 给出目标，子 Agent 独立执行，再把结果交回父线程。团队解决的是另一个问题：**多个执行者如何在较长时间内保持身份，领取不同工作，相互发消息，并在一项工作结束后继续领取下一项。**
-
-可以先用四个基础概念理解它：
+上一篇的 subagent 是“交付一个副任务再回传”。Team 解决的是持续协作：成员要保持身份，领取不同工作，互相发送消息，并在一个任务结束后继续处理下一个任务。它因此需要一个独立于单次 `runAgent()` 的控制面：
 
 - **Team**：一组成员的名册和共享命名空间，成员继续使用各自的上下文窗口；
 - **Teammate**：有独立执行循环的成员，后端可以是同进程，也可以是 tmux 或 iTerm2 pane；
 - **Task list**：协作待办表，状态只有 `pending | in_progress | completed`；第 23 篇的运行时 Task 则跟踪执行实例；
 - **Mailbox**：按成员路由的异步信箱，既承载自然语言消息，也承载 shutdown、plan approval、permission 等结构化协议。
 
-Coordinator 做的工作则可以概括成五个动词：**decompose、assign、observe、synthesize、close**。它拆目标、分所有权、观察状态、综合成员结果，最后判断是否完成或需要重派。真正的代码阅读、修改和测试仍由 worker 执行。
+Coordinator 执行拆分、分配、观察、综合和收敛，但不替 worker 阅读代码或提交修改。它消费的是 task 状态和 mailbox 消息，而不是把成员的全部上下文拼进自己的 prompt。
 
 ![Claude Code Agent Teams、共享控制面与 Coordinator 收敛流程手绘图](/images/posts/claude-code-source-reading-25/25-agent-teams-coordinator-handdrawn.png)
 

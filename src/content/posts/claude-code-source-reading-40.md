@@ -10,6 +10,20 @@ image: "/images/posts/claude-code-source-reading-40/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 回答上一篇的问题
+
+首次启动完成以后，Claude Code 的 Session Memory 如何从长会话中提炼、保存并在后续压缩和恢复中复用长期信息？
+
+先看它解决的故障：长会话接近上下文上限时，原始 transcript 不能同时承担“完整记录”和“长期提示”。2.1.88 把两者拆开：Session Memory 是按项目、按 session 隔离的本地 Markdown 投影，主 REPL 在采样后按阈值启动 forked agent，只允许它 `Edit` 当前 session 的 `session-memory/summary.md`；transcript 继续保留完整事实。
+
+这份文件有两个明确消费者。上下文需要压缩时，实验性的 SM Compact 会用它替代一次新的摘要模型调用，再拼回近期消息、SessionStart hooks 和 compact boundary；用户离开后回来时，`awaySummary` 也会把它作为较宽的背景，配合最近 30 条消息生成一段很短的回顾。恢复同一个 session 时，文件路径仍然可定位，但模块内的“摘要到哪条消息”为进程内状态，可能已经丢失，因此恢复分支会采取更保守的消息保留策略。
+
+因此更准确的模型是：
+
+> transcript 是原始事实流，`summary.md` 是可编辑的长期工作状态，compaction 是把这份状态重新注入会话的时机。
+
+它们相互配合，并各自保留独立的生命周期。
+
 ## 本章先建立三个概念
 
 - **情景到语义的蒸馏**：会话事件被压缩成可跨会话复用的项目事实、偏好和操作经验。
@@ -20,21 +34,7 @@ imagePosition: "left"
 
 ![会话内容如何蒸馏成可再注入记忆](/images/posts/claude-code-source-reading-40/40-memory-distillation-detail-handdrawn.png)
 
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
-## 回答上一篇的问题
-
-首次启动完成以后，Claude Code 的 Session Memory 如何从长会话中提炼、保存并在后续压缩和恢复中复用长期信息？
-
-答案是：在 2.1.88 的还原源码里，Session Memory 是一份**按项目、按 session 隔离的本地 Markdown 投影**。主 REPL 每次采样结束后都会经过一个 hook；当 token 增长和工具调用达到阈值时，hook 启动隔离的 forked agent。这个 agent 只能用 `Edit` 修改当前 session 的 `session-memory/summary.md`，把会话里稳定、可复用的信息压进固定章节。原始 transcript 继续承担完整事实流，普通请求也不会每轮查询远端记忆库。
-
-这份文件有两个明确消费者。上下文需要压缩时，实验性的 SM Compact 会用它替代一次新的摘要模型调用，再拼回近期消息、SessionStart hooks 和 compact boundary；用户离开后回来时，`awaySummary` 也会把它作为较宽的背景，配合最近 30 条消息生成一段很短的回顾。恢复同一个 session 时，文件路径仍然可定位，但模块内的“摘要到哪条消息”为进程内状态，可能已经丢失，因此恢复分支会采取更保守的消息保留策略。
-
-所以更准确的模型是：
-
-> transcript 是原始事实流，`summary.md` 是可编辑的长期工作状态，compaction 是把这份状态重新注入会话的时机。
-
-它们相互配合，并各自保留独立的生命周期。
+先把 transcript、summary 文件和 compaction 的职责分开，后文的阈值、游标和权限限制才容易读懂。
 
 ## Session Memory 以项目和会话划定作用域
 
@@ -64,7 +64,7 @@ export function getSessionMemoryPath(): string {
 
 ## 启动时只注册 hook，不立刻生成记忆
 
-Session Memory 在 `setup()` 后段注册 post-sampling 回调；主循环产生消息后，回调再判断是否需要启动提炼。
+Session Memory 不在启动时同步扫描整份 transcript。`setup()` 只注册 post-sampling 回调，主循环产生一轮消息后，回调才依据来源、feature gate 和 token/工具阈值决定是否提炼。
 
 ```ts
 export function initSessionMemory(): void {

@@ -10,6 +10,20 @@ image: "/images/posts/claude-code-source-reading-46/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 回答上一篇的问题
+
+语音输入补充交互以后，MagicDocs 与 Prompt Suggestions 如何从上下文生成文档和下一步建议，并把结果展示给用户？
+
+先看两条旁路的副作用：MagicDocs 的终点是受限 `Edit`，Prompt Suggestions 的终点是等待用户确认的 ghost text。它们都在主回合结束后启动 fork，却使用不同门槛、上下文和写回路径。
+
+MagicDocs 先等主 Agent 通过 `Read` 看见带有 `# MAGIC DOC:` 标记的 Markdown，再把文件路径记进进程内 `Map`。模型完成一次采样、最后一条 assistant 消息自然收尾时，它重新读取文档，把完整会话、system prompt、用户上下文、当前文档和自定义说明交给一个 Sonnet 子 Agent。这个 Agent 只对刚才那一个文件调用 `Edit`；内容已经完整时直接停止。
+
+Prompt Suggestions 则在主线程停止阶段预测“用户下一句最可能输入什么”。它复用父请求的缓存安全参数，启动一个禁用所有工具的 fork，只取 2 到 12 个词的文本。通过长度、格式和语气过滤后，候选值写进 AppState，输入框为空且主 Agent 已停止响应时，才作为 ghost text 展示。用户按 Tab 或在空输入框按 Enter，就把它变成普通 prompt；用户输入别的内容再提交，就记为 ignored 并清掉。
+
+所以，两条能力采用独立旁路：MagicDocs 的终点是受限文件编辑，Prompt Suggestions 的终点是等待用户确认的输入候选。前者在 2.1.88 的源码里被 `USER_TYPE === 'ant'` 限制，后者受环境变量、GrowthBook、交互模式、设置、权限等待状态等多道门控制。
+
+下面先处理“文件如何声明可维护”，再追踪建议生成的缓存和 UI 状态；主对话的消息与副作用边界始终保持不变。
+
 ## 本章先建立三个概念
 
 - **维护型旁路**：文档更新在主对话空闲时运行，读取受限上下文并把写权限限定到声明文件。
@@ -20,21 +34,7 @@ imagePosition: "left"
 
 ![MagicDocs 与 Prompt Suggestions 两条旁路](/images/posts/claude-code-source-reading-46/46-sidecars-detail-handdrawn.png)
 
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
-## 回答上一篇的问题
-
-语音输入补充交互以后，MagicDocs 与 Prompt Suggestions 如何从上下文生成文档和下一步建议，并把结果展示给用户？
-
-先说答案：**它们都在主回合结束以后读取上下文，再启动一条旁路生成；但两条旁路的输入、输出和确认方式完全不同。**
-
-MagicDocs 先等主 Agent 通过 `Read` 看见带有 `# MAGIC DOC:` 标记的 Markdown，再把文件路径记进进程内 `Map`。模型完成一次采样、最后一条 assistant 消息自然收尾时，它重新读取文档，把完整会话、system prompt、用户上下文、当前文档和自定义说明交给一个 Sonnet 子 Agent。这个 Agent 只对刚才那一个文件调用 `Edit`；内容已经完整时直接停止。
-
-Prompt Suggestions 则在主线程停止阶段预测“用户下一句最可能输入什么”。它复用父请求的缓存安全参数，启动一个禁用所有工具的 fork，只取 2 到 12 个词的文本。通过长度、格式和语气过滤后，候选值写进 AppState，输入框为空且主 Agent 已停止响应时，才作为 ghost text 展示。用户按 Tab 或在空输入框按 Enter，就把它变成普通 prompt；用户输入别的内容再提交，就记为 ignored 并清掉。
-
-所以，两条能力采用独立旁路：MagicDocs 的终点是受限文件编辑，Prompt Suggestions 的终点是等待用户确认的输入候选。前者在 2.1.88 的源码里被 `USER_TYPE === 'ant'` 限制，后者受环境变量、GrowthBook、交互模式、设置、权限等待状态等多道门控制。
-
-本篇仍只讨论仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码。下面的片段省略了与当前机制无关的类型、日志和分支；函数名、关键取值与调用顺序保持不变。
+先把文档副作用、模型预测和用户确认拆成三条线，后文的权限、cache key 与 ghost text 才不会混为一谈。
 
 ## 两条旁路分别维护文档与预测输入
 
@@ -113,7 +113,7 @@ export async function initMagicDocs(): Promise<void> {
 
 ## 更新只在主对话空闲时串行发生
 
-注册后的 `updateMagicDocs` 会经过三道门：来源必须是 `repl_main_thread`，最后一个 assistant turn 必须自然收尾，Map 里必须已有文档。多个文档逐个等待完成；外层 `sequential()` 还保证同一 hook 的多次调用按队列顺序执行。
+文档维护不应该在工具还没收尾时抢写文件。注册后的 `updateMagicDocs` 先检查来源是否为 `repl_main_thread`、最后一个 assistant turn 是否自然收尾，以及 Map 里是否已有文档；多个文档逐个等待完成，外层 `sequential()` 再串起多次 hook。
 
 ```ts
 const updateMagicDocs = sequential(async function (

@@ -10,27 +10,23 @@ image: "/images/posts/claude-code-source-reading-30/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **Host bridge**：外部应用把选区、标签页和编辑动作翻译成 Claude Code 可消费的协议消息。
-
-- **双向 RPC**：宿主既能向 Agent 推送现场，也能接收 Agent 发起的编辑、导航与浏览器操作。
-
-- **能力协商**：握手阶段确认版本、工具和权限模式，让每条连接只暴露可支持的功能。
-
-![IDE 与浏览器的双向 RPC 能力协商](/images/posts/claude-code-source-reading-30/30-external-host-rpc-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：我们经常看到文章说 Claude Code 使用 Grep 而不是 RAG；那么在同时拥有 Grep 和 LSP 的情况下，Claude Code 什么时候会使用 Grep，什么时候会使用 LSP？
 
 先说结论：**2.1.88 没有实现一个按照问题语义在 Grep、LSP 和 RAG 之间自动切换的统一路由器。**Grep 是默认的文本搜索能力，LSP 是满足开关和连接条件后才出现的语义工具；两者同时可用时，模型根据工具描述、已经掌握的文件位置和当前任务选择调用哪个。RAG 也不是这个版本内置的代码搜索工具，外部 MCP 或插件可以额外提供它，但不能把它和源码里的 Grep、LSP 混成同一条控制流。
 
+## 问题现场
+
+IDE 知道当前选区，Chrome 知道标签页，Claude Code 的 query loop 却不应该为每种宿主各写一套执行逻辑。接入的关键是把宿主现场翻译成协议消息，同时把 Agent 发起的操作送回正确的窗口。
+
+![IDE 与浏览器的双向 RPC 能力协商](/images/posts/claude-code-source-reading-30/30-external-host-rpc-detail-handdrawn.png)
+
+本文把外部集成放在协议边缘：lockfile 或配对信息先找到宿主，MCP transport 完成握手，notification 同步现场，RPC/tool call 返回动作结果，执行内核始终只处理统一消息模型。
+
 ## 三种能力先不要混成一个概念
 
-可以把它们看成三个不同的坐标：
+先不要把三种检索能力合并成一个“代码搜索器”。它们的输入、准备成本和错误边界不同：
 
 | 能力 | 它回答的问题 | 是否需要预先建立代码索引 |
 | --- | --- | --- |
@@ -38,7 +34,7 @@ imagePosition: "left"
 | LSP | 这个位置上的符号定义在哪里、谁引用它、它是什么类型？ | 需要语言服务器维护语义状态，但不是向量索引 |
 | RAG | 哪些代码片段在语义上与这段自然语言最相关？ | 通常需要 embedding、分块和向量索引 |
 
-因此，“Claude Code 使用 Grep 而不是 RAG”讨论的是**词法搜索和预索引检索的工程取舍**；“Claude Code 有了 LSP 以后什么时候不用 Grep”讨论的是**文本搜索和编译器语义查询如何分工**。LSP 既不是 RAG，也不是把整个代码库提前向量化。
+所以 Grep 适合未知位置的即时定位，LSP 适合已经有文件坐标的语义关系，RAG 只有在外部索引/MCP 提供后才会出现。2.1.88 没有一个按自然语言自动切换三者的路由器，模型依据工具描述和当前证据选择调用。
 
 ## 源码先决定哪些工具能被模型看到
 
@@ -137,7 +133,7 @@ prepareCallHierarchy  incomingCalls        outgoingCalls
 
 ![IDE、Chrome 与外部 MCP 客户端接入 Claude Code 的适配链路](/images/posts/claude-code-source-reading-30/30-browser-ide-external-tools-handdrawn.png)
 
-图中最值得注意的是三条线在进入 MCP 以前各自做了什么。IDE 要先确认 workspace；Chrome 要先完成扩展配对；普通外部 MCP 则要经过配置来源、认证与企业策略。统一协议把宿主差异封装在适配层里。
+三条线进入 MCP 以前各有一道门：IDE 先确认 workspace，Chrome 先完成扩展配对，普通外部 MCP 先经过配置来源、认证与企业策略。统一协议只封装宿主差异，不跳过这些门。
 
 ## IDE 先通过 lockfile 发现连接
 

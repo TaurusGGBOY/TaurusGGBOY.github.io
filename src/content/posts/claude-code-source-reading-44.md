@@ -10,6 +10,20 @@ image: "/images/posts/claude-code-source-reading-44/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 回答上一篇的问题
+
+主动助手能够推进任务以后，Buddy 如何把这些能力包装成更连续的陪伴式体验，并管理状态、建议与反馈？
+
+先看它没有做什么：Buddy 不选择工具，也不进入 `queryLoop()`；它只在普通 REPL 外叠加持久身份、回合反馈和终端表现三层产品能力。这样陪伴感不会变成另一条执行链。
+
+第一层是持久化身份。它在全局配置里保存名字、性格和孵化时间，再根据用户 ID 稳定地产生物种、稀有度、眼睛、帽子和属性。第二层是回合后的反馈。主查询完成以后，REPL 把消息交给一个 companion observer；observer 返回一句 reaction，AppState 只保存这句临时文本。第三层是终端表现。`CompanionSprite` 把 reaction、抚摸时间和终端宽度翻译成动画、气泡、焦点与布局。
+
+这三层都停留在体验层。Buddy 只观察回合结果并更新 UI，不选择工具、不进入 `queryLoop()`，也不接管上一章的主动任务调度。它与主 Agent 的唯一提示词联系是一条 `companion_intro` attachment：告诉 Claude 输入框旁边坐着独立 watcher，当用户直接叫它名字时，主 Agent 应少说一句，把空间让给气泡。
+
+因此，“连续陪伴”来自一个稳定身份、一条回合后观察链，以及长期挂在输入框旁边的 UI。源码里可见的建议是首次发现 `/buddy` 的通知与输入高亮；reaction 则反馈已经完成的回合。
+
+下面只沿可见调用链读这层体验：回合结束后谁写入 reaction、AppState 保存什么，以及终端布局怎样消费它。缺失的 observer/command 实现不做推断。
+
 ## 本章先建立三个概念
 
 - **观察器叠加层**：Buddy 读取主 Agent 的阶段与结果，生成界面反馈，同时保持执行决策链独立。
@@ -20,21 +34,7 @@ imagePosition: "left"
 
 ![Buddy 观察主 Agent 并驱动动画状态](/images/posts/claude-code-source-reading-44/44-buddy-observer-detail-handdrawn.png)
 
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
-## 回答上一篇的问题
-
-主动助手能够推进任务以后，Buddy 如何把这些能力包装成更连续的陪伴式体验，并管理状态、建议与反馈？
-
-先说答案：**Buddy 在普通 REPL 外叠加持久身份、回合反馈和终端表现三层产品能力。**
-
-第一层是持久化身份。它在全局配置里保存名字、性格和孵化时间，再根据用户 ID 稳定地产生物种、稀有度、眼睛、帽子和属性。第二层是回合后的反馈。主查询完成以后，REPL 把消息交给一个 companion observer；observer 返回一句 reaction，AppState 只保存这句临时文本。第三层是终端表现。`CompanionSprite` 把 reaction、抚摸时间和终端宽度翻译成动画、气泡、焦点与布局。
-
-这三层都停留在体验层。Buddy 只观察回合结果并更新 UI，不选择工具、不进入 `queryLoop()`，也不接管上一章的主动任务调度。它与主 Agent 的唯一提示词联系是一条 `companion_intro` attachment：告诉 Claude 输入框旁边坐着独立 watcher，当用户直接叫它名字时，主 Agent 应少说一句，把空间让给气泡。
-
-因此，“连续陪伴”来自一个稳定身份、一条回合后观察链，以及长期挂在输入框旁边的 UI。源码里可见的建议是首次发现 `/buddy` 的通知与输入高亮；reaction 则反馈已经完成的回合。
-
-本篇仍只讨论仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码。下面的片段省略了与当前机制无关的类型和渲染分支；函数名、关键取值与调用顺序保持不变。
+先区分持久身份、回合事件和瞬时动画状态，再读 `CompanionSprite` 的渲染分支。
 
 ## Buddy 由观察器与 UI 组成
 
@@ -184,7 +184,7 @@ attachment 随后被转换成 meta user message。提示文本把输入框旁的
 
 ## 回合结束后，observer 才写入临时反馈
 
-`restored-src/src/screens/REPL.tsx` 等 `query()` 的异步事件流完全结束以后，才触发 companion observer：
+Buddy 的反馈不能抢在工具执行中出现，否则 reaction 会和主回合的状态竞争。`restored-src/src/screens/REPL.tsx` 等 `query()` 的异步事件流完全结束以后，才触发 companion observer：
 
 ```ts
 for await (const event of query({

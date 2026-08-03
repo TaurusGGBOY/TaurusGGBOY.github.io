@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-26/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **认知隔离**：Plan Mode 限制可产生的副作用，让模型先形成可审查方案。
-
-- **文件系统隔离**：Git worktree 为并发实现提供独立工作目录和分支坐标。
-
-- **阶段门**：从规划进入执行需要显式批准，清理工作区也由明确所有者负责。
-
-![Plan Mode 与 Worktree 的两种隔离](/images/posts/claude-code-source-reading-26/26-two-isolations-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：
@@ -53,18 +41,24 @@ Anthropic 对两类模式的实践区分与源码边界相互印证：orchestrat
 
 最后再强调一个容易混淆的点：同一个自定义 Agent 定义可以作为 `subagent_type` 被普通路径使用，也可以作为 teammate 的角色模板；定义里的模型、工具和提示词描述“它是谁”，而 `spawnTeammate` 还是 `runAgent` 决定“它以什么协作关系存在”。本文后续仍以 `@anthropic-ai/claude-code@2.1.88` 的还原源码为边界，继续看 Plan mode 和 worktree 如何分别隔离行为与文件。
 
+## 问题现场
+
+“先写计划再改代码”和“让多个 Agent 并行改代码”经常被当成同一件事。前者限制的是权限状态，后者隔离的是目录与分支；混用两套机制，计划通过了仍可能在同一工作树里互相覆盖。
+
+![Plan Mode 与 Worktree 的两种隔离](/images/posts/claude-code-source-reading-26/26-two-isolations-detail-handdrawn.png)
+
+本文分别追踪两条控制流：Plan mode 通过 `ToolPermissionContext.mode` 建立审批门，worktree 通过 Git 和 Hook 创建可回收的文件边界；二者只在更高层的工作流里组合。
+
 ## 两种隔离，解决的是两个不同问题
 
-假设一个 team lead 把三个子任务分给三个 teammate：一个改 API，一个补测试，一个更新文档。如果三个 Agent 都直接在同一个目录里工作，即使任务拆分得很合理，也会遇到几个现实问题：
+先看一个最小现场：lead 把 API、测试和文档分给三个 teammate，但三者仍在同一目录写文件。即使任务拆得很清楚，也会出现：
 
 1. 一个 Agent 的未提交修改会进入另一个 Agent 的 `git status`；
 2. 两个 Agent 同时改同一文件时，后写入者可能覆盖前面的工作；
 3. 测试和格式化看到的是一个不断变化的混合工作区；
 4. 任务失败以后，很难判断哪些文件属于哪个 Agent。
 
-Worktree 解决的是这些目录和分支层面的问题。但它不回答“方案是否正确”“用户是否同意”“现在能不能执行”。这些问题由 Plan mode 的状态和审批链处理。
-
-反过来也一样。Plan mode 能让 Agent 先探索再提交计划，却不会自动创建独立目录。如果多个已获批准的任务仍在同一 working tree 里执行，文件冲突并不会因为计划写得好而消失。
+Worktree 只解决目录和分支边界；方案是否正确、用户是否同意、当前能否执行，仍由 Plan mode 的权限状态和审批链决定。反过来，计划通过也不会创建独立目录；两套机制必须在更高层工作流中显式组合。
 
 ![Plan mode 与 Git worktree 的双重隔离流程](/images/posts/claude-code-source-reading-26/26-plan-mode-worktrees-handdrawn.png)
 
@@ -222,7 +216,7 @@ async validateInput(_input, { getAppState, options }) {
 
 Teammate 是例外。注释说明 teammate 的 AppState 可能显示 leader 的模式，所以这里让它通过，后面再以 `isPlanModeRequired()` 判断是否需要 leader 批准。
 
-接下来是权限分流：
+权限分流从当前 `ToolPermissionContext.mode` 开始：
 
 ```ts
 async checkPermissions(input, context) {

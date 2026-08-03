@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-23/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **Task handle**：任务 ID 把启动、观察、取消和结果回收连接成同一生命周期。
-
-- **持久输出**：长输出写入文件，内存状态仅保存路径、摘要和终态，降低会话压力。
-
-- **Rewake**：后台任务到达终态后发出通知，让空闲 Agent 把结果纳入下一轮判断。
-
-![后台任务状态、输出文件与 Agent 唤醒](/images/posts/claude-code-source-reading-23/23-task-rewake-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：如果你想自己定义一个 Skill slash 命令，你应该怎么实现？
@@ -80,15 +68,19 @@ context: fork
 
 如果 frontmatter 写了 `context: fork`，`SkillTool.call()` 会改走 `executeForkedSkill()`：源码创建新的 `agentId`，调用 `runAgent()`，收集子 Agent 的消息和进度，最后只把提取出的结果文本返回父会话。也就是说，自定义 slash 命令的实现工作止于“定义 Skill”；上下文隔离、任务状态、输出回收和取消，交给后面的 Task 运行时处理。
 
-本文仍以仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原的 `restored-src/` 为边界。外部资料可以帮助理解推荐写法，但命令名来源、frontmatter 默认值和 `Command` 包装方式以这份版本源码为准。
+命令名来源、frontmatter 默认值和 `Command` 包装方式均以仓库从 `@anthropic-ai/claude-code@2.1.88` 还原的 `restored-src/` 为准；外部资料只用于对照推荐写法。
+
+## 问题现场
+
+`npm run dev`、后台 Agent 和 teammate 都可能在当前回合之外继续运行。主会话要恢复输入，运行时却不能丢掉取消句柄、输出位置和终态；把结果全塞回消息数组又会重新制造上下文压力。
+
+![后台任务状态、输出文件与 Agent 唤醒](/images/posts/claude-code-source-reading-23/23-task-rewake-detail-handdrawn.png)
+
+本文把 Task 看成执行实例的账本：状态机管理生命周期，输出文件承载大结果，通知队列负责在后台任务结束后把可消费的摘要送回 Agent。
 
 ## 两种 Task 分别描述执行实例与协作事项
 
-源码里有两个很容易混淆的 “Task”。
-
-第一种是本文要讲的**运行时任务**。它位于 `restored-src/src/Task.ts`、`restored-src/src/tasks/` 和 `restored-src/src/utils/task/`，代表已经启动或准备启动的 Bash、Agent、工作流等执行实例。它有随机 task ID、输出文件、终止状态和取消实现，状态保存在内存中的 `AppState.tasks`。
-
-第二种是 `restored-src/src/utils/tasks.ts` 里的**协作任务列表**，对应 `TaskCreate`、`TaskGet`、`TaskList`、`TaskUpdate`。它更像多人协作的待办事项，状态是 `pending | in_progress | completed`，按 JSON 文件持久化。创建一条待办不会自动启动 Bash 或 Agent。
+源码里有两个同名对象。运行时 Task 位于 `Task.ts` 和 `tasks/`，代表 Bash、Agent、workflow 等真正活着的执行实例，状态和取消句柄放在 `AppState.tasks`；`TaskCreate`/`TaskGet`/`TaskUpdate` 操作的是 JSON 持久化的协作待办，创建它不会启动进程。前者回答“谁还在跑”，后者回答“哪项工作还没完成”，两者不能用同一个终态替代。
 
 两者名字相同，状态集合也有重叠，但用途不同：
 
@@ -99,7 +91,7 @@ context: fork
 | 终态 | `completed`、`failed`、`killed` | `completed` |
 | 是否直接控制进程 | 是，由具体 Task 实现负责 | 否 |
 
-本文只讨论第一种。下一篇进入 subagent 时，才会再把运行时 Task 与 Agent 执行上下文接起来。
+本文只讨论运行时 Task；subagent 的上下文与结果回流留给下一篇。
 
 ## 一张图看懂任务的两条轴
 

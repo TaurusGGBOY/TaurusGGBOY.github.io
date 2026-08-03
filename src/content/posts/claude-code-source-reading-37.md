@@ -10,23 +10,11 @@ image: "/images/posts/claude-code-source-reading-37/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **Session affinity**：远程消息先关联到具体本地会话，才能保持上下文、工具和工作目录一致。
-
-- **双工传输**：控制端与执行端各自发送事件，入站和出站可以采用不同连接策略。
-
-- **重连状态**：传输恢复与 Agent 会话恢复是两层目标，序号、去重和确认点负责衔接。
-
-![Remote Control 的会话关联与双层重连](/images/posts/claude-code-source-reading-37/37-remote-session-affinity-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：**为什么 Claude Code 要区分不同的 provider？**
 
-先给结论：`provider` 不是“同一个 API 的几个别名”，而是一次请求的承载方和运行时契约。它决定请求发到哪里、用谁的身份签名、模型名称如何解析、哪些 beta header 和能力参数可以发送，以及数据、账单、区域和组织策略落在哪个边界。把这些路径强行当成同一个 provider，最容易出现的不是代码重复，而是拿错凭证、把错误的模型 ID 发给后端，或者把一个后端不支持的参数送出去。
+先抓住一次请求的第一处分叉：`provider` 决定请求发往哪个 API、用哪套身份签名、模型别名落成什么 ID，以及哪些能力参数有资格进入 body。它不是同一个 API 的别名；把四条前门抹平，最先暴露的通常是凭证、部署名或 beta 参数错位。
 
 ## 2.1.88 里的 provider 是一个路由上下文
 
@@ -116,13 +104,25 @@ function getBuiltinModelStrings(provider: APIProvider): ModelStrings {
 
 所以可以用一句话收束：**model 回答“调用哪个模型”，provider 回答“通过谁的基础设施、身份和规则调用它”。** 只有把两者分开，Claude Code 才能在复用同一套 Agent/query 内核的同时，诚实地面对四个后端的实际差异。
 
-本文仍以仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原的源码为边界；后文原有的 Bridge、Remote Control 与 Server 代码保持不变。这里新增的回答只解释 provider 分层的必要性，不把最新文档中的 provider 能力表倒推成 2.1.88 的源码事实。
+provider 的回答到这里就结束：先选承载方，再让模型映射、认证材料和 capability gate 沿同一上下文向下游传递。下面进入远程执行，关注这条请求链怎样被拆成执行端、会话服务和控制端。
 
 ![Claude Code Bridge、Remote Control 与 Direct Connect 的协作关系](/images/posts/claude-code-source-reading-37/37-bridge-remote-server-handdrawn.png)
 
+## 本章先建立三个概念
+
+- **Session affinity**：远程消息先关联到具体本地会话，才能保持上下文、工具和工作目录一致。
+
+- **双工传输**：控制端与执行端各自发送事件，入站和出站可以采用不同连接策略。
+
+- **重连状态**：传输恢复与 Agent 会话恢复是两层目标，序号、去重和确认点负责衔接。
+
+![Remote Control 的会话关联与双层重连](/images/posts/claude-code-source-reading-37/37-remote-session-affinity-detail-handdrawn.png)
+
+先把“谁执行”“谁路由”“谁控制”分开，再看 `poll`、`ACK`、heartbeat 和 sequence 如何把这三者重新连起来。
+
 ## 先建立一个简单模型：执行端、会话服务、控制端
 
-本地终端和远端客户端看到的是同一段会话，但它们承担的责任并不对称。
+浏览器里输入一句 prompt，并不意味着浏览器拿到了本地 shell。远程 UI、会话服务和本地 Bridge 看到的是同一段会话，却承担不同副作用。
 
 本地执行端拥有工作目录和进程权限。`Read` 读的是本地文件，`Bash` 启动的是本地进程，query loop 也运行在这里。会话服务负责把事件按 `sessionId` 关联，并在 environment 与 session 之间调度 work。远端控制端主要负责输入、展示和确认，它不因为能看到会话就自动获得本地工具执行权。
 
@@ -239,7 +239,7 @@ export async function initBridgeCore(
 
 ## transport：入站和出站甚至不必使用同一种连接
 
-在 CCR v2 路径里，`createV2ReplTransport()` 使用 `SSETransport` 接收入站事件，用 `CCRClient` 的 HTTP POST 路径写出站事件。也就是说，“Remote Control 就是一条 WebSocket”并不准确；具体 transport 会随服务端下发的 work secret 和功能路径变化。
+远程链路最容易被画错成“一条 WebSocket”。CCR v2 的 `createV2ReplTransport()` 用 `SSETransport` 接收入站事件，用 `CCRClient` 的 HTTP POST 写出站事件；连接方向和认证材料由服务端下发的 work secret 决定。
 
 ```ts
 export async function createV2ReplTransport(opts: {

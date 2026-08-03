@@ -9,18 +9,6 @@ image: "/images/posts/claude-code-source-reading-02/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **Agent turn**：一次模型决策及其产生的消息；一条用户请求可以跨越多个 turn。
-
-- **状态迁移**：模型事件、工具结果和停止条件共同把循环从一个可执行状态推进到下一个状态。
-
-- **循环不变量**：每个 `tool_use` 都要获得匹配结果，消息顺序和权限上下文在回环前保持可解释。
-
-![一次用户请求中的多轮状态迁移](/images/posts/claude-code-source-reading-02/02-turn-state-machine-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇的问题是：如果我们用 LangGraph 开发一个编程 Agent，它和 Claude Code 到底有什么区别。
@@ -83,21 +71,31 @@ Claude Code 的核心场景则是用户坐在终端或 IDE 前，与一个持续
 - **Claude Code 技术上可以使用 LangGraph**，但 LangGraph 只能替换最外层的循环表达，无法替换工具、权限、上下文和交互逻辑。
 - **Claude Code 选择自研的合理解释**是：它的 graph 很简单，节点内部却高度定制；直接控制循环比接入通用图运行时更可控。这个判断来自源码结构，证据范围限于代码架构。
 
+## 本章先建立三个概念
+
+- **Agent turn**：一次模型决策及其产生的消息；一条用户请求可以跨越多个 turn。
+
+- **状态迁移**：模型事件、工具结果和停止条件共同把循环从一个可执行状态推进到下一个状态。
+
+- **循环不变量**：每个 `tool_use` 都要获得匹配结果，消息顺序和权限上下文在回环前保持可解释。
+
+![一次用户请求中的多轮状态迁移](/images/posts/claude-code-source-reading-02/02-turn-state-machine-detail-handdrawn.png)
+
+这张图把一次 turn 的不变量画出来：模型可以产生文本或 `tool_use`，但每个调用都必须经过执行并得到配对结果，循环才有资格继续。
+
 ## 先把一次请求画成一条时间线
 
-本文基于 npm 发布物 source map 还原出的 `2.1.88` 源码。
+本文以 npm 发布物 source map 还原的 `2.1.88` 源码为边界。假设用户输入“修复这个失败测试”，最容易观察到的现象是终端连续出现读取、编辑和测试输出；真正需要追踪的是这些事件如何在模型调用之间交接。
 
-我们先看最简模型：
+先把最小调用链写出来：
 
 `Host → QueryEngine.ask → submitMessage → queryLoop → API stream → tool_use → permission → tool execution → tool_result → next inference → completion`
 
 ![Claude Code 一次请求端到端流程手绘图](/images/posts/claude-code-source-reading-02/02-end-to-end-turn-handdrawn.png)
 
-图里有两条出口。模型如果已经给出完整回答，就从 API stream 走向最终输出；如果返回 `tool_use`，Claude Code 就执行工具，把 `tool_result` 放回消息历史，再进入下一轮推理。
+图里有两条出口：完整文本直接结束；`tool_use` 先经过编排、校验和权限，`tool_result` 回到消息历史后才允许下一次模型调用。一次用户请求因此可能展开成多轮 API 调用，但每一轮都必须满足消息配对和停止条件。
 
-这意味着一次用户请求可以展开成多次模型 API 调用和多次工具执行，直到某个停止条件成立。
-
-02 的任务是先建立这张端到端地图，不在每一站提前展开实现。后续文章会沿着同一条链路逐层拆开：
+本篇只追踪交接点，不把每个工具的内部实现混在主线上；表中的后续章节再分别展开启动、会话、消息、工具和恢复。
 
 | 本文经过的节点 | 本文只保留的结论 | 后续展开章节 |
 |---|---|---|

@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-32/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **终端渲染循环**：React state 变化生成新组件树，Ink 计算终端帧差并更新有限行。
-
-- **双轨状态**：ref 为异步执行提供最新值，React state 为界面提供可追踪渲染快照。
-
-- **流式视图**：token 增量走临时显示路径，完整消息进入稳定消息树并参与后续布局。
-
-![Ink TUI 从流式事件到终端帧差](/images/posts/claude-code-source-reading-32/32-terminal-render-loop-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：**共享状态准备好以后，Claude Code 如何用 Ink 和 React 构建终端 REPL，并把流式消息、工具进度与用户输入渲染到同一界面？**
@@ -36,21 +24,25 @@ imagePosition: "left"
 
 本篇继续以 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码为边界。下文代码块都来自 `restored-src/`；为了突出主链，省略了与当前结论无关的参数和分支，不把整理后的伪代码冒充完整源码。
 
+## 问题现场
+
+终端 UI 同时要接收键盘、模型 token、工具进度、权限弹窗和窗口 resize。若每个回调直接写 `stdout`，光标和旧屏幕内容很快失去所有权；真正需要的是一棵能持续更新、又能控制差量刷新的组件树。
+
+![Ink TUI 从流式事件到终端帧差](/images/posts/claude-code-source-reading-32/32-terminal-render-loop-detail-handdrawn.png)
+
+本文沿着一轮交互追踪 `PromptInput → query() → onQueryEvent() → React state → Ink renderer`，重点看流式预览为什么和稳定消息列表分开，以及帧差如何最终写入终端。
+
 ## 先补三个概念：REPL、React 和 Ink
 
-在读 `REPL.tsx` 之前，需要先把三个词说清楚。否则很容易把 React 理解成“网页框架”，又把 REPL 理解成“只能逐行执行代码的命令行”。
+`REPL.tsx` 的重点不是终端打印函数，而是把输入、查询事件和屏幕输出放进同一棵组件树。React 保存可渲染快照，Ink renderer 才负责把树变成终端行；执行副作用仍在 `query()`、回调和 effect 中。
 
 ### REPL 是一轮轮持续运行的交互循环
 
-REPL 是 Read-Eval-Print Loop 的缩写：读取输入，执行或求值，输出结果，然后回到下一次读取。
-
-Claude Code 的“Eval”把输入送入 Agent 查询循环，一次输入可能触发模型流、工具调用、权限确认、`tool_result` 回传和再次推理。“Print”持续展示 thinking、工具进度、错误、通知与弹窗；一轮完成后，输入框继续承接下一轮。
-
-因此，这里的 REPL 更准确的模型是“长生命周期交互宿主”。它持有会话 UI 状态，但不取代 `query()` 和工具系统。
+REPL 仍是 Read–Eval–Print Loop：`PromptInput` 读取输入，`query()` 可能多次模型推理与工具调用，事件回调更新显示，完成后输入区继续承接下一轮。它持有 UI 生命周期，却不取代 query loop、工具权限或 transcript 持久化。
 
 ### React 是状态到界面的映射，不只用于浏览器
 
-React 在这里提供组件、状态和 reconciliation（协调更新）。组件声明“给定当前状态，界面应该长什么样”；状态改变时，React 比较新旧组件树，只把必要更新交给 renderer。
+React 在这里把状态映射为组件树并做 reconciliation；它不关心输出是 DOM 还是终端。组件声明当前消息、进度和输入应呈现什么，renderer 再决定如何落到屏幕。
 
 浏览器里的 renderer 是 React DOM，最终操作 DOM。Claude Code 使用的是自己的 Ink renderer，最终操作终端屏幕缓冲区。相同的 `useState`、`useEffect`、Context 和组件组合仍然成立，只是 `<Box>`、`<Text>` 不会变成网页节点，而会参与终端布局与字符绘制。
 
@@ -222,7 +214,7 @@ for await (const event of query({
 
 `query()` 的这些参数已经在前面章节展开过。对 UI 而言，关键是 `messagesIncludingNewMessages` 包含本轮输入后的会话，`canUseTool` 是权限回调，`querySource` 标记 REPL 来源，生成器每产出一个事件就交给 `onQueryEvent()`。终端绘制留在宿主层，因此 query loop 可以同时服务全屏、普通 scrollback 和其他宿主。
 
-`onQueryEvent()` 再调用 `handleMessageFromStream()`，把不同事件分流到消息、流式工具、thinking、文本增量和指标状态。最值得注意的是 progress 的处理：
+`onQueryEvent()` 再调用 `handleMessageFromStream()`，把不同事件分流到消息、流式工具、thinking、文本增量和指标状态。progress 的处理点是：
 
 ```ts
 const onQueryEvent = useCallback((

@@ -10,6 +10,20 @@ image: "/images/posts/claude-code-source-reading-43/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 回答上一篇的问题
+
+Dream 把经验沉淀下来以后，Assistant 与 KAIROS 如何利用这些记忆主动规划、提醒并推进用户任务？
+
+先把“主动”拆成三件事：Assistant/KAIROS 仍复用主 Agent 的模型循环，只是增加长生命周期、定时唤醒和远程消息入口。记忆给上下文，触发器给下一轮机会，权限决定这一轮能否产生副作用。
+
+记忆负责给它连续性。KAIROS 模式仍加载 `MEMORY.md`，新信息先追加到按日期分片的 daily log；夜间 `/dream` 再把日志蒸馏回 topic 文件和 `MEMORY.md`。它醒来时得到的是用户偏好、项目背景和历史决策，正在执行的任务状态则由 Task/AppState 提供。
+
+主动性来自另外三条链路：`<tick>` 让长驻会话在空闲期间重新进入主循环；Cron 把“稍后提醒我”或“定期检查”变成排队的 prompt；后台 Agent/Skill 执行完以后，再把结果作为隐藏的 meta prompt 放回主队列。主 Agent 最后决定是否继续行动，以及是否通过 `SendUserMessage` 把结论发给用户。
+
+这里要拆开三个职责：**记忆提供上下文，触发器创建下一轮，权限决定动作能否执行。** `MEMORY.md` 本身不调度任务，Cron 到点后仍要经过工具授权。KAIROS 复用原来的 Query Loop、Tool、Task、权限上下文和消息队列，改变的是“下一轮从哪里来”“工作能否在后台继续”“结果通过什么通道抵达用户”。
+
+所以它不是一套新的 Agent 内核，而是把“下一轮从哪里来”搬到了体验层：Dream 产出的记忆提供上下文，tick/Cron/远程输入重新入队，后台任务保持前台可响应，`SendUserMessage` 再把结果送回用户。
+
 ## 本章先建立三个概念
 
 - **主动调度**：系统依据空闲、提醒与后台结果安排下一次模型运行，形成跨轮次推进。
@@ -20,21 +34,7 @@ imagePosition: "left"
 
 ![KAIROS 的主动调度与带外控制闭环](/images/posts/claude-code-source-reading-43/43-kairos-control-loop-detail-handdrawn.png)
 
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
-## 回答上一篇的问题
-
-Dream 把经验沉淀下来以后，Assistant 与 KAIROS 如何利用这些记忆主动规划、提醒并推进用户任务？
-
-先说结论：**Assistant/KAIROS 复用主 Agent 的模型循环，并增加长生命周期、定时唤醒和远程消息入口。**
-
-记忆负责给它连续性。KAIROS 模式仍加载 `MEMORY.md`，新信息先追加到按日期分片的 daily log；夜间 `/dream` 再把日志蒸馏回 topic 文件和 `MEMORY.md`。它醒来时得到的是用户偏好、项目背景和历史决策，正在执行的任务状态则由 Task/AppState 提供。
-
-主动性来自另外三条链路：`<tick>` 让长驻会话在空闲期间重新进入主循环；Cron 把“稍后提醒我”或“定期检查”变成排队的 prompt；后台 Agent/Skill 执行完以后，再把结果作为隐藏的 meta prompt 放回主队列。主 Agent 最后决定是否继续行动，以及是否通过 `SendUserMessage` 把结论发给用户。
-
-这里要拆开三个职责：**记忆提供上下文，触发器创建下一轮，权限决定动作能否执行。** `MEMORY.md` 本身不调度任务，Cron 到点后仍要经过工具授权。KAIROS 复用原来的 Query Loop、Tool、Task、权限上下文和消息队列，改变的是“下一轮从哪里来”“工作能否在后台继续”“结果通过什么通道抵达用户”。
-
-所以更准确的回答是：Assistant/KAIROS 用 Dream 产出的记忆做上下文，用 tick、Cron 和远程输入重新唤醒 Agent，用异步任务保持前台可响应，再用有优先级的队列和 `SendUserMessage` 收口。
+先区分“记忆保存了什么”“触发器何时入队”和“主 Agent 是否愿意执行”，再看 Assistant 的长期体验层。
 
 ## Assistant/KAIROS 在现有内核上增加长期体验层
 
@@ -56,7 +56,7 @@ Dream 把经验沉淀下来以后，Assistant 与 KAIROS 如何利用这些记�
 
 ## 激活链路：开关、显式设置与目录信任缺一不可
 
-启动阶段先检查 KAIROS 是否被编入，再判断 assistant 是否被配置或被 daemon 强制，最后要求当前目录已经通过信任对话框：
+启动阶段先判断构建产物有没有 KAIROS，再检查 assistant 设置或 daemon 强制开关，最后才要求目录 trust。顺序不能倒置：项目指令尚未被信任前，不能提前激活主动模式。
 
 ```ts
 let kairosEnabled = false

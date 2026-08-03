@@ -10,6 +10,20 @@ image: "/images/posts/claude-code-source-reading-41/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 回答上一篇的问题
+
+Session Memory 保存单会话长期信息以后，memdir 与 Team Memory 如何把记忆扩展到目录和团队范围，并控制共享与注入？
+
+先看作用域边界：**memdir 把长期信息落成项目范围内可审查的 Markdown 目录，Team Memory 只从这个目录划出 `team/` 子树并同步它。** 私有索引、团队索引和主题文件各有路径；注入、上传、下载也各有门槛。
+
+Claude Code 2.1.88 使用一套文件系统协议：私有记忆放在项目对应的 auto-memory 目录，团队记忆放在其 `team/` 子目录；两个作用域各自维护 `MEMORY.md` 索引和主题文件。系统提示词告诉模型怎样选择作用域、怎样写文件，真正进入上下文的内容由索引加载或相关性选择器控制；Session Memory 原文和未选中的主题不会被全量广播。
+
+共享也有明确边界。只有 `team/` 会走远端同步；同步还要同时通过 auto memory、Team Memory 功能开关、第一方 OAuth 和 GitHub remote 等门槛。上传前逐文件扫描密钥，远端文件落盘前检查路径穿越和符号链接逃逸。也就是说，“模型决定这是团队知识”只是第一步，后面还有本地目录边界、认证边界和同步边界。
+
+记忆作用域、上下文注入和共享同步是三条不同控制线。下面先确定目录，再看索引如何限流，最后追踪 pull/watch/push 的冲突与安全处理。
+
+![Claude Code memdir 与 Team Memory 的检索、注入和同步边界](/images/posts/claude-code-source-reading-41/41-memdir-team-memory-handdrawn.png)
+
 ## 本章先建立三个概念
 
 - **记忆索引**：入口文件保存主题摘要和位置，详细内容按需读取，控制启动上下文。
@@ -20,21 +34,7 @@ imagePosition: "left"
 
 ![Memdir 索引与 Team Memory 同步](/images/posts/claude-code-source-reading-41/41-memory-sync-detail-handdrawn.png)
 
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
-## 回答上一篇的问题
-
-Session Memory 保存单会话长期信息以后，memdir 与 Team Memory 如何把记忆扩展到目录和团队范围，并控制共享与注入？
-
-先说答案：**memdir 把“记住了什么”落实为项目范围内可检查的 Markdown 目录，Team Memory 再从这个目录里划出一块共享子目录，并只同步这块子目录。**
-
-Claude Code 2.1.88 使用一套文件系统协议：私有记忆放在项目对应的 auto-memory 目录，团队记忆放在其 `team/` 子目录；两个作用域各自维护 `MEMORY.md` 索引和主题文件。系统提示词告诉模型怎样选择作用域、怎样写文件，真正进入上下文的内容由索引加载或相关性选择器控制；Session Memory 原文和未选中的主题不会被全量广播。
-
-共享也有明确边界。只有 `team/` 会走远端同步；同步还要同时通过 auto memory、Team Memory 功能开关、第一方 OAuth 和 GitHub remote 等门槛。上传前逐文件扫描密钥，远端文件落盘前检查路径穿越和符号链接逃逸。也就是说，“模型决定这是团队知识”只是第一步，后面还有本地目录边界、认证边界和同步边界。
-
-本文仍以仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原的代码为证据边界。为突出主线，下面的源码片段省略了日志、遥测和无关分支；还原路径不代表 Anthropic 内部仓库的原始目录结构。
-
-![Claude Code memdir 与 Team Memory 的检索、注入和同步边界](/images/posts/claude-code-source-reading-41/41-memdir-team-memory-handdrawn.png)
+先区分“存在哪里”“什么时候注入”和“哪些文件可以离开本机”，后面的路径校验和同步语义就不会混在一起。
 
 图里的 `private/` 是为了和 `team/` 对照的**逻辑作用域标签**；磁盘布局把私有索引和主题文件直接放在 memdir 根目录。
 
@@ -169,7 +169,7 @@ combined prompt 把记忆限制为四类：`user`、`feedback`、`project`、`re
 
 ## 注入通过索引与相关记忆两条路径限流
 
-在传统路径里，`getMemoryFiles()` 把私有和团队的两个 `MEMORY.md` 作为 `AutoMem` 与 `TeamMem` 加载。团队索引进入 prompt 时还会包上一层来源标签：
+启动时最先进入上下文的不是所有 topic，而是两个受限的 `MEMORY.md` 入口。传统路径里，`getMemoryFiles()` 把它们标成 `AutoMem` 与 `TeamMem`；团队索引再包上来源标签，提醒模型这是共享线索而非无条件事实。
 
 ```ts
 if (feature('TEAMMEM') && file.type === 'TeamMem') {

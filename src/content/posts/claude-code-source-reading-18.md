@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-18/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **生命周期连接点**：工具、会话、权限和压缩在固定时刻发出事件，Hook 通过这些位置接入。
-
-- **Matcher**：事件名确定大类，matcher 再按工具名、触发原因或通知类型筛选具体调用。
-
-- **控制权等级**：不同事件允许观察、注入上下文、改写输入或阻断流程，能力由核心协议限定。
-
-![Hook 生命周期连接点与控制权等级](/images/posts/claude-code-source-reading-18/18-hook-control-levels-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇最后留下的问题是：当 /compact 进行到一半时，你手动中断，然后再次执行 /compact，你觉得压缩还能继续进行吗？
@@ -38,7 +26,7 @@ session memory 是一个容易混淆的例外。手工 `/compact` 会优先尝�
 
 所以可以把结果分成三种：**传统 compact 被中断：重跑；session memory 已完整落盘：下一次可以复用整份 memory；session memory 只写了一半：不会续写，只会把当前文件当作输入，必要时回退传统摘要。** `/compact` 的语义是“总结会话后继续”，强调的是成功后的新上下文，并不意味着中断请求拥有可恢复的中间状态。
 
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块都是短摘录，`// ...` 只标记被删去的埋点、UI 消息和无关分支；还原路径只用于定位本文引用的源码。
+下文引用的事实都来自 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/`；代码块只保留证明控制流所需的字段，`// ...` 表示省略埋点、UI 消息和无关分支。
 
 一次 Hook 的主路径可以概括为五步：
 
@@ -50,19 +38,21 @@ session memory 是一个容易混淆的例外。手工 `/compact` 会优先尝�
 
 所以，Hook 既能观察，也能改变后续控制流，但能力取决于所在事件。一个 PostToolUse Hook 看见工具结果，不代表它能让已经完成的本地文件写入自动回滚；一个异步 Hook 已经让主流程继续，也不能再用普通同步返回值改写那次工具输入。
 
+## 问题现场
+
+同一个脚本如果只靠提示词提醒，可能被漏掉；如果挂在工具执行前，它就能在副作用发生前看到结构化输入。问题在于，工具、压缩和停止并不是同一个时刻，Hook 必须接入正确的生命周期边界。
+
+![Hook 生命周期连接点与控制权等级](/images/posts/claude-code-source-reading-18/18-hook-control-levels-detail-handdrawn.png)
+
+本文沿着“事件输入 → matcher → 执行器 → 控制结果”追踪 Hook。不同事件拥有不同的输出协议：有的只能观察，有的能改写输入，有的能把模型从停止状态重新唤醒。
+
 ## Hook 用生命周期协议接入运行时
 
-我们先看整条路径。
+调用链从事件调用方开始，而不是从 Hook 脚本开始：运行时构造 `HookInput`，`getHooksConfig()` 合并 settings 来源，matcher 过滤候选，`executeHooks()` 并行运行命中的 command、prompt、agent 或 HTTP Hook，最后由事件专属处理器解释结果。
 
 ![Claude Code Hooks 生命周期、匹配、执行与反馈路径](/images/posts/claude-code-source-reading-18/18-hooks-lifecycle-handdrawn.png)
 
-这里先说明三个概念怎样约束 Hook 的控制范围。
-
-**生命周期节点**是运行时已经知道“现在发生了什么”的边界。例如，`PreToolUse` 位于工具真正执行之前，`PostToolUse` 位于成功结果产生之后，`PreCompact` 位于摘要生成之前，`Stop` 位于 Agent 准备结束本轮时。每个位置决定 Hook 可以观察或改变哪一段后续控制流。
-
-**匹配器（matcher）**决定某一类事件是否交给某组 Hook。工具事件匹配 `tool_name`，压缩事件匹配 `manual / auto`，会话开始匹配 `startup / resume / clear / compact`；Stop 缺少对应查询字段，因此保留该事件的全部 matcher。
-
-**控制输出**是 Hook 对主流程的正式反馈。普通文本、退出码和 JSON 都可以成为输出，但只有被解析成约定字段后，才能稳定表达“拒绝工具”“改输入”“补上下文”或“不要继续”。这套统一事件协议横跨 command、LLM、Agent、HTTP 和 SDK callback。
+事件位置决定控制权：`PreToolUse` 还能改写输入或阻断工具，`PostToolUse` 只能处理已经产生的结果，`PreCompact` 把成功输出变成摘要附加指令，`Stop` 则可以把阻断反馈重新排回 query loop。matcher 先匹配 `tool_name`、`manual/auto` 或 `startup/resume/clear/compact` 等事件字段；退出码和 JSON 只是传输格式，只有被事件处理器解析后才具有 allow、deny、updatedInput 或 continue 的语义。
 
 为什么要这样设计？因为权限、工具执行、压缩和停止分散在不同模块。若每个扩展都直接修改这些模块，安全检查与状态恢复很快会失去统一边界。生命周期协议把外部逻辑放在调用前后，再由核心运行时解释结果，扩展点与主控制流仍然可以分开演进。
 

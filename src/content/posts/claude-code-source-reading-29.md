@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-29/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **语义索引**：LSP server 基于语言语法和项目图提供定义、引用、诊断等结构化结果。
-
-- **文档同步**：didOpen、didChange 与版本号让 server 持有接近编辑器现场的文本视图。
-
-- **诊断证据**：主动查询和 publishDiagnostics 都是辅助证据，Agent 仍需结合文件与测试判断。
-
-![LSP 文档同步与主动被动证据路径](/images/posts/claude-code-source-reading-29/29-lsp-sync-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇最后留下的问题是：为什么在这个版本的代码里，自己编写的 Skill 如果需要作为 Slash 命令使用，就必须把它当作 Plugin 安装？
@@ -90,21 +78,23 @@ Skill 不只是静态说明文字。`createSkillCommand().getPromptForCommand()`
 
 最准确的记忆方式是：**Slash 是调用界面，Skill 是 prompt command，Plugin 是来源与装配边界。**只有组织策略把 `skills` 锁成 Plugin-only，或者 Skill 依赖 Plugin 才能提供的其他组件时，Plugin 才是必要条件；Slash 本身不是。
 
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块都是短摘录，省略了与当前结论无关的日志和分支；还原路径只用于定位本文引用的源码。
+下文事实均来自 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/`；代码块只保留 LSP 路由和状态变化所需的字段。
+
+## 问题现场
+
+字符串搜索能告诉 Agent “这个词出现在哪里”，却不能回答“这个符号最终解析到哪一个定义”。LSP 把这类语义问题交给语言服务器，但它也引入进程启动、文档同步和诊断过期等新状态。
+
+![LSP 文档同步与主动被动证据路径](/images/posts/claude-code-source-reading-29/29-lsp-sync-detail-handdrawn.png)
+
+本文按 LSP 的三个边界展开：插件配置决定 server 路由，Manager 按需完成 JSON-RPC 握手，主动查询和被动诊断分别通过不同的消息通道回到 Agent。
 
 ## LSP 把文件位置映射成语言语义
 
-我们先看整条链路。
+实际调用顺序是 `manager route → spawn → initialize → initialized → didOpen/didChange → request/notification`。LSP server 没有启动或文档同步尚未完成时，Agent 得到的只是连接失败或过期诊断，不是可靠的语义答案。
 
 ![Claude Code LSP 生命周期、主动查询与被动诊断路径](/images/posts/claude-code-source-reading-29/29-lsp-integration-handdrawn.png)
 
-这里先看三个概念怎样决定请求与诊断的时序。
-
-**LSP（Language Server Protocol）**是一套编辑器与语言服务器之间的协议。客户端把“某个文件、某一行、某个字符”的位置发给对应服务器，服务器依据语言语法、类型和项目索引返回定义、引用、悬浮信息和调用关系。
-
-**JSON-RPC**是这条协议的消息外壳。request 携带请求 ID并等待 response；notification 省略请求 ID，也不等待业务结果。`textDocument/definition` 是 request，`textDocument/didChange` 和 `textDocument/publishDiagnostics` 则是两个方向相反的 notification。
-
-**文档同步**解决服务器内存里的文件版本与磁盘内容是否一致。只有先 `didOpen`，后续查询才有可靠的文档对象；文件变化后再发 `didChange`、`didSave`，服务器才能重新分析。notification 发出后，诊断仍会异步计算。
+LSP 把文件、行号和字符位置映射到语言语义；JSON-RPC 中 request 带 ID 等待 response，notification 则只推进状态。`didOpen`/`didChange` 更新 server 的文档视图，`textDocument/definition` 等 request 查询语义，`publishDiagnostics` 异步推送结果。因而诊断与当前文件内容之间存在时序窗口，不能当成编译器最终结果。
 
 Claude Code 需要这套机制，是因为 Grep 可以找到同名字符串，却不知道它是局部变量、重载方法还是接口实现；LSP 能利用语言自己的索引和类型系统回答语义问题。反过来，LSP 也不能替代 Read、编译器和测试：服务器可能没安装、能力不完整、索引未完成，诊断还可能滞后。
 

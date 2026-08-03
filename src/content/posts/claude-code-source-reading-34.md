@@ -10,23 +10,11 @@ image: "/images/posts/claude-code-source-reading-34/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **协议 framing**：text、JSON 与 NDJSON 用不同边界标记一条结果或一串实时事件。
-
-- **stdout 纪律**：无头模式把 stdout 作为机器协议通道，诊断与交互信息需要进入其他出口。
-
-- **Schema-bound result**：JSON Schema 把自然语言任务约束成调用方可验证的结构化结果。
-
-![Headless 模式的 text、JSON 与 stream-json 分帧](/images/posts/claude-code-source-reading-34/34-structured-io-framing-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：**如果想自定义 Claude Code 的快捷键，应该如何实现？**
 
-先给结论：不要去改发布包里的 `DEFAULT_BINDINGS`，而是运行 `/keybindings`，编辑它创建或打开的 `~/.claude/keybindings.json`。2.1.88 的快捷键系统把“配置文件、解析器、上下文和事件拦截器”串成了一条热加载链：保存文件后重新解析，用户绑定追加到默认绑定之后，匹配时优先采用用户配置。
+先抓住写入边界：不要改发布包里的 `DEFAULT_BINDINGS`，运行 `/keybindings`，再编辑它创建或打开的 `~/.claude/keybindings.json`。2.1.88 的实现把文件 watcher、schema 校验、上下文过滤和事件拦截器接成热加载链；用户保存文件后，绑定才会在当前进程重新参与匹配。
 
 ## 先用 `/keybindings` 生成正确的文件
 
@@ -95,6 +83,18 @@ const mergedBindings = [...defaultBindings, ...userParsed]
 
 因此，实际实现步骤就是：运行 `/keybindings` → 选择正确 context 和 action → 用显式修饰键写 chord → 保存 → 看热更新提示 → 必要时用 `/doctor` 修复 warning。这个机制让用户只替换绑定数据，快捷键解析、优先级和事件传播仍由 Claude Code 的统一运行时负责。
 
+## 本章先建立三个概念
+
+- **协议 framing**：`text`、`JSON` 与 `NDJSON` 用不同边界标记一条结果或一串实时事件。
+
+- **stdout 纪律**：无头模式把 stdout 作为机器协议通道，诊断与交互信息必须走其他出口。
+
+- **Schema-bound result**：JSON Schema 把模型输出约束成调用方可验证的结构化结果。
+
+![Headless 模式的 text、JSON 与 stream-json 分帧](/images/posts/claude-code-source-reading-34/34-structured-io-framing-detail-handdrawn.png)
+
+这三个概念把本篇的读法固定下来：先区分界面与协议，再看消息怎样分帧，最后检查结果是否满足 schema。
+
 ## 先补三个概念：Headless、SDK 与 Structured IO
 
 ### Headless 用协议替换交互界面
@@ -128,7 +128,7 @@ export function query(_params: {
 
 ## 入口先决定是否挂载 REPL
 
-主入口很早就判断运行模式：
+同一条命令为什么有时挂 Ink、有时只输出一行 JSON？答案在入口，而不在 `ask()`：主入口先判断 stdout 是否可交互，再决定是否挂载 REPL。
 
 ```ts
 const hasPrintFlag = cliArgs.includes('-p') || cliArgs.includes('--print')

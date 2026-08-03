@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-24/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **上下文隔离**：子 Agent 使用独立窗口读取大文件和执行工具，主会话只接收压缩后的成果。
-
-- **能力委派**：父会话选择子 Agent 的模型、工具、权限和任务说明，形成受限执行范围。
-
-- **结果压缩**：子循环的完整轨迹留在自身上下文，回传内容聚焦结论、证据和后续动作。
-
-![主 Agent 与 Subagent 的上下文和能力边界](/images/posts/claude-code-source-reading-24/24-subagent-boundary-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：在 Claude Code 的执行链路中，tool-use 与 Task 之间是如何关联的？
@@ -69,23 +57,25 @@ runToolUse → 权限检查 → 具体 Tool.call()
 
 因此，不能把“一个 tool-use 就是一个 Task”当成规则。Task 框架还服务于主会话、Dream、远程任务和 teammate 等没有单个模型 `tool_use` 的执行实例；反过来，`TaskStop` 自己也是一次 `tool_use`，但它的作用是根据 `task_id` 找到已有 Task 并调用 `kill()`，不会把停止请求误认为被停止的任务本身。
 
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。外部资料只帮助固定 API 层的 `tool_use/tool_result` 契约和产品层的后台 Agent 语义；两者在 2.1.88 中怎样通过 `toolUseId`、`AppState.tasks` 和通知队列接起来，以本仓库源码为准。
+API 层的 `tool_use/tool_result` 契约与后台 Agent 的产品语义只用于定位问题；`toolUseId`、`AppState.tasks` 和通知队列如何在 2.1.88 接起来，以 `restored-src/` 为准。
 
-## AGENTS.md 与 Agent 定义不是一回事
+## 问题现场
 
-这里先纠正一个容易造成误会的名称：`AGENTS.md` 是面向多个编码 Agent 的项目级说明文件约定，内容通常是仓库结构、开发与测试命令、代码规范、安全限制和协作流程。它更像“给 Agent 的 README”，不是 `.claude/agents/*.md` 里的某个 subagent 定义；后者才会被解析为 `AgentDefinition`，并通过 `subagent_type` 选择。
+把“请检查整个仓库”直接交给主 Agent，会让搜索噪声、临时工具结果和实现细节长期占着主上下文。Subagent 的价值不是多开一个模型，而是把任务、权限和结果回流都切成一条可管理的边界。
 
-对 Claude Code 还要再加一层边界。2.1.88 的 `getMemoryFiles()` 会沿目录向上读取 `CLAUDE.md`、`.claude/CLAUDE.md` 与 `CLAUDE.local.md`，并处理 `.claude/rules/*.md`；`isMemoryFilePath()` 也只把这些路径识别为 memory file。源码没有按文件名自动扫描 `AGENTS.md`，所以仓库里有 `AGENTS.md`，不代表 Claude Code 会直接把它放进上下文。
+![主 Agent 与 Subagent 的上下文和能力边界](/images/posts/claude-code-source-reading-24/24-subagent-boundary-detail-handdrawn.png)
 
-如果团队把通用规则写在 `AGENTS.md`，要让 Claude Code 共用这份内容，通常在 `CLAUDE.md` 中导入：
+本文沿着 `Agent` tool 的调用链展开：定义发现决定角色，Schema 决定委派输入，`runAgent()` 建立独立 query loop，前台和后台路径再选择不同的结果回流方式。
 
-```md
-@AGENTS.md
-```
+## CLAUDE.md 与 Agent 定义不是一回事
 
-或者让 `CLAUDE.md` 符号链接到 `AGENTS.md`。导入后，文件内容才作为项目记忆与指令进入上下文；它影响 Agent 看到的项目约束，但不会创建新的 Agent，也不会改变 AgentDefinition 的 `tools`、`model` 或 `permissionMode`。
+这里先区分两个容易混淆的概念：`CLAUDE.md` 是项目记忆与指令入口，`.claude/agents/*.md` 才是 subagent 角色定义。前者会被 `getMemoryFilesForNestedDirectory()` 按目录和 `.claude/rules/` 装入上下文，后者由 Agent loader 解析成 `AgentDefinition`，再决定 system prompt、`tools`、`model` 和 `permissionMode`。本篇只讨论这条 `CLAUDE.md` 链。
 
-因此，本文后面出现的“项目级指令”“项目上下文”要分两种情况理解：在 Claude Code 源码里，它首先指 `CLAUDE.md`/rules 这条 memory 加载链；如果项目采用 `AGENTS.md` 作为跨工具单一来源，则它必须通过 import 或 symlink 接到这条链上。`.claude/agents/*.md` 仍是另一条 Agent 定义发现链。
+2.1.88 的 `getMemoryFilesForNestedDirectory()` 会按目录处理项目记忆文件：在启用 project settings 时读取当前目录的 `CLAUDE.md` 与 `.claude/CLAUDE.md`，在启用 local settings 时读取 `CLAUDE.local.md`，随后处理 `.claude/rules/*.md`。rules 还分为无条件规则和根据目标路径匹配的条件规则；它们都会进入 memory 文件集合，但是否生效取决于规则匹配结果。
+
+`isMemoryFilePath()` 给出了更直接的判定：任意目录下名为 `CLAUDE.md` 或 `CLAUDE.local.md` 的文件，以及位于 `.claude/rules/` 下的 Markdown 文件，才会被识别为 memory file。`getAllMemoryFilePaths()` 还会把已经读入缓存的这些路径合并进结果。因此，“项目上下文”在源码里指的是这条 CLAUDE.md/rules 加载链；`.claude/agents/*.md` 仍然走另一条 Agent 定义发现链，不会因为内容相似而互相替代。
+
+因此，把规范写进 `CLAUDE.md` 会改变主 Agent 和普通 subagent 看到的项目上下文，却不会新增一个可选角色；只有 `.claude/agents/*.md` 才会进入 `subagent_type` 的候选集合。两条链可以同时生效，但一个提供“在什么仓库规则下工作”，另一个提供“以什么角色、工具和权限工作”。
 
 ## Subagent 运行一条独立的子 Query Loop
 
@@ -670,5 +660,3 @@ Claude Code 中手动创建 sub-agent 的适用时机和最佳实践是什么？
 - [Agent view in Claude Code](https://claude.com/blog/agent-view-in-claude-code)
 
 - [How Claude remembers your project](https://code.claude.com/docs/en/memory)
-
-- [AGENTS.md — a simple, open format for guiding coding agents](https://github.com/agentsmd/agents.md)

@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-16/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **上下文平面**：system prompt、项目指令与消息历史通过不同通道进入同一次模型请求。
-
-- **提示词分层**：稳定规则、动态环境和任务消息按更新频率分层，便于复用与定位来源。
-
-- **缓存边界**：前缀顺序和内容变化决定 prompt cache 的命中范围，分块结构直接影响成本。
-
-![系统提示词、项目上下文与消息历史三条通道](/images/posts/claude-code-source-reading-16/16-context-planes-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：你知道 Claude Code 会用你默认的模型进行 WebSearch 吗？
@@ -32,11 +20,23 @@ imagePosition: "left"
 
 所以更准确的回答是：**默认情况下会使用当前主循环模型，但并不是任何情况下都固定使用默认模型。**
 
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块都是短摘录，省略了与当前结论无关的日志、埋点和实验分支；还原路径只用于定位本文引用的源码。
+本文只引用 `@anthropic-ai/claude-code@2.1.88` 的还原源码。短代码块删去日志、埋点和无关实验分支；`restored-src/` 只用于定位证据，不表示内部仓库原始目录。
+
+## 本章先建立三个概念
+
+- **上下文平面**：system prompt、项目指令与消息历史通过不同通道进入同一次模型请求。
+
+- **提示词分层**：稳定规则、动态环境和任务消息按更新频率分层，便于复用和定位来源。
+
+- **缓存边界**：前缀顺序和内容变化决定 prompt cache 的命中范围，分块结构直接影响成本。
+
+![系统提示词、项目上下文与消息历史三条通道](/images/posts/claude-code-source-reading-16/16-context-planes-detail-handdrawn.png)
+
+这张图把请求前的组装拆成三条通道：稳定 system prompt、按项目变化的 user context，以及有独立 Schema 的工具能力；它们的缓存与更新边界不同。
 
 ## 一次模型请求，其实有三条上下文通道
 
-我们先把主线画出来。
+先看一次请求为什么会出现“同一段 CLAUDE.md 还在，但 cache miss 增多”的现象：系统提示词、项目指令和工具 Schema 并不是一个字符串，它们在不同时间准备、以不同协议注入，前缀顺序一变，缓存命中范围也会变。
 
 ![Claude Code system prompt 与项目上下文组装流程](/images/posts/claude-code-source-reading-16/16-system-prompt-context-handdrawn.png)
 
@@ -48,7 +48,7 @@ imagePosition: "left"
 
 **Tool schema** 是模型能够调用什么工具的机器可读契约，包括名称、描述和输入 JSON Schema。自然语言 prompt 负责使用策略，Schema 负责输入结构，两者分别进入请求。
 
-为什么要分开？最直接的原因是职责不同：稳定 prompt 可以命中缓存，CLAUDE.md 可以作为会话上下文独立注入，工具 Schema 则必须满足 API 的结构化协议。若全部揉成一个字符串，任何 git 状态或工具变化都可能让稳定前缀失去缓存价值，模型也无法得到可靠的输入约束。
+为什么要分开？稳定 prompt 可以保持缓存前缀，CLAUDE.md 可以随着项目层级作为消息上下文补充，工具 Schema 则必须满足 API 的结构化协议。把三者揉成一个字符串，会让一次 git 状态变化或工具变化连带重写稳定前缀，也会丢掉工具输入的机器约束。
 
 ## 第一步：先并行准备三份原料
 
@@ -375,7 +375,7 @@ async function getNestedMemoryAttachments(
 
 下层会先确认目标在允许的 working path 内，再依次处理 Managed/User 条件规则、从 cwd 到目标目录的 CLAUDE.md 与 rules，以及 cwd 层级的条件规则。`loadedNestedMemoryPaths` 是不淘汰的 Set，用于阻止同一文件因 Read 缓存 LRU 淘汰而反复注入。
 
-这就是“动态注入”的准确含义：实际访问路径触发新的 attachment，同时保持初始 system prompt 稳定。深层目录规则只在相关文件进入工作集后出现，从而避免无关项目指令提前占用窗口。
+这就是“动态注入”的准确含义：实际访问路径触发新的 attachment，初始 system prompt 仍保持稳定；深层目录规则只在相关文件进入工作集后出现，避免把无关项目指令提前塞进窗口。动态注入改变的是消息通道，不是默认 prompt 的缓存前缀。
 
 ## 三个容易误判的边界
 

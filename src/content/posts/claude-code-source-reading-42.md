@@ -10,6 +10,18 @@ image: "/images/posts/claude-code-source-reading-42/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 回答上一篇的问题
+
+上一篇留下的问题是：团队记忆能够积累以后，AutoDream 如何在后台挑选素材、生成 Dream，并把结果重新纳入未来会话？
+
+先看触发点：AutoDream 挂在主 Agent 每轮结束后的 `stopHooks`，依次过开关、运行模式、冷却时间、最近有改动的会话数和跨进程锁。只有这些门槛全部通过，系统才注册 `DreamTask` 并启动隔离的 `runForkedAgent()`；它不是常驻定时器，也不是每轮都读取全部 transcript。
+
+它所谓的“挑选素材”分成两层。调度层按 transcript 修改时间找出上次整合后发生变化的会话，并排除当前会话；进入 Dream 后，Agent 先看已有记忆和日志，再按需要窄范围搜索 JSONL transcript。候选顺序由文件时间决定，语义筛选则交给提示词和工具搜索。
+
+后台 Agent 可以自由使用 Read、Grep、Glob，也可以运行只读 Bash；Edit 和 Write 则只能落在 auto-memory 目录。它把新信息合并进 topic 文件，修正过期内容，并把 `MEMORY.md` 维护为短索引。成功时锁文件的 mtime 留作新的“上次整合时间”；失败或用户终止时恢复旧 mtime，让后续会话仍有重试机会。
+
+这些文件在后续会话构建上下文时生效：`loadMemoryPrompt()` 提供记忆规则与目录，`getMemoryFiles()` 读取 `MEMORY.md` 入口，topic 文件再由索引和搜索规则引导按需读取。当前主会话只追加一条“Improved …”系统消息，因此 AutoDream 形成跨会话闭环。
+
 ## 本章先建立三个概念
 
 - **记忆整合任务**：后台 Agent 读取近期记忆，合并重复主题、修正索引并保留可追溯信息。
@@ -20,19 +32,7 @@ imagePosition: "left"
 
 ![AutoDream 的触发门、后台任务与记忆写回](/images/posts/claude-code-source-reading-42/42-dream-gates-detail-handdrawn.png)
 
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
-## 回答上一篇的问题
-
-上一篇留下的问题是：团队记忆能够积累以后，AutoDream 如何在后台挑选素材、生成 Dream，并把结果重新纳入未来会话？
-
-先说结论。AutoDream 挂在主 Agent 每轮结束后的 `stopHooks` 上，依次检查开关、运行模式、距离上次整合的时间、最近有改动的会话数和跨进程锁。门槛全部通过后，它注册一个可见的 `DreamTask`，再用 `runForkedAgent()` 启动隔离的后台 Agent；触发依赖轮次结束，而非固定时刻，素材也按近期变化和窄范围检索获取。
-
-它所谓的“挑选素材”分成两层。调度层按 transcript 修改时间找出上次整合后发生变化的会话，并排除当前会话；进入 Dream 后，Agent 先看已有记忆和日志，再按需要窄范围搜索 JSONL transcript。候选顺序由文件时间决定，语义筛选则交给提示词和工具搜索。
-
-后台 Agent 可以自由使用 Read、Grep、Glob，也可以运行只读 Bash；Edit 和 Write 则只能落在 auto-memory 目录。它把新信息合并进 topic 文件，修正过期内容，并把 `MEMORY.md` 维护为短索引。成功时锁文件的 mtime 留作新的“上次整合时间”；失败或用户终止时恢复旧 mtime，让后续会话仍有重试机会。
-
-这些文件在后续会话构建上下文时生效：`loadMemoryPrompt()` 提供记忆规则与目录，`getMemoryFiles()` 读取 `MEMORY.md` 入口，topic 文件再由索引和搜索规则引导按需读取。当前主会话只追加一条“Improved …”系统消息，因此 AutoDream 形成跨会话闭环。
+先把“何时尝试”“允许谁执行”和“失败后如何释放锁”分开，后文的五道门就不会被误读成一个时间定时器。
 
 ## AutoDream 是带触发门与租约的后台维护
 
@@ -94,6 +94,8 @@ export async function executeAutoDream(
 “24 小时门槛”在主轮次结束并调用 runner 时检查。AutoDream 不创建独立常驻 timer，因此 Claude Code 停止运行期间不会自行唤醒。
 
 ## 五道门决定这次要不要 Dream
+
+五道门不是同一层的重复判断：第一道决定功能是否存在，第二和第三道限制调度频率，第四道选择候选会话，第五道处理跨进程竞争。只有拿到锁之后，模型调用和文件写入才会发生。
 
 ### 第一关：开关和运行模式
 

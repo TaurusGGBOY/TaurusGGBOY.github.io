@@ -14,7 +14,7 @@ imagePosition: "left"
 
 上一篇留下的问题是：**你认为 `WebSearch` 在任何情况下都可以并发执行吗？**
 
-这个问题要分成“工具怎样声明”和“调用是否真的同时运行”两层看。
+这个问题要分成“工具怎样声明”和“调用是否真的同时运行”两层看：前者是调度器的静态输入，后者还受相邻批次、槽位、校验和权限影响。
 
 先看工具声明。`restored-src/src/tools/WebSearchTool/WebSearchTool.ts` 中的 `WebSearchTool` 没有根据输入继续分支，而是把两个能力都固定为 `true`：
 
@@ -33,7 +33,7 @@ isReadOnly() {
 
 还有一层更容易忽略：分组发生在完整执行生命周期之前。`allowed_domains` 和 `blocked_domains` 同时为非空数组时，输入仍能通过结构校验，也会被归入安全批次，但后面的 `validateInput` 会拒绝它。进入批次的 `WebSearch` 还要继续经过 `validateInput`、PreToolUse 和权限决策；只有这些前置关卡放行并真正进入 `tool.call`，才会发起那轮模型请求。
 
-所以准确答案是：**当前源码中的 `WebSearch` 对所有结构合法的输入都声明并发安全，但这不保证每一次调用都会在运行时与其他调用并发，更不保证它一定越过校验和权限进入网络请求。**
+所以准确答案是：**2.1.88 中 `WebSearch` 对结构合法的输入声明并发安全，但只有相邻安全调用且有空闲槽位时才会与其他调用重叠；输入语义、Hook、权限或网络错误都可能让它在真正请求前后停止。**
 
 下面就沿单个工具调用继续看：它完成调度后，还要经过哪些关卡。
 
@@ -47,13 +47,13 @@ isReadOnly() {
 
 ![工具生命周期中的副作用边界与执行证据](/images/posts/claude-code-source-reading-11/11-side-effect-boundary-detail-handdrawn.png)
 
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+这张图按副作用出现的先后排列各道门：名称解析、结构与语义校验、Hook、权限、`tool.call()`，最后才把结果写进 transcript。
 
 ## 先画出一条工具执行流水线
 
-本文仍然只讨论仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原出的代码。
+本文只讨论 `@anthropic-ai/claude-code@2.1.88` source map 还原出的代码。假设模型已经返回一个带 `id`、`name`、`input` 的 `tool_use`，调用从哪里被拦下，决定了你应该检查 Schema、Hook、权限还是实际副作用。
 
-为了把问题缩小，我们只跟踪一个已经出现在 assistant message 里的 `tool_use`。多个工具如何串并行调度，上一篇已经讨论过；这一篇关心的是单个调用进入执行器以后，每一扇门何时打开，何时会把调用拦下来。
+多个工具怎样组成批次，上一篇已经处理；本篇只沿一个调用追踪每道门的顺序，以及错误怎样变成下游可以识别的消息。
 
 ![一次工具调用从 tool_use 走到副作用与持久化](/images/posts/claude-code-source-reading-11/11-tool-execution-lifecycle-handdrawn.png)
 
@@ -63,7 +63,7 @@ isReadOnly() {
 2. `tool.call` 在边界右边，它可能读文件、写文件、执行命令或者请求网络；
 3. progress、`tool_result`、transcript 和 file history 分属不同的数据通道，不能用“工具返回了”一概而论。
 
-下面沿这条路径逐段看源码。为保持片段短小，代码块省略了遥测、日志和与当前结论无关的分支；省略处会明确写成 `// ...`，其余内容均来自 `restored-src/` 下的还原源码。
+下面沿这条路径逐段看源码。代码块删去遥测、日志和无关分支，`// ...` 标出删节；保留下来的函数名、返回值和控制顺序来自 `restored-src/`。
 
 ## 第一扇门：tool_use 先完成名称解析
 

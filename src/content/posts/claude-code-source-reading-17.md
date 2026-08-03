@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-17/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **信息损失预算**：压缩要优先保留目标、约束、未完成工作和关键证据，把可重取内容留在磁盘。
-
-- **语义锚点**：摘要与边界标识连接压缩前后的消息链，使恢复和继续执行仍有稳定坐标。
-
-- **上下文再水化**：压缩后从 CLAUDE.md、auto memory 和技能重新注入持久信息。
-
-![上下文压缩后的信息保留与再水化](/images/posts/claude-code-source-reading-17/17-compaction-rehydration-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：你知道 Claude Code 出现过什么 bug，导致 prompt cache 大规模失效吗？
@@ -40,19 +28,23 @@ imagePosition: "left"
 
 因此，问题的根因不是“Anthropic 的缓存偶尔抽风”，而是 **客户端把同一会话重新编码成了不同的前缀**。排查时不要只看总 token：同时比较相邻请求的 `cache_read_input_tokens`、`cache_creation_input_tokens`、模型 ID、工具列表顺序、system prompt hash 和 resume 前后的 message JSON。若只发生一次且伴随模型/MCP/compact/升级，属于预期失效；若几秒内 resume 就全量重写，优先按恢复序列化或 tool-order regression 定位。
 
+## 问题现场
+
+长会话的故障通常不是模型突然“失忆”，而是下一次请求已经没有空间同时容纳系统提示、工具定义、项目指令、旧消息和本轮输出。Claude Code 要做的不是简单截断，而是把一段仍在运行的消息链迁移到更短的表示，并保证 `queryLoop()` 能从新边界继续。
+
+![上下文压缩后的信息保留与再水化](/images/posts/claude-code-source-reading-17/17-compaction-rehydration-detail-handdrawn.png)
+
+本文的核心判断是：压缩是一次可回退的上下文重建。token 估算决定何时动手，microcompact 和 session memory 决定先丢什么，`buildPostCompactMessages()` 决定哪些状态能够重新接回主循环。
+
 ## 压缩是一场可继续执行的上下文重建
 
-本文只讨论本仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的实现。为了让代码片段聚焦主路径，下面会省略无关 import、日志字段和实验分支；所有片段都直接取自 `restored-src/`。
+证据边界固定在本仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原的 `restored-src/`。阅读时可以把压缩看成一条事务：先算阈值，再生成结果，最后一次性替换消息；中间任何一步失败，旧上下文都应保持可用。
 
 ![Claude Code 上下文压缩流程：阈值判断、摘要生成与消息链重建](/images/posts/claude-code-source-reading-17/17-context-compaction-handdrawn.png)
 
 ### 三个概念如何约束压缩策略
 
-**Context window** 同时容纳输入和输出。Claude Code 还要在其中放入 system prompt、工具定义、CLAUDE.md、附件、`tool_use` 与 `tool_result`，因此触发判断必须以完整请求为对象，而非终端可见的对话轮数。
-
-**Compaction** 用较短表示替换较长历史，服务当前任务续跑。摘要保留用户意图、完成状态、重要文件、错误与下一步；近期消息继续提供逐字证据，transcript 路径则保留回查入口。
-
-**Prompt cache** 依赖连续请求的稳定前缀。压缩会改写消息链，源码因此尽量让摘要 Agent 复用主会话前缀，并在局部压缩时区分保留前缀还是保留后缀。
+请求窗口同时承载输入、输出、system prompt、工具 Schema、`CLAUDE.md`、附件和工具结果，所以 `shouldAutoCompact()` 看的是整次请求的 token 预算，而不是屏幕上有多少轮对话。压缩后的摘要只是可继续执行的表示；需要逐字细节时，系统仍保留 transcript 和文件附件作为回查入口。由于 prompt cache 依赖稳定前缀，任何消息重排都会改变压缩后的缓存边界。
 
 这三个概念放在一起，就能理解实现为何采用结构化重建：简单保留最后 N 条会切断一组 `tool_use` / `tool_result`，丢掉计划模式和已读取文件，也会挤占摘要的生成空间。
 

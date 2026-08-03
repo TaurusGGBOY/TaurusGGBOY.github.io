@@ -10,23 +10,19 @@ image: "/images/posts/claude-code-source-reading-31/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **共享可变状态**：会话、任务和 UI 共同读写的运行数据需要统一所有权和更新入口。
-
-- **Selector**：消费者只订阅所需切片，状态变化时据此决定是否刷新。
-
-- **结构共享**：函数式 updater 复用未变化对象，使引用比较可以快速定位受影响区域。
-
-![AppState 更新、Selector 与结构共享](/images/posts/claude-code-source-reading-31/31-state-selectors-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇最后留下的问题是：**没有开启 Chrome 调试模式时，Claude Code 还能使用 Chrome MCP 吗？**
 
 先给结论：**能，但要先区分 `claude-in-chrome` 和单独的 `chrome-devtools-mcp`。**2.1.88 随 Claude Code 提供的 `claude-in-chrome` 走“浏览器扩展 + Native Messaging/Bridge”这条链路，不把 `--remote-debugging-port` 或 DevTools Protocol 端口作为前置条件。只有当你配置的是另一个直接连接 CDP 的 Chrome DevTools MCP，才需要按那个 server 的连接方式开启远程调试。
+
+## 问题现场
+
+流式消息、权限弹窗、后台任务和外部 MCP 事件会同时改状态。若 React、工具和非 UI 代码各自保存一份副本，终端显示与执行内核迟早会出现分叉；若所有数据都塞进 Context，又会让每个小变化触发整棵树刷新。
+
+![AppState 更新、Selector 与结构共享](/images/posts/claude-code-source-reading-31/31-state-selectors-detail-handdrawn.png)
+
+本文追踪 `createStore()`、`AppStateProvider` 和 selector 的分工：store 负责单一更新入口，Provider 暴露稳定引用，消费者只订阅自己需要的切片。
 
 ## 2.1.88 的 Claude in Chrome 不依赖 Chrome 调试端口
 
@@ -70,17 +66,11 @@ Native host 的运行路径也很直接：`runChromeNativeHost()` 启动 `Chrome
 
 所以排查时先运行 `/chrome`：如果显示扩展未连接，检查扩展、manifest、账户和重启；如果你实际配置的是 `chrome-devtools-mcp`，再去检查它自己的 remote debugging 设置。不能因为后者需要调试端口，就反推 Claude Code 内置 Chrome MCP 也需要。
 
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的代码块只保留证明主路径所需的字段和分支，省略了无关 import、实验字段与日志；还原路径只表示本仓库的恢复组织方式。
+下文引用的 AppState 行为均来自 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/`；代码块只保留共享状态、更新和订阅所需的字段。
 
 ## AppState 围绕“必须共享的状态”建立边界
 
-在看代码以前，先补三个基础概念。
-
-**React Context** 可以把一个值交给整棵组件树，避免从顶层一层层传 props。但如果 Context value 本身频繁变化，所有消费它的组件都可能跟着重新渲染。
-
-**external store** 是 React 组件树外部的一份状态。React 不负责保存它，只通过订阅得知“外部状态变了”，再读取一个 snapshot。`useSyncExternalStore` 是 React 为这种模型提供的标准接入口。
-
-**selector** 是一个从大状态中取小切片的函数，例如 `s => s.tasks`。组件借此只订阅任务表；只要选中的引用不变，其他字段更新就不会触发这个组件重渲染。
+AppState 的调用链是 `setAppState(updater) → createStore.setState() → synchronous listeners → selector snapshot → React render`。Context 只提供稳定 store 引用；真正变化的快照留在 external store，`useSyncExternalStore` 再让组件订阅。selector 取出的切片若保持同一引用，任务更新不会把整个消息列表一起刷新。
 
 把这三件事放在一起，Claude Code 的状态流如下：
 

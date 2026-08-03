@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-22/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **渐进式披露**：会话先加载技能名称与描述，命中任务后再注入完整说明和配套资源。
-
-- **元数据路由**：frontmatter 定义发现方式、调用权限、执行上下文和模型可见性。
-
-- **Inline 与 Fork**：inline 延续主上下文，fork 为任务建立独立上下文并回传摘要。
-
-![Skill 从发现到展开的渐进式披露](/images/posts/claude-code-source-reading-22/22-skill-disclosure-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：如果你在 Claude Code 中输入了一大段文字，然后回到开头在最前面输入 `/` 想选择一个 Skill，为什么这时不会弹出 slash 命令提示？
@@ -61,17 +49,19 @@ function hasCommandWithArguments(
 
 如果要修源码，不能简单地把“有空格就不提示”这一保护删掉：它原本是为了避免用户已经输入命令参数时，Tab/Enter 又选中另一条命令。更准确的修复是以 `cursorOffset` 切出光标处的 `/token`，只对 token 做匹配，并把光标后的原文作为 suffix 保留；这也解释了为什么当前实现会在用户“回到开头”时暴露问题。
 
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面只截取证明控制流所需的真实短代码，省略日志、遥测、实验分支和无关参数；还原路径只用于定位本文引用的源码。
+下文的控制流都以 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 为证据；代码块只保留真实源码中与 Skill 路由有关的字段。
+
+## 问题现场
+
+一份 `SKILL.md` 只有几十行文字，却可能出现在 slash 菜单、模型工具列表和独立 Agent 的 system prompt 中。它真正难的地方不是读取 Markdown，而是同一份文件在不同入口下要有不同的可见性、参数替换和权限边界。
+
+![Skill 从发现到展开的渐进式披露](/images/posts/claude-code-source-reading-22/22-skill-disclosure-detail-handdrawn.png)
+
+本文沿着 Skill 的生命周期阅读：先发现并解析 frontmatter，再生成 prompt command，调用时才展开正文；`context: fork` 只改变后续上下文归属，不改变 Skill 的发现规则。
 
 ## Skill 是可发现、可展开的能力说明
 
-先看三个概念如何共同决定 Skill 的装载成本与执行边界。
-
-**Skill 定义**通常以 `skill-name/SKILL.md` 存在，Markdown 正文描述执行方法，frontmatter 描述名称、适用时机、参数、模型、工具和运行上下文。运行时把它转换成消息送入 Query Loop，或交给子 Agent 运行。
-
-**渐进展开（progressive disclosure）**把常驻成本限制在短目录内，模型选中后再展开一项全文，从而控制 token、注意力占用和 prompt cache 的失效范围。
-
-**PromptCommand** 负责复用输入路由契约：加载器把 Markdown 包装成 `type: 'prompt'` 的 Command，于是 `/pdf`、模型的 `Skill({ skill: 'pdf' })`、插件 Skill 和 bundled Skill 可以共用参数替换、消息包装、权限附件与 fork 逻辑。
+Skill 的 Markdown 只是来源；`loadSkillsFromSkillsDir()` 先找到目录下的 `SKILL.md`，`parseSkillFrontmatterFields()` 把 frontmatter 变成路由与权限元数据，`createSkillCommand()` 再包装成 `type: 'prompt'`。会话常驻的只是名称和描述，`getPromptForCommand()` 在用户输入 `/name` 或模型调用 `Skill` 时才展开正文；`context: fork` 让展开结果进入独立 Agent，其余路径沿当前 query loop 继续。
 
 整条链可以先看成这张图：
 

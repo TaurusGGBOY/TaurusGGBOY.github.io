@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-08/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **三层分块**：网络 data chunk、SSE 协议事件和模型 content block 属于不同粒度，边界由各层协议定义。
-
-- **增量组装**：状态机依据 start、delta 与 stop 事件更新当前块，并在完整边界产出内部消息。
-
-- **Provider adapter**：统一请求语义映射到 Anthropic、Bedrock、Vertex 与 Foundry 各自的认证、模型名和 SDK。
-
-![网络分块、协议事件与模型内容块的三层边界](/images/posts/claude-code-source-reading-08/08-streaming-layers-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：**如果用户刚发完一条消息，却马上发现有问题并打断（例如按 `Esc` / `Ctrl+C`），这条消息还会出现在后面的对话里吗？**
@@ -61,11 +49,21 @@ if (toolUseContext.abortController.signal.reason !== 'interrupt') {
 }
 ```
 
-这和本章原问题呼应：流式网络事件先被组装成内部消息，`content_block_stop` 和 `message_delta` 决定何时可交付；打断只是把这条组装链中止在某个阶段，并不改写“用户输入何时入库”的时机逻辑。
+这和本章原问题呼应：网络事件只有在 `content_block_stop` / `message_delta` 等边界出现后，才会被投影成可交付的内部消息；取消可以中止组装，却不会改变“用户输入先入 transcript”的时机。
 
-本章沿 `restored-src/src/query.ts::queryLoop`、`restored-src/src/services/api/claude.ts::queryModel`、`restored-src/src/services/api/client.ts::getAnthropicClient` 和 `restored-src/src/services/api/withRetry.ts::withRetry` 这条调用链往下看。源码来自 source map 还原出的 2.1.88。
+下面沿 `queryLoop` → `queryModel` → provider client → `withRetry` 追踪请求和响应。源码只支持 2.1.88 的静态调用关系；代码块中的 `// 省略……` 表示删去的无关分支，不是伪代码替代。
 
-为控制篇幅，下面的源码块只摘取能证明当前结论的原始行；`// 省略……` 是本文加入的删节标记，用来表示被移除的无关参数或分支。
+## 本章先建立三个概念
+
+- **三层分块**：网络 data chunk、SSE 协议事件和模型 content block 属于不同粒度，边界由各层协议定义。
+
+- **增量组装**：状态机依据 start、delta 与 stop 事件更新当前块，并在完整边界产出内部消息。
+
+- **Provider adapter**：统一请求语义映射到 Anthropic、Bedrock、Vertex 与 Foundry 各自的认证、模型名和 SDK。
+
+![网络分块、协议事件与模型内容块的三层边界](/images/posts/claude-code-source-reading-08/08-streaming-layers-detail-handdrawn.png)
+
+这张图把传输边界分成三层。网络 chunk 何时到达、SSE 事件如何解析、content block 何时完整，分别由不同状态机负责。
 
 ## 先建立一个简单模型：发送、组装、交还
 

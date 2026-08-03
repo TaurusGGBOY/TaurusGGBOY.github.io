@@ -9,18 +9,6 @@ image: "/images/posts/claude-code-source-reading-03/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **Bootstrap graph**：启动由带依赖关系的初始化步骤组成；认证、信任、配置和 UI 挂载各有前置条件。
-
-- **能力协商**：入口、终端环境和登录状态共同决定本次进程可以暴露哪些能力。
-
-- **信任建立**：工作区信任把磁盘上的项目配置转换成可执行配置，是启动期的重要安全边界。
-
-![Claude Code 启动依赖与信任建立](/images/posts/claude-code-source-reading-03/03-bootstrap-dependencies-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：Claude Code 的 `queryLoop` 算不算 ReAct，它与经典 ReAct 又有什么区别？
@@ -37,11 +25,23 @@ imagePosition: "left"
 
 这也是启动阶段最容易读错的地方。我们在终端里执行的是同一条 `claude` 命令，但 `claude --version`、`claude -p`、普通交互式 REPL 和 `claude remote-control` 并不会走完同一条初始化链路。
 
+## 本章先建立三个概念
+
+- **Bootstrap graph**：启动由带依赖关系的初始化步骤组成；认证、信任、配置和 UI 挂载各有前置条件。
+
+- **能力协商**：入口、终端环境和登录状态共同决定本次进程可以暴露哪些能力。
+
+- **信任建立**：工作区信任把磁盘上的项目配置转换成可执行配置，是启动期的重要安全边界。
+
+![Claude Code 启动依赖与信任建立](/images/posts/claude-code-source-reading-03/03-bootstrap-dependencies-detail-handdrawn.png)
+
+这张图把启动阶段的依赖关系放在一起。后面的每个初始化步骤都要回答：它依赖哪个状态、是否需要信任检查、能否延后到首屏之后。
+
 ## 读启动源码前，先补齐这些基础概念
 
-后文会反复出现 REPL、React、Ink、Host、bootstrap、effect 等术语。如果只把它们当成函数名，很容易看见调用顺序，却不知道 Claude Code 为什么要这样组织。
+启动日志里常见的“等待认证”“加载项目设置”“连接 MCP”并不是同一个阶段。它们分别依赖入口参数、cwd、信任和配置，顺序错了，后续看到的工具池就可能属于另一个项目。
 
-我们先建立一个够用的模型：**操作系统启动一个 Node.js 进程，CLI 根据参数选择运行模式，bootstrap 准备配置与能力，Host 接管输入输出，最后才把用户请求交给 Agent 循环。**
+先记住一条主线：**Node.js 进程先选择运行模式，再把 cwd 和配置变成可信状态，最后由 Host 接管输入并进入 Agent 循环。**
 
 读懂这条链路，需要先认识下面九组概念：
 
@@ -63,9 +63,7 @@ imagePosition: "left"
 
 React 负责根据状态计算界面，renderer 决定结果落到浏览器、原生应用还是终端。Claude Code 使用 Ink 作为终端 renderer，所以后文看到 `<App>`、`<REPL>`、`useEffect()` 和 `root.render()` 时，可以这样理解：组件描述界面结构，state 保存当前状态，Ink 把结果绘制到终端，effect 再处理渲染之外的异步工作。
 
-为什么不按顺序写成一个巨大的启动函数？因为这些工作有三种不同约束。
-
-第一种是依赖约束：配置和 cwd 必须先确定，项目能力才能正确装配。第二种是信任约束：项目内容通过信任检查后才能激活相应能力。第三种是响应速度约束：版本输出走 fast path，首屏之后再完成可延后的后台连接。分阶段初始化、动态导入和 effect 分别落实这些约束。
+为什么不把启动写成一个大函数？因为这里同时有依赖、信任和响应速度三种约束：配置/cwd 决定能力装配，信任决定项目内容能否生效，`--version` 等 fast path 又不应加载完整 UI。分阶段初始化、动态 `import()` 和 effect 分别把这三种约束落到代码里。
 
 因此，阅读后面的启动代码时，可以一直问四个问题：**当前是什么 Host？这一步必须阻塞吗？它依赖的配置已经可信了吗？它准备的是启动环境，还是已经进入了一次请求？** 抓住这四个问题，函数再多也不会失去主线。
 

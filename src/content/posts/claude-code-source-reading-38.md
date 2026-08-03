@@ -10,23 +10,11 @@ image: "/images/posts/claude-code-source-reading-38/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **信号分类**：debug log、event、metric、trace 与用户状态分别服务排错、统计和体验。
-
-- **基数控制**：高基数字段适合事件与 trace，稳定维度适合 metric 标签。
-
-- **关联坐标**：session、prompt、tool use 和 request ID 把多条观测管道连接到同一次执行。
-
-![日志、事件、指标与 trace 的关联坐标](/images/posts/claude-code-source-reading-38/38-observability-signals-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：**Claude Code 的服务器在整个远程流程中究竟承担什么作用？**
 
-先给结论：在 Remote Control 中，服务器更像“控制面”，而不是“执行面”。它负责把本地环境注册成可发现的 worker，为环境和会话分配身份，调度待处理的 work，转发双向消息，维护认证、确认和租约；真正运行 Agent 循环、调用模型、读取文件、执行 Bash、访问 MCP 的仍是本地 Claude Code 进程。远端网页或手机只是控制与展示端，能否看到会话不等于获得了本地 shell。
+先看一条 prompt 的去向：Remote Control 服务器把本地环境注册成 worker，为 environment 和 session 分配身份，调度 work，转发事件并维护 lease；它不运行本地 query loop。模型请求由本地进程按当前 provider 发出，`Read`、`Bash`、MCP 和权限检查也留在本地；远端页面只是控制与展示端。
 
 这里的“服务器”容易和另外两个概念混在一起：
 
@@ -37,6 +25,18 @@ imagePosition: "left"
 | Bridge/worker 进程 | 用户的本地机器 | 保持工作目录、运行 query loop，启动工具和 MCP，连接远端服务 | 是 |
 
 因此，`claude remote-control` 即使被文档称作 server mode，启动的也是本地 worker；它是在等待远端 work 的执行端，不是把项目目录搬到云端的服务器。Remote Control 和 Claude Code on the web 也不是同一条部署路径：后者可以把执行环境放在云端，而前者的关键承诺是继续使用这台本地机器。
+
+## 本章先建立三个概念
+
+- **信号分类**：debug log、event、metric、trace 与用户状态分别服务排错、统计和体验。
+
+- **基数控制**：高基数字段适合 event 与 trace，稳定维度适合 metric 标签。
+
+- **关联坐标**：session、prompt、tool use 和 request ID 把多条观测管道连接到同一次执行。
+
+![日志、事件、指标与 trace 的关联坐标](/images/posts/claude-code-source-reading-38/38-observability-signals-detail-handdrawn.png)
+
+先把“执行事实”“观测信号”和“用户可见状态”分开，后面的五本账才不会互相替代。
 
 ## 服务器参与的完整流程
 
@@ -98,7 +98,7 @@ imagePosition: "left"
 
 ## 第一层：debug log 是本地排错现场
 
-Claude Code 的 `logForDebugging()` 先检查日志级别，再检查 debug 模式、测试环境以及 `--debug=pattern` 过滤器，通过后才写文件。
+遇到 API request id 或 sandbox 错误时，先看 debug log，而不是先查 metrics。`logForDebugging()` 先检查测试环境、debug 开关和 `--debug=pattern` 过滤器，消息通过后才进入 writer；这条路径故意保留更多现场细节。
 
 ```ts
 function shouldLogDebugMessage(message: string): boolean {

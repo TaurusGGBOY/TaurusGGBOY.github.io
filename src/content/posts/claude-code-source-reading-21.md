@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-21/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **显式路由**：斜杠命令把用户意图直接交给已注册 handler，绕开自然语言工具选择。
-
-- **Handler 类型**：本地执行、提示词展开和运行时控制拥有不同输入输出与权限边界。
-
-- **能力裁剪**：交互、无头和远程宿主按可承接能力过滤命令集合。
-
-![命令解析、查找与 handler 路由](/images/posts/claude-code-source-reading-21/21-command-routing-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：你知道 Claude Code 中 `/branch`、`/fork` 和 `/new` 的区别吗？
@@ -44,11 +32,17 @@ imagePosition: "left"
 
 本文继续限定在 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码。还原路径用于定位证据，不代表 Anthropic 内部仓库的原始目录结构。下面只摘录能证明控制流的真实短代码，省略无关字段、遥测和实验分支。
 
+## 问题现场
+
+用户输入同样以 `/` 开头，可能是本地清理、提示词模板，也可能是需要进入 query loop 的运行时操作。若所有命令都走同一条字符串替换路径，权限、参数和无头模式的边界都会变得模糊。
+
+![命令解析、查找与 handler 路由](/images/posts/claude-code-source-reading-21/21-command-routing-detail-handdrawn.png)
+
+本文只追踪命令真正改变执行流程的地方：注册表如何合并来源，解析器如何得到命令名和参数，以及 handler 如何决定调用本地逻辑、展开 prompt 或提交查询。
+
 ## Command 首先是一种显式路由
 
-在普通 CLI 程序里，command 往往指 `git commit` 这种进程启动参数。Claude Code 的 Command 系统处理的是 REPL 内部的 `/name args`：进程已经启动，会话也已经存在，用户只是要求当前运行时切换到另一条处理路径。
-
-斜杠命令需要访问当前消息历史、权限上下文、模型选择、MCP 连接、React 状态和恢复函数；执行完以后，有的返回文本，有的修改本地状态，有的再发起一次模型查询。因此，它由 REPL 内部路由表承接，与顶层 CLI 参数解析器分工。
+这里的 command 不是进程启动参数，而是 REPL 中的 `/name args` 路由。`loadAllCommands()` 把内置、Skill、Plugin 和 MCP prompt 合并成注册表；解析器只切出命令名和原始参数，真正的 handler 才决定是否读取会话状态、修改本地缓存或再次进入 query loop。这样 `/clear`、`/review` 和 `/mcp__server__prompt` 共用输入语法，却不会共用副作用边界。
 
 源码用一个判别联合把三种控制权写进类型：
 
@@ -258,7 +252,7 @@ export function getCommandName(cmd: CommandBase): string {
 
 ## 三类 handler 决定消息是否进入 Query Loop
 
-命中 Command 后，`getMessagesForSlashCommand()` 使用 `switch (command.type)` 做最终分派。我们先看最容易理解的 `local`：
+命中 Command 后，`getMessagesForSlashCommand()` 使用 `switch (command.type)` 做最终分派。先看最容易理解的 `local`：
 
 ```ts
 case 'local': {

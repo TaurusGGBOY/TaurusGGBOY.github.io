@@ -9,23 +9,11 @@ image: "/images/posts/claude-code-source-reading-09/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **能力契约**：工具名称、输入 Schema、权限检查、执行函数和结果映射共同定义可调用能力。
-
-- **双层校验**：结构校验确认输入形状，语义校验结合当前项目和调用上下文判断可执行性。
-
-- **注册表快照**：每轮请求使用当前会话装配出的工具集合，扩展来源在进入模型前被规范化。
-
-![工具契约从 Schema 到执行结果的闭环](/images/posts/claude-code-source-reading-09/09-tool-contract-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：**你知道 Beta 开关打开的时候有什么新功能吗？**
 
-源码把 Beta 表达为一组随请求发送的能力声明，最终组合成 `betas` 数组；具体 header 由 provider、模型、功能开关和运行模式共同决定。
+用户看到的是一个开关，服务端收到的却是一组按 provider、模型和运行模式计算出的 `betas` header。开关只解除发送限制，不能单独决定某个能力是否进入请求；每项 Beta 还要通过自己的模型与运行条件。
 
 控制第一方实验 Beta 的环境变量是禁用开关 `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`。它未设置或取 falsy 值时，第一方实验 Beta 才允许进入请求：
 
@@ -110,13 +98,25 @@ export function getToolSearchBetaHeader(): string {
 
 源码还保留了 `ANTHROPIC_BETAS` 作为显式用户输入：它会按逗号切分、去掉空白后追加到自动计算的数组。SDK 传入的 Beta 则会先经过 allowlist；当前源码只允许 API key 用户传 `context-1m-2025-08-07`，订阅用户或其他未允许值会被忽略并打印 warning。自动 Beta 来自能力判断，用户 Beta 来自环境变量或 SDK，两条入口在合并前采用不同校验。
 
-因此，“Beta 开关打开有什么新功能”更准确的答案是：**它解除一部分第一方实验能力的发送限制，随后 Claude Code 再按模型、provider 和运行模式逐项组合请求能力。**
+因此，“Beta 开关打开有什么新功能”更准确的答案是：**它解除一部分第一方实验能力的发送限制；真正发出的能力由 `getMergedBetas()` 根据模型、provider、运行模式和 feature gate 逐项组合。**
 
 本文仍以仓库中从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。为了突出主线，下面的源码片段会省略无关字段、日志和错误上报分支；省略处不改变本文讨论的控制流。
 
+## 本章先建立三个概念
+
+- **能力契约**：工具名称、输入 Schema、权限检查、执行函数和结果映射共同定义可调用能力。
+
+- **双层校验**：结构校验确认输入形状，语义校验结合当前项目和调用上下文判断可执行性。
+
+- **注册表快照**：每轮请求使用当前会话装配出的工具集合，扩展来源在进入模型前被规范化。
+
+![工具契约从 Schema 到执行结果的闭环](/images/posts/claude-code-source-reading-09/09-tool-contract-detail-handdrawn.png)
+
+这张图把工具生命周期压缩成一条链：注册表提供契约，`tool_use` 按名称取回对象，输入先校验，权限通过后才允许副作用。
+
 ## 先建立一个简单模型
 
-我们可以先把整个过程压缩成两步：
+把工具从声明带到执行，关键只有两个交接点：
 
 1. 在请求发出前，把内置工具、MCP 工具以及插件带来的 MCP 工具整理成一个可用工具池，并把契约发给模型。
 2. 模型返回 `tool_use` 后，用同一批工具做名称匹配和输入校验，得到可以进入执行阶段的具体对象。

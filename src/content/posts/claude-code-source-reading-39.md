@@ -10,6 +10,24 @@ image: "/images/posts/claude-code-source-reading-39/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
+## 回答上一篇的问题
+
+观测系统能够看见运行状态以后，Claude Code 如何检查更新、执行迁移，并引导新用户完成首次启动与环境准备？
+
+先看启动顺序。它把兼容性拆成三条链：先迁移旧状态，再按安装归属更新可执行程序，最后在交互入口完成 onboarding 与 workspace trust；三条链各自有失败边界，不会拿默认值覆盖旧认证。
+
+第一条是**版本兼容链路**。CLI 在命令执行前读取全局配置；`migrationVersion !== 11` 时依次运行同步迁移，最后写入新版本标记。标记只有整组迁移完成才更新，下次启动才会跳过。
+
+第二条是**更新链路**。更新器先读取 `latest` 或 `stable` 渠道，再识别当前究竟是 native、npm local、npm global，还是由 Homebrew、winget、apk 等包管理器托管。前几类可以走各自的安装器；包管理器托管的安装只提示正确命令，不越权替用户修改系统包。
+
+第三条是**交互式首次启动链路**。交互模式进入 onboarding 和 workspace trust：先完成主题、认证、安全说明、可选终端配置，再确认当前目录是否可信。`claude -p` 跳过这些对话框，并把目录信任责任交给自动化调用方。
+
+这三条链路共同维持向后兼容：迁移旧状态，更新可执行程序，再让用户明确接受新环境的认证与信任边界。任何一条失败，都不应该把旧配置悄悄覆盖掉。
+
+这三条链的共同约束是“旧状态可读、失败可重试、边界需确认”。下面从启动时的状态模型开始，看迁移、更新和信任怎样互相卡位。
+
+![Claude Code 更新、迁移、Onboarding 与 Workspace Trust 的启动兼容链路](/images/posts/claude-code-source-reading-39/39-updates-migrations-onboarding-handdrawn.png)
+
 ## 本章先建立三个概念
 
 - **幂等迁移**：迁移先识别目标状态，重复执行仍得到同一结果，适配中断与多版本跳跃。
@@ -20,25 +38,7 @@ imagePosition: "left"
 
 ![迁移、更新 staging 与版本切换](/images/posts/claude-code-source-reading-39/39-update-staging-detail-handdrawn.png)
 
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
-## 回答上一篇的问题
-
-观测系统能够看见运行状态以后，Claude Code 如何检查更新、执行迁移，并引导新用户完成首次启动与环境准备？
-
-答案是：它把启动兼容拆成三条彼此衔接、失败边界不同的链路。
-
-第一条是**版本兼容链路**。CLI 在命令执行前读取全局配置；`migrationVersion !== 11` 时依次运行同步迁移，最后写入新版本标记。已经写过标记的环境，下次启动直接跳过整组同步迁移。
-
-第二条是**更新链路**。更新器先读取 `latest` 或 `stable` 渠道，再识别当前究竟是 native、npm local、npm global，还是由 Homebrew、winget、apk 等包管理器托管。前几类可以走各自的安装器；包管理器托管的安装只提示正确命令，不越权替用户修改系统包。
-
-第三条是**交互式首次启动链路**。交互模式进入 onboarding 和 workspace trust：先完成主题、认证、安全说明、可选终端配置，再确认当前目录是否可信。`claude -p` 跳过这些对话框，并把目录信任责任交给自动化调用方。
-
-这三条链路共同维持向后兼容：迁移旧状态，更新可执行程序，再让用户明确接受新环境的认证与信任边界。任何一条失败，都不应该把旧配置悄悄覆盖掉。
-
-本文仍以仓库中由 `@anthropic-ai/claude-code@2.1.88` source map 还原出的代码为边界。为突出主线，下面的源码片段省略了日志、遥测和无关分支；还原路径不代表 Anthropic 内部仓库的原始目录结构。
-
-![Claude Code 更新、迁移、Onboarding 与 Workspace Trust 的启动兼容链路](/images/posts/claude-code-source-reading-39/39-updates-migrations-onboarding-handdrawn.png)
+先区分“数据已经迁移”“新二进制已经就绪”和“用户已经信任目录”这三个状态，后文的函数分支就有了清晰的先后关系。
 
 ## 先建立一个简单模型：状态、动作和门槛
 
@@ -66,7 +66,7 @@ imagePosition: "left"
 
 ## 迁移为什么要在命令执行前完成
 
-`runMigrations()` 位于 `restored-src/src/main.tsx` 的 Commander `preAction` 阶段。默认 REPL 和后续子命令都会在读取新配置语义前经过同一组版本迁移。
+如果迁移放在命令执行后，子命令会先按旧字段解释配置，随后才被迫切换语义。`runMigrations()` 位于 `restored-src/src/main.tsx` 的 Commander `preAction` 阶段，默认 REPL 和后续子命令都先经过同一组迁移。
 
 ```ts
 const CURRENT_MIGRATION_VERSION = 11

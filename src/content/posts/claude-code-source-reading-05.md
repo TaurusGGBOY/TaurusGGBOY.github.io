@@ -9,18 +9,6 @@ image: "/images/posts/claude-code-source-reading-05/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **会话作用域状态**：模型、权限上下文、文件读取状态与成本计数跨 turn 保留，同时受会话边界约束。
-
-- **事件投影**：同一内部事件会按 REPL、SDK 和 transcript 的需要映射成不同外部形态。
-
-- **消费背压**：异步生成器让宿主按消费速度读取模型与工具事件，避免把整轮结果一次堆入内存。
-
-![QueryEngine 的会话状态与事件投影](/images/posts/claude-code-source-reading-05/05-query-engine-state-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇的问题是：当代码需要结合 Claude Code 时，到底应该直接调用 `claude -p`，还是使用 Claude Agent SDK；分别在什么场景下使用它们？
@@ -51,11 +39,25 @@ imagePosition: "left"
 
 回答完选型问题，我们正好可以进入本篇的核心：无论输入来自 `claude -p` 还是 SDK，Claude Code 为什么还需要一个 `QueryEngine`，把宿主配置、会话状态、Agent 事件和最终结果收进同一个边界？
 
+## 本章先建立三个概念
+
+- **会话作用域状态**：模型、权限上下文、文件读取状态与成本计数跨 turn 保留，同时受会话边界约束。
+
+- **事件投影**：同一内部事件会按 REPL、SDK 和 transcript 的需要映射成不同外部形态。
+
+- **消费背压**：异步生成器让宿主按消费速度读取模型与工具事件，避免把整轮结果一次堆入内存。
+
+![QueryEngine 的会话状态与事件投影](/images/posts/claude-code-source-reading-05/05-query-engine-state-detail-handdrawn.png)
+
+这张图标出 `QueryEngine` 的边界：左边是宿主反复提交的输入和控制消息，右边是可消费的 SDK 事件；消息、文件缓存和 usage 留在中间的会话里。
+
 ## QueryEngine 先解决什么问题
 
-本文继续以 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码为边界。这个版本中的 `QueryEngine` 服务 headless/SDK 路径；交互式 REPL 仍直接调用 `query()`，不能把它描述成所有运行模式统一使用的会话类。
+`claude -p` 的调用方常见一个故障：第一轮能拿到结果，第二轮却丢了文件读取状态或权限拒绝记录。原因通常不是模型，而是宿主没有持有正确的会话对象。
 
-我们先建立一个简单模型：`query()` 负责运行一次 Agent 循环，`QueryEngine` 则负责让这个循环能够被外部程序反复调用，并把内部消息转换成稳定的 SDK 事件。
+本文以 `@anthropic-ai/claude-code@2.1.88` 还原源码为边界。这个版本中，`QueryEngine` 服务 headless/SDK 路径，交互式 REPL 仍直接调用 `query()`；前者是会话状态壳，后者才是一次 Agent 循环。
+
+`query()` 负责把当前消息跑完，`QueryEngine` 负责让外部程序反复提交 turn、保存跨 turn 状态，并把内部事件投影成 SDK 能消费的协议。
 
 ![QueryEngine 会话状态与事件边界手绘图](/images/posts/claude-code-source-reading-05/05-query-engine-handdrawn.png)
 

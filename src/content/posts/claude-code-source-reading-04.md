@@ -9,18 +9,6 @@ image: "/images/posts/claude-code-source-reading-04/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **Host adapter**：把终端、SDK 或远程控制端的输入输出翻译成 Query Core 的统一事件。
-
-- **交互契约**：宿主是否能弹窗、持续渲染和接收回调，会直接改变权限与输出协议。
-
-- **传输与执行解耦**：连接负责搬运结构化消息，Agent 循环继续在选定的执行端运行。
-
-![多种宿主如何复用同一运行时](/images/posts/claude-code-source-reading-04/04-host-adapters-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇最后留下的问题来自一个很具体的命令：`claude -p`。当它无法像普通 REPL 一样停下来与用户交互时，工具权限由谁决定；而对 Claude Code 来说，带 `-p` 与不带 `-p`，究竟只是输出形式不同，还是运行模式已经变了？
@@ -51,11 +39,23 @@ imagePosition: "left"
 
 本篇继续只讨论 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码。下面的片段省略了与当前机制无关的参数和分支，函数名、关键取值与调用关系保持不变。
 
+## 本章先建立三个概念
+
+- **Host adapter**：把终端、SDK 或远程控制端的输入输出翻译成 Query Core 的统一事件。
+
+- **交互契约**：宿主是否能弹窗、持续渲染和接收回调，会直接改变权限与输出协议。
+
+- **传输与执行解耦**：连接负责搬运结构化消息，Agent 循环继续在选定的执行端运行。
+
+![多种宿主如何复用同一运行时](/images/posts/claude-code-source-reading-04/04-host-adapters-detail-handdrawn.png)
+
+这张图只保留两个问题：输入和权限由谁提供，Agent 循环在哪里运行。入口名称不同，最终都是这两个问题的不同组合。
+
 ## 这些入口对应 Claude 的什么功能
 
-如果只看源码名称，很容易把 CLI、SDK、Bridge 和 direct-connect 想成六个并列产品。实际上，用户能看到的是终端、自动化 SDK、Remote Control 等产品功能；Bridge 和 direct-connect 更多是藏在产品背后的运行机制。
+同一个 `claude` 命令可以挂终端、stdin、SDK、MCP 或 Remote Control。出问题时，先问“谁接收输入、谁弹权限、谁运行 Agent”，比按入口名称猜是否共享内核更可靠。
 
-先把它们放回真实使用场景：
+下表把用户可见的入口和源码中的宿主/传输组合对齐：
 
 | 本文名称 | 用户在哪里遇到 | 解决什么问题 | 在 2.1.88 源码中的位置 |
 |---|---|---|---|
@@ -79,7 +79,7 @@ direct-connect 的边界还要更谨慎。2.1.88 客户端源码明确识别 `cc
 1. 输入和权限决定从哪里来？可能来自本地键盘、stdin、SDK 控制消息、WebSocket，或者 MCP 请求。
 2. Agent 循环在哪里运行？可能就在当前进程，也可能在 Bridge 拉起的子进程或远端 server；MCP server 则根本不运行它。
 
-这样一来，CLI、SDK、Bridge 和 direct-connect 就不再是一排互不相关的产品名，而是几种不同的宿主与传输组合。
+这样一来，CLI、SDK、Bridge 和 direct-connect 是几种宿主与传输组合，而不是六套 Agent。决定行为的关键点是输入/权限来源和循环所在进程；传输本身只负责把结构化消息送到那条循环。
 
 ![Claude Code 多入口与共享内核手绘图](/images/posts/claude-code-source-reading-04/04-runtime-modes-handdrawn.png)
 

@@ -41,7 +41,7 @@ if (estimatedTokens > maxTokens) {
 
 在本轮没有现成压缩结果，且 reactive compact / context collapse 没有接管恢复等条件同时成立时，本地 blocking-limit 预检可以在请求前生成内容为 `Prompt is too long` 的 assistant 错误消息，并以 `blocking_limit` 结束。请求已经发出时，API 也可能返回 `prompt is too long` 或图片媒体限制错误。启用相应功能后，API prompt-too-long 可以先尝试 context collapse，再尝试 reactive compact；媒体限制错误则跳过 collapse，交给 reactive compact 的 strip-retry。可见的常规摘要流路径会用 `stripImagesFromMessages()` 把图片 / 文档块替换成 `[image]` / `[document]`，但 reactive compact 模块本体没有出现在还原源码中，不能断言每条构建路径都会这样处理。恢复成功就不会把错误暴露为最终失败；恢复仍失败，API 上下文错误才以 `prompt_too_long` 结束，媒体错误则以 `image_error` 结束。
 
-所以最准确的回答是：**大图通常先被处理；空文件、未兜底的读取异常或 `ImageResizeError` 会在 `tool.call` 内失败，token-budget 压缩异常却可能只退回原图；Read 成功后才让总上下文超限，错误发生在下一轮模型请求，而且 query loop 还可能先自动恢复。权限 allow 只表示允许尝试工具，不保证工具产出的内容一定能被下一轮模型完整接收。**
+所以要把失败点标在时间线上：空文件、未兜底的读取异常或 `ImageResizeError` 属于 `tool.call`；Read 成功后，图片与历史合并才可能在下一轮模型请求触发上下文错误，query loop 还可能先做 collapse/compact。权限 `allow` 只表示允许尝试工具，不承诺结果一定能装进后续 prompt。
 
 这个例子先划清了失败边界。接下来回到本章主题：在抵达 `tool.call` 之前，权限引擎怎样决定一次调用能不能越过这条边界？
 
@@ -55,13 +55,13 @@ if (estimatedTokens > maxTokens) {
 
 ![权限规则优先级与调用上下文](/images/posts/claude-code-source-reading-12/12-policy-lattice-detail-handdrawn.png)
 
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
+这张图把权限判断的返回值接到执行边界：规则和 Hook 可能改写输入，宿主只能决定 `ask`，只有最终的 `allow` 才能进入 `tool.call()`。
 
 ## 权限引擎逐次判断具体工具输入
 
-本文仍然只讨论 `@anthropic-ai/claude-code@2.1.88` source map 还原出的可见源码。还原目录便于追踪符号和调用关系，但不能视为 Anthropic 内部仓库的原始目录，也不能把功能开关后的分支当成所有用户都会运行的默认行为。
+本文只引用 `@anthropic-ai/claude-code@2.1.88` 的可见源码；`restored-src/` 是定位证据的路径，不等同于内部仓库结构，也不意味着每个 feature-gated 分支都默认启用。
 
-先说本章主线：**规则、模式、Hook 和宿主响应按一条有明确阻断顺序的流水线合并，deny、ask、工具检查和 allow 各有固定位置。** 模型输入先经过 Schema 和工具业务校验，随后运行 `PreToolUse` Hook。Hook 可以拒绝、要求询问或改写输入；其 `allow` 结果仍要继续经过 deny、ask、路径 / 命令约束和 bypass-immune safety check。前置检查通过后，permission mode 和 allow 规则才可能产出 `allow`；仍为 `ask` 时，`canUseTool` 再把决定交给交互式 REPL、SDK 宿主或自定义 permission prompt tool。
+主线是一条有顺序的流水线：Schema 和工具业务校验先确认输入，`PreToolUse` Hook 可拒绝、询问或改写，deny/ask/路径与安全检查继续收敛，仍未决的 `ask` 才交给 REPL、SDK 或自定义 permission prompt tool。只有最终 `allow` 能越过 `tool.call()` 的副作用边界。
 
 所以这条链路可以先记成一句话：**先让强约束阻断，再让模式与规则放行，最后才把无法自动决定的部分交给人或宿主。**
 
@@ -71,7 +71,7 @@ if (estimatedTokens > maxTokens) {
 
 ![Claude Code 权限决策流水线手绘图](/images/posts/claude-code-source-reading-12/12-permission-engine-handdrawn.png)
 
-图里最值得注意的是两点。第一，Hook 位于权限确认之前，改过的输入会重新进入权限链。第二，`ask` 只把决定转交宿主；宿主未返回 allow 时不会进入 `tool.call()`。
+图里有两条控制线。第一，Hook 位于权限确认之前，改过的输入会重新进入权限链。第二，`ask` 只把决定转交宿主；宿主未返回 allow 时不会进入 `tool.call()`。
 
 后文的源码片段都来自 `restored-src/`。为了突出决策顺序，我会省略日志、遥测、分类器细节和与当前结论无关的分支；函数名、关键条件和返回值保持与 2.1.88 可见源码一致。
 
@@ -226,7 +226,7 @@ async function hasPermissionsToUseToolInner(
 
 权限判决不只回答“能不能执行”，还可以携带一个经过 Hook、工具检查或宿主确认修改后的 `updatedInput`。它的类型是 `Input | undefined`：有值时代表后续执行应使用的新对象，`undefined` 则表示保留当前已经处理过的输入。
 
-这个字段有几种来源。工具自己的 `checkPermissions()` 可以在放行时返回 `updatedInput`；例如文件权限检查在 `acceptEdits` 或命中 allow 规则时会把当前 `input` 原样带回。PreToolUse Hook 也可以返回新的输入：有 `allow` / `ask` 判决时放进 `PermissionResult`，只有修改输入而不直接裁决时，则以 `hookUpdatedInput` 事件先改写 `processedInput`，再进入正常权限链。宿主 `canUseTool` 返回的 allow 结果同样可以带回 `updatedInput`，用于承接用户或 SDK 对参数的确认与修正。
+这个字段有几种来源，顺序不能混淆。工具自己的 `checkPermissions()` 可以在放行时返回 `updatedInput`；PreToolUse Hook 可以先发 `hookUpdatedInput` 改写 `processedInput`，也可以在 `PermissionResult` 中附带输入；宿主 `canUseTool` 的 allow 结果还可以携带用户或 SDK 修正后的对象。每次改写都要重新进入后续规则，不能把“改过输入”理解成“已经授权”。
 
 通用权限层不会假设每个 `PermissionResult` 变体都有这个字段。`bypassPermissions` 或工具级 allow 需要把工具检查结果包装成最终 allow 时，会调用 `getUpdatedInputOrFallback()`：只有对象里确实有 `updatedInput` 且值不是 `undefined` 才采用它，否则回退到原始 `input`。因此，`undefined` 是“沿用已有输入”，不是“把输入变成空对象”。SDK permission prompt 的 allow Schema 要求一个 record；移动端为满足 Schema 传回的 `{}`，还会在兼容分支中被解释为“使用原始输入”。
 
@@ -245,7 +245,7 @@ if (permissionDecision.updatedInput !== undefined) {
 const result = await tool.call(callInput, toolUseContext, ...)
 ```
 
-所以，`updatedInput` 不是一个附加日志字段，而是“权限链允许执行哪一份输入”的数据通道。它可以让 Hook、规则检查或宿主在副作用发生前修正参数，但最终仍要经过统一的 allow/ask/deny 判决；只有 allow 分支会把它带到 `tool.call()`。
+所以，`updatedInput` 是权限链到执行器的数据通道，不是附加日志。它的生命周期可以写成 `input → Hook/工具检查改写 → 规则与宿主裁决 → callInput → tool.call()`；任一阶段返回 `undefined` 都沿用上一份对象，只有最终 allow 才会把它带过副作用边界。
 
 ## permission mode 改变未决请求的处理方式
 

@@ -10,23 +10,11 @@ image: "/images/posts/claude-code-source-reading-47/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **反馈通道**：生成前样式、运行中通知和跨 Agent 消息分别作用于表达、注意力与协作。
-
-- **Mailbox 投递**：地址解析、队列和空闲唤醒把消息送到目标会话的下一次可执行时刻。
-
-- **呈现策略**：Output Style 修改系统提示词中的表达约束，宿主再决定终端、SDK 或系统通知的载体。
-
-![Output Style、Notification 与 Mailbox 三条反馈通道](/images/posts/claude-code-source-reading-47/47-feedback-channels-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 文档与建议生成以后，Claude Code 如何通过通知、mailbox 与 output style 把结果送到正确的人、Agent 和界面，并完成整个运行闭环？
 
-先说结论：**Claude Code 把表达、投递和提醒拆成三个正交问题，并为每一层保留独立的确认语义。**
+先把“结果送给谁”拆成三个问题：**Claude Code 分开处理表达、投递和提醒，并为每一层保留自己的确认语义。** Output Style 在生成前约束模型怎样说；mailbox 负责内容或控制消息何时到目标 Agent；notification 只负责把注意力拉回终端或外部 Hook。
 
 `output style` 在模型推理前进入 system prompt，决定 Claude 应该怎样组织回答；mailbox 保存“谁发给谁”的内容或控制消息，并在目标 Agent 可以接收时进入下一轮；notification 面向人，负责把“该回来看看了”送到 TUI、终端或 Hook。真正的回答仍由当前运行宿主承接：交互式会话交给 REPL 渲染，`-p` 与 SDK 则写成 text、JSON 或 `stream-json`。
 
@@ -34,9 +22,19 @@ imagePosition: "left"
 
 如果把整条链路压缩成一句话，就是：**先用 output style 约束“怎么说”，再由 Query Loop 产生内容；内容按当前宿主送往 TUI 或 SDK，跨 Agent 内容按地址进入 mailbox；需要唤回人的事件另走 notification；人或 Agent 的下一次输入再进入同一套循环。**
 
-## 三种反馈通道，解决三个不同问题
+## 本章先建立三个概念
 
-本文仍以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码片段只保留证明控制流所需的分支，省略日志、遥测和无关参数；还原路径不代表 Anthropic 内部仓库的原始目录结构。
+- **反馈通道**：生成前样式、运行中通知和跨 Agent 消息分别作用于表达、注意力与协作。
+
+- **Mailbox 投递**：地址解析、队列和空闲唤醒把消息送到目标会话的下一次可执行时刻。
+
+- **呈现策略**：Output Style 修改 system prompt 中的表达约束，宿主再决定终端、SDK 或系统通知的载体。
+
+![Output Style、Notification 与 Mailbox 三条反馈通道](/images/posts/claude-code-source-reading-47/47-feedback-channels-detail-handdrawn.png)
+
+先区分“模型如何生成”“Agent 如何收到”和“用户如何被唤回”，后面的队列与输出分支就不会混成一条消息管道。
+
+## 三种反馈通道，解决三个不同问题
 
 ![Claude Code 的 Output Style、Mailbox、Notification 与宿主输出闭环](/images/posts/claude-code-source-reading-47/47-notifications-mailbox-output-styles-handdrawn.png)
 
@@ -125,7 +123,7 @@ return [
 
 ## UI Notification：短暂状态不应污染对话
 
-TUI 内部通知适合展示升级、IDE 状态、MCP 连接、rate limit、插件安装等短暂反馈。它们进入 AppState 的 `notifications.current` 与 `notifications.queue`，对话事实则继续使用 user/assistant message。
+“插件已安装”这类状态若写进 transcript，resume 和下一轮模型都会把它当成对话事实。TUI 内部通知因此只进入 AppState 的 `notifications.current` 与 `notifications.queue`，适合承载升级、IDE 状态、MCP 连接和 rate limit 等短暂反馈。
 
 队列提供优先级、去重、折叠和失效关系：
 

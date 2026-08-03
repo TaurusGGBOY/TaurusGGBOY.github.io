@@ -10,23 +10,11 @@ image: "/images/posts/claude-code-source-reading-33/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **Chord automaton**：按键序列在完整匹配、候选前缀和失配之间迁移，超时与焦点参与判定。
-
-- **模态编辑**：同一按键在 normal、insert 和 operator-pending 状态中映射到不同动作。
-
-- **Pending operator**：删除、修改等操作先记录 operator，再由 motion 计算范围并提交文本变更。
-
-![按键 chord 与 Vim operator-pending 状态机](/images/posts/claude-code-source-reading-33/33-key-state-machine-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：**Claude Code 当前以 16ms 为渲染节流间隔，用户能否把它调成 120Hz（约 8.33ms）？**
 
-先给结论：在 `@anthropic-ai/claude-code@2.1.88` 这份还原源码中，普通用户不能通过 `/config`、`settings.json` 或环境变量把渲染间隔调成 120Hz。`restored-src/src/ink/constants.ts` 直接定义了：
+先看代码边界。`@anthropic-ai/claude-code@2.1.88` 的 `restored-src/src/ink/constants.ts` 直接把 `FRAME_INTERVAL_MS` 写成 `16`；配置层没有为它留下入口。因此用户改 `/config`、`settings.json` 或环境变量，都不会把发布版 renderer 变成 120Hz。
 
 ```ts
 export const FRAME_INTERVAL_MS = 16
@@ -64,11 +52,23 @@ this.scheduleRender = throttle(deferredRender, FRAME_INTERVAL_MS, {
 
 接下来回到本章主题：Claude Code 把终端按键先归一化成 `input + Key`，再用快捷键上下文和 Vim 的编辑状态机解释它们。
 
+## 本章先建立三个概念
+
+- **Chord automaton**：按键序列在完整匹配、候选前缀和失配之间迁移，超时与焦点参与判定。
+
+- **模态编辑**：同一按键在 `normal`、`insert` 和 `operator-pending` 状态中映射到不同动作。
+
+- **Pending operator**：删除、修改等操作先记录 operator，再由 motion 计算范围并提交文本变更。
+
+![按键 chord 与 Vim operator-pending 状态机](/images/posts/claude-code-source-reading-33/33-key-state-machine-detail-handdrawn.png)
+
+这三个概念分别对应输入归一化后的按键序列、Vim 的顶层状态，以及“先按 operator、后等 motion”的中间状态。后文读到具体函数时，先判断它属于哪一层，快捷键与文本编辑就不会混成同一个状态机。
+
 ## 一个按键包含字符与控制信息
 
-本文继续以 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码为边界。还原路径是阅读索引，不假定它等同于 Anthropic 内部仓库的原始目录。下面的代码只保留证明当前结论的分支，无关按键与 UI 分支会省略。
+用户按下 `Alt+B` 时，程序收到的可能是 ESC 前缀、Kitty keyboard protocol 的 CSI u 序列，甚至是一段无法识别的控制字节。快捷键系统若直接比较原始字符串，同一个动作会因终端不同而落入不同分支；所以第一步不是匹配 action，而是先把输入收口成统一事件。
 
-我们先从最底层的问题开始：用户按下 `Alt+B`，程序收到的并不一定是一个叫 `Alt+B` 的对象。传统终端可能发 ESC 前缀，Kitty keyboard protocol 会发 CSI u 序列，方向键、回车和鼠标又各有编码。快捷键系统如果直接比较原始字符串，同一个动作在不同终端里会变成不同配置。
+本文只使用 `@anthropic-ai/claude-code@2.1.88` 的还原源码。`restored-src/` 是定位证据的索引，不等同于 Anthropic 内部仓库；下面只保留能解释状态转移与事件消费的分支。
 
 `restored-src/src/ink/events/input-event.ts` 的 `parseKey()` 先把 `ParsedKey` 变成两份数据：`Key` 保存方向键、修饰键等布尔标志，`input` 保存可打印输入。下面是其中的关键收口：
 

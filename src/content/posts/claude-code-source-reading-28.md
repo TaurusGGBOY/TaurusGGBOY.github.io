@@ -10,18 +10,6 @@ image: "/images/posts/claude-code-source-reading-28/claude-code-source-reading-0
 imagePosition: "left"
 ---
 
-## 本章先建立三个概念
-
-- **扩展打包**：Plugin 把 skills、agents、hooks、MCP 和样式组织成可安装目录。
-
-- **来源证明**：marketplace、版本与缓存路径共同记录组件从哪里来、当前加载哪一份。
-
-- **激活生命周期**：安装、启用、重载、更新和移除分别改变磁盘状态与运行时状态。
-
-![Plugin 从安装缓存到运行时激活](/images/posts/claude-code-source-reading-28/28-plugin-activation-detail-handdrawn.png)
-
-这张图先固定本章的观察坐标。后文出现具体函数、字段和分支时，都可以回到这几个概念判断它位于哪一层。
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：
@@ -80,9 +68,17 @@ messages: 用户首条输入
 
 本篇后续仍然只讨论仓库中从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的插件代码。上面的 MCP 行为用于说明插件如何把 MCP 配置交给连接层；插件本身不会改变这些能力进入 LLM 的协议边界。
 
+## 问题现场
+
+Plugin 安装成功后，命令、Skill、Hook、MCP 和 LSP 并不会一起变成一个“插件对象”。它们先经过来源与版本校验，再分别进入自己的运行时；任何一层没有刷新，当前会话看到的能力都可能仍是旧快照。
+
+![Plugin 从安装缓存到运行时激活](/images/posts/claude-code-source-reading-28/28-plugin-activation-detail-handdrawn.png)
+
+本文用三层状态解释插件行为：settings 表达启用意图，versioned cache 物化具体版本，refresh 把组件拆到命令、Skill、Hook、MCP、Agent 和 LSP 的装配入口。
+
 ## 三层状态共同决定插件是否生效
 
-读插件源码前，先建立声明、物化和激活三层模型：
+读插件源码时，先把声明、物化和激活拆开：
 
 1. **Marketplace 是目录。** 它告诉 Claude Code 有哪些插件、每个插件的来源、版本、依赖和可选组件。
 2. **Plugin 是物化单元。** 它是一组文件和配置，可以包含 `.claude-plugin/plugin.json`，也可以依靠 `commands/`、`agents/`、`skills/`、`hooks/hooks.json` 等约定目录。
