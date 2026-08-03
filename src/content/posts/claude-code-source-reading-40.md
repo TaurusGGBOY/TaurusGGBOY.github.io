@@ -430,7 +430,7 @@ Claude Code 2.1.88 的 Session Memory 可以压成一条执行链：
 
 ## 留给下一篇的问题
 
-Session Memory 保存单会话长期信息以后，memdir 与 Team Memory 如何把记忆扩展到目录和团队范围，并控制共享与注入？
+Session Memory 的 `summary.md` 会在什么时机被创建、更新和读取？
 
 ## 参考资料
 

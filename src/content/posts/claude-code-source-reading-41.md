@@ -12,17 +12,45 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-Session Memory 保存单会话长期信息以后，memdir 与 Team Memory 如何把记忆扩展到目录和团队范围，并控制共享与注入？
+上一篇的问题是：**Session Memory 的 `summary.md` 会在什么时机被创建、更新和读取？**
 
-先看作用域边界：**memdir 把长期信息落成项目范围内可审查的 Markdown 目录，Team Memory 只从这个目录划出 `team/` 子树并同步它。** 私有索引、团队索引和主题文件各有路径；注入、上传、下载也各有门槛。
+先把两个容易混淆的文件分开：`summary.md` 是当前 session 的 Session Memory，位于项目和 `sessionId` 对应的 `session-memory/` 目录；项目级 auto memory 使用的是 `MEMORY.md`。官方文档所说的“启动时加载记忆”主要指后者，不能据此推断 `summary.md` 每次启动都会被读入上下文。
 
-Claude Code 2.1.88 使用一套文件系统协议：私有记忆放在项目对应的 auto-memory 目录，团队记忆放在其 `team/` 子目录；两个作用域各自维护 `MEMORY.md` 索引和主题文件。系统提示词告诉模型怎样选择作用域、怎样写文件，真正进入上下文的内容由索引加载或相关性选择器控制；Session Memory 原文和未选中的主题不会被全量广播。
+在 2.1.88 中，`summary.md` 是一个按需生成、增量维护、由几个明确消费者读取的文件：
 
-共享也有明确边界。只有 `team/` 会走远端同步；同步还要同时通过 auto memory、Team Memory 功能开关、第一方 OAuth 和 GitHub remote 等门槛。上传前逐文件扫描密钥，远端文件落盘前检查路径穿越和符号链接逃逸。也就是说，“模型决定这是团队知识”只是第一步，后面还有本地目录边界、认证边界和同步边界。
+| 时机 | 是否创建或写入 | 是否读取 | 触发条件 |
+| --- | --- | --- | --- |
+| 会话 setup | 否 | 否 | 只注册 post-sampling hook |
+| 主 REPL 一轮采样结束 | 是，达到阈值后创建或更新 | 是，更新前先读旧内容 | 本地模式、auto compact 与 feature gate 开启，且 token/工具阈值满足 |
+| 自动或手动 compact | 否 | 是 | SM Compact 路径被选中 |
+| 终端失焦后的 away summary | 否 | 是 | away-summary 开关开启，失焦延迟计时器触发 |
+| `/skillify` | 否 | 是 | 命令构造 skill 提示词时 |
 
-记忆作用域、上下文注入和共享同步是三条不同控制线。下面先确定目录，再看索引如何限流，最后追踪 pull/watch/push 的冲突与安全处理。
+因此，短会话可能始终没有 `summary.md`；它也不是每个普通模型请求都会被无条件读取。
 
-![Claude Code memdir 与 Team Memory 的检索、注入和同步边界](/images/posts/claude-code-source-reading-41/41-memdir-team-memory-handdrawn.png)
+### 创建和更新发生在一轮采样之后
+
+`initSessionMemory()` 在 setup 阶段只做一件事：本地、auto compact 开启时注册 `extractSessionMemory` 这个 post-sampling hook。真正执行时，hook 先拒绝非 `repl_main_thread` 的来源，再检查 `tengu_session_memory` gate；subagent、teammate 等路径不会为主会话提炼这份文件。
+
+通过门控后，`shouldExtractMemory()` 才检查阈值。默认首次提炼需要上下文达到 10,000 token；后续两次提炼之间至少增长 5,000 token，并且还要满足“自上次更新以来有至少 3 次工具调用”或“最后一轮 assistant 没有工具调用、形成自然停顿”之一。远端动态配置可以覆盖这些正数阈值，所以这里的数字是源码默认值，不是不可变协议。
+
+阈值满足后才调用 `setupSessionMemoryFile()`：它创建权限为 `0700` 的目录，用 `wx` 独占创建权限为 `0600` 的文件，首次写入模板；文件已经存在时不会覆盖，而是先读取当前内容。随后 `extractSessionMemory` 启动一个受限的 forked agent，只允许它围绕这一个路径更新摘要。也就是说，文件的“创建时机”与“第一次真正有内容的更新时间”都在 post-sampling 阶段，而不是会话启动阶段。
+
+### compact 读取它，但不会因为读取而改写它
+
+自动 compact 达到上下文阈值，或用户手动执行 `/compact` 时，调用链会尝试 `trySessionMemoryCompaction()`。只有 `tengu_session_memory` 与 `tengu_sm_compact` 两个开关都允许时，才会进入这条路径。它先等待正在进行的提炼，最多等待 15 秒；如果提炼状态已经持续超过 60 秒，则视为 stale，不再阻塞 compact。
+
+接着 `getSessionMemoryContent()` 读取磁盘文件。如果文件不存在、仍是空模板、已记录的摘要边界在当前消息列表中找不到，或者拼接后的压缩结果仍超过自动 compact 阈值，函数返回 `null`，上层改走传统的 compaction。成功时，源码会把摘要截断到预算内，与保留的近期消息、SessionStart hook 结果和新的 boundary 组合成 compact 结果；这次读取本身不会把新的摘要写回 `summary.md`。
+
+这里也解释了一个容易误判的现象：`/compact` 不是 `summary.md` 的创建按钮。没有达到 post-sampling 阈值的短会话，即使直接 compact，也可能因为没有有效 Session Memory 而回退到旧的压缩流程。
+
+### 还有两个按需读取的消费者
+
+开启 away-summary 后，终端失焦会启动一个延迟计时器；计时器触发且当前没有正在进行的回合时，`generateAwaySummary()` 读取 `summary.md` 和最近的对话，请小模型生成一段离开时摘要。用户重新聚焦会取消在途请求，所以“失焦后延迟读取”才是准确时机，而不是每次重新打开终端都读取。
+
+`/skillify` 也会读取它：`getPromptForCommand()` 先取得 `summary.md`，再把它和 compact boundary 之后的用户消息一起填入 skillify 提示词。这个读取是命令级的、一次性的，不会改变 Session Memory 文件。
+
+把整个生命周期串起来就是：**主 REPL 采样结束且达到阈值时创建/更新；compact、away summary 或 `/skillify` 真正需要上下文时读取；setup 和普通请求路径不会无条件加载它。**
 
 ## 本章先建立三个概念
 
@@ -355,3 +383,11 @@ Team Memory 在这套文件协议上增加 `team/` 共享作用域。它只同�
 - [Claude Code Memory](https://code.claude.com/docs/en/memory)
 
 - [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams)
+
+- [Explore the context window](https://code.claude.com/docs/en/context-window)
+
+- [Using Claude Code: session management and 1M context](https://claude.com/blog/using-claude-code-session-management-and-1m-context)
+
+- [Session memory compaction](https://platform.claude.com/cookbook/misc-session-memory-compaction)
+
+- [Claude Code /compact: What It Does, What Survives](https://okhlopkov.com/claude-code-compaction-explained/)
