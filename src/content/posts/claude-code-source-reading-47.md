@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读47：非核心反馈通道如何协作"
 published: 2026-07-24T16:47:34+08:00
-updated: 2026-07-24T16:47:34+08:00
+updated: 2026-08-03T20:08:42+08:00
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -171,6 +171,53 @@ return [
 **参数说明：** `getSystemPrompt(tools, model, additionalWorkingDirectories?, mcpClients?)` 的 `tools` 是当前工具数组，`model` 是开放模型标识；两个后置参数都可为 `undefined`。`outputStyleConfig` 只有具体配置或 `null`：为 `null` 时保留通用任务说明并跳过 style section；`keepCodingInstructions === true` 时也保留，`false` 或 `undefined` 时只要存在自定义 style 就移除该通用段。若 `CLAUDE_CODE_SIMPLE` 为真，函数会提前返回极简 prompt；proactive/KAIROS 激活也走另一条提前返回路径。这两条静态路径在拼接 output style 前结束，因此适用范围只覆盖普通主循环。
 
 自定义 Markdown 的 `keep-coding-instructions` 接受布尔 `true` / `false`，也接受字符串 `'true'` / `'false'`；其他值落到 `undefined`。插件还可以提供 `force-for-plugin`，其他来源设置该字段会记录警告并忽略。output style 因此是一段带来源、优先级和解析规则的 system-prompt 配置。
+
+### 同一个用户问题，三份不同的 system prompt
+
+这里用同一个用户输入作对照：
+
+```text
+请解释 src/auth/validateInput.ts 的校验流程，指出一个容易被忽略的失败边界。
+```
+
+用户输入本身没有变化，变化的是模型收到的动态 system-prompt section。`getOutputStyleSection()` 的实现非常直接：有 style 时先写入 `# Output Style: <name>`，再拼接该 style 的 `prompt`；没有 style 时返回 `null`。因此，下面展示的是实际会被拼进 system prompt 的关键片段（为便于阅读，Learning 的长示例只保留与行为有关的部分）：
+
+| 选择 | 追加到 system prompt 的内容 | 对同一问题的可观察倾向 |
+| --- | --- | --- |
+| `default` | 不追加 `# Output Style` section；通用 coding instructions 保留 | 直接完成解释和代码工作，不额外要求教学格式或暂停等待用户 |
+| `Explanatory` | 追加教育性说明，并要求用 `Insight` 框展示 2–3 个代码库相关洞见 | 在回答前后解释实现选择，通常比默认模式更愿意说明“为什么这样做” |
+| `Learning` | 追加 hands-on practice 规则，生成较长代码时要求用户贡献 2–10 行关键代码 | 把设计决策留给用户，先加 `TODO(human)`，再发出分段练习请求 |
+
+`default` 的“prompt”看起来像空白，其实是一个重要差异：内置配置把它映射成 `null`，所以不会出现下面这个标题，也不会因为选择 default 额外改变模型行为。
+
+`Explanatory` 实际拼接的开头是：
+
+```text
+# Output Style: Explanatory
+You are an interactive CLI tool that helps users with software engineering tasks. In addition to software engineering tasks, you should provide educational insights about the codebase along the way.
+
+You should be clear and educational, providing helpful explanations while remaining focused on the task. Balance educational content with task completion.
+
+# Explanatory Style Active
+## Insights
+... before and after writing code, always provide brief educational explanations ...
+```
+
+`Learning` 则会得到另一组约束：
+
+```text
+# Output Style: Learning
+You are an interactive CLI tool that helps users with software engineering tasks. In addition to software engineering tasks, you should help users learn more about the codebase through hands-on practice and educational insights.
+
+# Learning Style Active
+## Requesting Human Contributions
+In order to encourage learning, ask the human to contribute 2-10 line code pieces when generating 20+ lines involving:
+- Design decisions (error handling, data structures)
+- Business logic with multiple valid approaches
+- Key algorithms or interface definitions
+```
+
+所以 Output Style 不是 renderer 的颜色主题，也不是把用户问题改写一遍。它在模型调用前改变“应该怎样回答”的约束；真正的输出仍要经过 Query Loop、工具执行以及 TUI/SDK 的宿主序列化。若把同一问题分别放进三种 style，最明显的差异通常不是事实答案，而是解释密度、是否插入洞见，以及是否把一段实现交还给用户完成。
 
 ## UI Notification：短暂状态不应污染对话
 
@@ -479,6 +526,20 @@ SDK 宿主还可能接收 `control_request`、权限响应、task notification �
 
 这条闭环提供的是分层确认语义：文件锁减少并发覆盖，read/pending/processed 降低丢失概率，dedup 降低重复注入，地址校验降低错投，优先级减少提示轰炸。进程崩溃、Hook 失败、终端静音、网络断开、模型误解和工具副作用仍分别属于不同失败域，源码未建立跨越全部层级的 exactly-once 协议。
 
+## 如果你也想让 Agent 的结果抵达桌面
+
+如果你在实际使用 Claude Code、Codex 或 OpenClaw，最容易错过的往往不是模型最终输出，而是“任务已经开始”“后台任务完成”或“需要回来审批”这类时刻。为了解决这个问题，我维护了一个小项目 [AgentNotify](https://github.com/TaurusGGBOY/agent-notification)：它在本地运行一个桌面通知接收器，让 Agent 把 start/stop 事件发到局域网服务，再由 macOS 或 Windows 的原生通知中心提醒你。
+
+它和本章的分层正好对应：桌面端用 Tauri 打包，通知服务是 Go sidecar；局域网通过 mDNS/DNS-SD 自动发现；Agent 侧通过 `agent-notify-discovery` skill 配置 hook，不必手写一长串平台相关命令。Claude Code、Codex 和 OpenClaw 都可以接入，同一台电脑也可以同时接收多个 Agent 的任务状态。
+
+最快的试用方式是从 GitHub 安装 skill：
+
+```bash
+npx skills add TaurusGGBOY/agent-notification
+```
+
+启动桌面端后，在 Claude Code 中运行 `/agent-notify-discovery`，让它发现通知服务并配置任务开始/结束事件。它不替代 mailbox 的可靠投递，也不把完整回答塞进弹窗；它只负责把“值得你回头看一眼”的信号送到桌面。项目地址仍是 [github.com/TaurusGGBOY/agent-notification](https://github.com/TaurusGGBOY/agent-notification)，欢迎试用、提 issue 或贡献适配。
+
 ## 小结
 
 Claude Code 的最后一段运行闭环，本质上是一次“受众分离”。
@@ -488,6 +549,10 @@ Output Style 面向即将推理的模型，规定回答的表达方式；Mailbox
 这套设计让每层保留自己的确认语义：system prompt 是否装配、消息是否入箱、Agent 是否消费、结果是否写出、提醒是否发起，分别可观察、可失败、可恢复。也正因为这些边界被拆开，Claude Code 才能从一次用户输入出发，经过模型、工具、权限、任务、团队、远程宿主和产品体验层，最后把结果送到正确的对象，再等待下一次输入。
 
 到这里，整个源码解读系列也形成了自己的闭环：从一次请求怎样进入 Agent 开始，最终回到结果怎样离开 Agent、抵达人或另一个 Agent。
+
+## 留给下一篇的问题
+
+mailbox 和 A2A 协议的异同点是什么？
 
 ## 参考资料
 
