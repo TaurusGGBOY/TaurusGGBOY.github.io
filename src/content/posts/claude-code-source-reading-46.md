@@ -12,17 +12,115 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-语音输入补充交互以后，MagicDocs 与 Prompt Suggestions 如何从上下文生成文档和下一步建议，并把结果展示给用户？
+如果我想在 WSL 中使用 Claude Code 的 Voice，应该如何实现？
 
-先看两条旁路的副作用：MagicDocs 的终点是受限 `Edit`，Prompt Suggestions 的终点是等待用户确认的 ghost text。它们都在主回合结束后启动 fork，却使用不同门槛、上下文和写回路径。
+答案不是给 Claude Code 加一个 `voice` 配置就结束，而是先把 Windows 的麦克风通过 WSLg 暴露给 Linux，再让 ALSA 的默认录音设备转到 WSLg 提供的 PulseAudio。官方文档把 **WSL2 + WSLg** 列为前提；WSL1、没有 WSLg 的 WSL2、SSH 或其他远程会话没有本地麦克风通道，应该直接在 Windows 本机运行 Claude Code，或者使用外部语音转文字工具。
 
-MagicDocs 先等主 Agent 通过 `Read` 看见带有 `# MAGIC DOC:` 标记的 Markdown，再把文件路径记进进程内 `Map`。模型完成一次采样、最后一条 assistant 消息自然收尾时，它重新读取文档，把完整会话、system prompt、用户上下文、当前文档和自定义说明交给一个 Sonnet 子 Agent。这个 Agent 只对刚才那一个文件调用 `Edit`；内容已经完整时直接停止。
+这不是凭空推测。一个在 Windows 11 + WSL2 + Ubuntu 上实测的配置方案安装了 `libasound2-plugins`、`alsa-utils`、SoX 和 PulseAudio 工具，再用 ALSA 配置把默认设备指向 PulseAudio；另一位 WSL2 用户进一步验证，只有 `~/.asoundrc` 时仍可能出现 `Unknown PCM default`，同时写入 `/etc/asound.conf` 才能让 `arecord` 打开 `default`。两篇方案都把“先录一段音频”作为 `/voice` 之前的验收条件。
 
-Prompt Suggestions 则在主线程停止阶段预测“用户下一句最可能输入什么”。它复用父请求的缓存安全参数，启动一个禁用所有工具的 fork，只取 2 到 12 个词的文本。通过长度、格式和语气过滤后，候选值写进 AppState，输入框为空且主 Agent 已停止响应时，才作为 ghost text 展示。用户按 Tab 或在空输入框按 Enter，就把它变成普通 prompt；用户输入别的内容再提交，就记为 ignored 并清掉。
+## 先判断你的 WSL 是否具备条件
 
-所以，两条能力采用独立旁路：MagicDocs 的终点是受限文件编辑，Prompt Suggestions 的终点是等待用户确认的输入候选。前者在 2.1.88 的源码里被 `USER_TYPE === 'ant'` 限制，后者受环境变量、GrowthBook、交互模式、设置、权限等待状态等多道门控制。
+在 PowerShell 中确认 WSL2 与 WSLg：
 
-下面先处理“文件如何声明可维护”，再追踪建议生成的缓存和 UI 状态；主对话的消息与副作用边界始终保持不变。
+```powershell
+wsl --version
+wsl --status
+```
+
+你至少应当看到 WSL 2，并且 WSLg 已安装；如果版本太旧，可以先执行 `wsl --update`，然后执行 `wsl --shutdown`，重新打开发行版。Windows 的“设置 → 隐私和安全性 → 麦克风”也要允许系统和你使用的终端访问麦克风。
+
+| 环境 | 内置 Voice 的结论 |
+| --- | --- |
+| Windows 11 + WSL2 + WSLg | 可以继续配置 PulseAudio/ALSA 并测试 |
+| WSL1，或 WSL2 但没有 WSLg | 没有可用的音频设备，改用 Windows 原生 Claude Code |
+| SSH、容器、Claude Code Remote | 麦克风在另一台机器，内置 Voice 会在本地检查阶段拒绝 |
+
+## 把 ALSA 的默认设备接到 WSLg
+
+以下是 Ubuntu/Debian 上最小的音频依赖。`pulseaudio` 是 WSLg 提供的服务端；这里安装的是客户端工具和 ALSA 插件，不是另起一个独立的音频服务器：
+
+```bash
+sudo apt update
+sudo apt install -y libasound2-plugins alsa-utils sox pulseaudio-utils
+```
+
+先在用户级配置默认设备：
+
+```bash
+cat > ~/.asoundrc <<'EOF'
+pcm.!default {
+  type pulse
+  fallback "sysdefault"
+}
+
+ctl.!default {
+  type pulse
+  fallback "sysdefault"
+}
+EOF
+```
+
+如果仍然报 `Unknown PCM default`，采用社区方案的第二步：先备份已有系统配置，再写入同样的映射。系统文件可能被其他 Linux 音频程序使用，所以不要在没有备份的情况下盲目覆盖：
+
+```bash
+sudo cp -a /etc/asound.conf "/etc/asound.conf.bak.$(date +%s)" 2>/dev/null || true
+sudo tee /etc/asound.conf >/dev/null <<'EOF'
+pcm.!default {
+  type pulse
+  fallback "sysdefault"
+}
+
+ctl.!default {
+  type pulse
+  fallback "sysdefault"
+}
+EOF
+```
+
+关闭当前 WSL 终端并重新打开，让 ALSA 重新读取配置。Arch 用户对应安装 `alsa-utils` 和 `pulseaudio-alsa`；不要把 Ubuntu 的 `apt` 命令原样搬过去。
+
+## 不要直接猜 `/voice`，先复现它的录音检查
+
+先用与 Claude Code 相同的默认设备录音三秒：
+
+```bash
+arecord -D default -f cd -d 3 /tmp/claude-voice.wav
+aplay /tmp/claude-voice.wav
+```
+
+如果这条命令仍然提示 `cannot find card '0'`、`Unknown PCM default` 或没有声音，问题还在 WSLg/ALSA 桥接，和 Claude Code 的 WebSocket 无关。社区实测的 SoX 路径也可以单独验证：
+
+```bash
+rec /tmp/claude-voice.wav trim 0 3
+paplay /tmp/claude-voice.wav
+```
+
+只有 `arecord` 或 `rec` 能真正打开麦克风后，再启动 Claude Code：
+
+```bash
+claude
+/login
+/voice
+```
+
+这里的 `/login` 不是可选装饰。2.1.88 的 `isVoiceStreamAvailable()` 只接受 Anthropic/Claude.ai OAuth token；API Key、Bedrock、Vertex 或 Foundry 不能直接使用内置语音转写。音频会通过 `voice_stream` WebSocket 发往 Anthropic 的转写服务，WSL 只负责采集和转发。
+
+## 2.1.88 源码到底在哪里失败
+
+源码没有把“在 WSL”本身当成永远拒绝的条件。`getPlatform()` 通过 `/proc/version` 识别 WSL；`commands/voice/voice.ts` 执行 `/voice` 时，先调用 `checkRecordingAvailability()`，再检查 OAuth、录音依赖和权限。
+
+在 Linux/WSL 中，`services/voice.ts` 的顺序是：
+
+1. 尝试 `audio-capture-napi`；Linux 没有 ALSA 声卡时，这条原生路径会被跳过。
+2. 如果存在 `arecord`，用 16 kHz、16-bit、单声道参数启动一个短探测，并等待它真正打开设备；命令存在但设备打不开不算成功。
+3. 探测成功，Voice 才继续；探测失败且平台是 WSL，返回“WSL 无法访问音频设备”的专门错误。
+4. 没有 `arecord` 时才考虑 SoX 的 `rec`；WSL 在缺少两者时同样直接返回 WSL 音频不可用提示。
+
+所以实际故障点通常在 `/voice` 的**本地录音可用性检查**，而不是 STT 请求阶段。你可以先用上面的 `arecord` 命令判断；如果它成功但当前安装的 Claude Code 仍立即说 WSL 不可用，先检查 `claude --version` 并更新到包含 WSLg 探测逻辑的版本。社区文章提到过某些版本存在硬编码的 WSL 拒绝，但不应该为了绕过提示直接修改打包后的 CLI：这会在自动更新或签名校验后失效，也会让真正的音频权限问题被隐藏。
+
+如果你的机器无法提供 WSLg 音频，另一个可行方向是社区的 VoiceMode MCP：它把 Whisper/Kokoro 等语音服务作为 MCP 接入，并且项目文档专门列出 WSL2 需要 PulseAudio 包。它不是 Claude Code 内置 `/voice`，但可以作为“WSL 必须保留、内置 Voice 又无法通过设备检查”时的替代路径。
+
+这样分层以后，故障定位就很明确：**WSLg/Windows 权限 → ALSA 默认设备 → `arecord`/`rec` 实测 → Claude Code 本地检查 → OAuth WebSocket**。不要把“能在 WSL 里启动 Claude Code”和“WSL 能访问麦克风”当成同一件事。
 
 ## 本章先建立三个概念
 
@@ -387,3 +485,11 @@ Prompt Suggestions 在停止阶段预测用户下一句，先经过功能门与�
 - [Claude Code Skills](https://code.claude.com/docs/en/skills)
 
 - [Dive into Claude Code：生产级 Agent 的设计空间](https://arxiv.org/abs/2604.14228)
+
+- [Voice dictation - Claude Code Docs](https://code.claude.com/docs/en/voice-dictation)
+
+- [Claude Code Voice Mode：Windows 11 + WSL2 实测配置](https://www.cursosdesarrolloweb.es/blog/claude-code-voice-mode-programa-con-voz-terminal)
+
+- [Fix: Claude Code /voice not working on WSL2 (Windows)](https://www.reddit.com/r/ClaudeCode/comments/1rs2784/fix_claude_code_voice_not_working_on_wsl2_windows/)
+
+- [VoiceMode：WSL2 的 PulseAudio 依赖与 MCP 替代方案](https://github.com/mbailey/voicemode)

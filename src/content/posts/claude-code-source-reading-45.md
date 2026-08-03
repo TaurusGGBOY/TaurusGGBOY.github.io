@@ -412,7 +412,7 @@ Claude Code 的 Voice 是一条很薄的适配链：终端自动重复事件推�
 
 ## 留给下一篇的问题
 
-语音输入补充交互以后，MagicDocs 与 Prompt Suggestions 如何从上下文生成文档和下一步建议，并把结果展示给用户？
+如果我想在 WSL 中使用 Claude Code 的 Voice，应该如何实现？
 
 ## 参考资料
 
