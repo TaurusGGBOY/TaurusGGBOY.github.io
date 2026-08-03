@@ -542,7 +542,7 @@ Onboarding 负责用户级准备，Workspace Trust 负责项目级信任。`bypa
 
 ## 留给下一篇的问题
 
-普通用户能只通过修改本地配置，使用其他版本的 Claude Code 吗？
+普通用户能把 Claude Code 更新到内部版本或测试版本（即非 `stable`、`latest` 渠道的版本）吗？
 
 ## 参考资料
 

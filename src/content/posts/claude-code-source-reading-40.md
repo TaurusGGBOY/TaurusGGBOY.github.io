@@ -12,70 +12,48 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：**普通用户能只通过修改本地配置，使用其他版本的 Claude Code 吗？**
+上一篇留下的问题是：**普通用户能把 Claude Code 更新到内部版本或测试版本（即非 `stable`、`latest` 渠道的版本）吗？**
 
-短答是：**不能只靠修改 `settings.json`，让当前正在运行的二进制突然变成另一个版本；但普通用户可以通过公开的安装入口指定版本，或者在 npm 安装方式下安装带版本号的包。** 本地配置控制的是更新渠道和版本下限，真正选择哪个二进制运行，还是安装器、软链接和 `PATH` 的结果。
+先给结论：**普通用户不能仅靠修改本地配置获得内部版本或测试版本；只有当目标版本的二进制或 npm 包本来就对外发布时，才可能通过公开安装流程安装它。** 源码里“能解析这个版本号”“能找到这个版本的下载物”“当前用户有权限访问下载源”是三件不同的事。
 
-### 配置文件能控制什么
+### `claude update` 只更新渠道，不选择任意版本
 
-2.1.88 的 settings schema 里，和版本有关的核心字段只有两个。
+2.1.88 的 `settings` schema 中，`autoUpdatesChannel` 只允许 `latest` 和 `stable`；`minimumVersion` 只是版本下限。`claude update` 读取前者，再把渠道交给更新器查询，因此它没有“更新到某个内部版本”的配置入口。把 `autoUpdatesChannel` 写成开发版本字符串会先违反 schema，修改 `minimumVersion` 也只是阻止低于该值的更新，不会指定下载地址。
 
-- `autoUpdatesChannel` 只能取 `latest` 或 `stable`。`claude update` 会读取它，再向对应渠道查询版本；它表达的是“跟随哪个发布轨道”，不是“固定到某个具体版本”。
-- `minimumVersion` 是版本下限。`shouldSkipVersion()` 只在目标版本低于这个值时跳过更新，用来避免切换到 stable 时意外降级；它不会把目标版本改成这个值，也不是精确版本选择器。
+### 版本号格式合法，不代表版本对普通用户开放
 
-还有一个容易混淆的字段：`installMethod` 是全局配置中记录安装来源的元数据，值可能反映 native、npm local 或 npm global。更新命令会把它和诊断出来的实际安装类型比较，发现不一致时给出警告并修正记录；写入这个字段不会改变 `PATH`，更不会替换正在执行的文件。
+`nativeInstaller/download.ts` 的 `getLatestVersion()` 会先匹配版本字符串。除了普通的 `2.1.88`，正则也接受带后缀的形式；源码注释甚至明确举了 `1.0.30-dev.shaf4937ce` 这样的内部格式。这说明 CLI 在语法层面可以理解内部版本号，但这一步只返回规范化字符串，并没有授予访问权限。
 
-因此，下面这种做法不能实现版本切换：手动把 `autoUpdatesChannel` 写成 `2.1.88`，或者把 `minimumVersion` 写成目标版本。前者会违反 schema 的枚举约束，后者只会阻止更低版本的更新。
+随后真正下载时，`downloadVersion()` 按 `USER_TYPE` 分流：内部用户走 Anthropic 的 Artifactory，外部用户走公开的 GCS 二进制仓库。外部路径会请求 `<version>/manifest.json`，再根据平台下载并校验二进制。如果某个内部版本没有同步到公开仓库，普通用户即使输入了正确的版本号，也只会在 manifest 或平台文件下载处失败。
 
-### Native 安装可以直接指定版本
-
-普通用户真正可用的入口在 `main.tsx` 中始终注册：
+因此，普通用户实际可以这样理解：
 
 ```text
-claude install [target]
+claude install 2.1.88       # 目标版本已公开时，可以安装
+claude install 2.1.88-dev.x # 只有公开仓库确实有这个版本时才可能成功
+claude update                # 仍然只跟随 latest 或 stable
 ```
 
-`target` 可以是 `stable`、`latest` 或具体版本。`install.tsx` 将显式传入的 target 交给 `installLatest()`；没有传 target 时，才回退到配置里的 `autoUpdatesChannel`。下载器对类似 `2.1.88`（也接受可选的 `v` 前缀和开发版本后缀）的字符串单独处理，只有无法匹配版本格式时才把输入当成渠道，并且渠道只允许 `stable` 与 `latest`。
+`claude install <version>` 是显式安装指定版本，不是修改配置让当前进程“变身”。安装器下载真实文件、写入版本目录并更新启动软链接；`claude update` 则继续按渠道运行。两条路径不能混为一谈。
 
-例如，native 安装的普通用户可以执行：
+### 测试版本还多一道编译期门槛
+
+源码对 `99.99.*` 测试夹具写了更严格的分支：只有构建时启用 `ALLOW_TEST_VERSIONS`，才会从私有的 CI sentinel bucket 下载，并使用 `gcloud` 获取访问令牌。已发布的普通构建中这个 feature 是 false，代码注释说明打包时会被死代码消除；`getLatestVersion()` 也会拒绝这类版本。
+
+所以，普通用户不能通过 `settings.json` 或运行时环境变量把正式二进制变成测试构建。要使用这条路径，至少需要带有该编译特性的构建和对应的内部凭据；这已经超出“普通用户切换更新渠道”的范围。
+
+### npm 只能安装公共 registry 中发布的版本
+
+如果某个版本确实发布到了公共 npm registry，用户可以显式安装：
 
 ```bash
-claude install 2.1.88
-claude --version
+npm install -g @anthropic-ai/claude-code@<version>
+npm view @anthropic-ai/claude-code versions --json
 ```
 
-对外部用户，2.1.88 的源码会从公开的二进制仓库读取该版本的 `manifest.json`，根据当前平台下载对应文件并校验 SHA-256；版本已经安装时则复用它。安装器把版本放在 XDG data 目录下的 `claude/versions/<version>`，然后把用户 bin 目录中的 `claude` 软链接切到这个版本，最后再检查可执行文件是否真的可用。也就是说，这个命令不是修改配置“伪装”版本，而是安装或复用真实的版本文件，再改变启动入口。
+但 npm 的版本列表只代表公共 registry 能看到的发布物。内部 Artifactory 中存在的包、未发布的 nightly 或 CI 测试夹具，不会因为把版本号写进命令就自动出现在公共 registry；下载权限和平台包仍然是硬边界。
 
-精确版本安装成功后，代码只会在 target 是 `latest` 或 `stable` 时写回 `autoUpdatesChannel`；传入 `2.1.88` 不会把它保存成一个配置渠道。因此它改变的是当前选中的 native 二进制，不等于建立了一个永久的精确版本 pin。之后若自动更新仍在运行，更新器仍可能按渠道寻找新版本；需要稳定复现时，应明确管理自动更新，或在需要时再次执行精确版本安装。
-
-### `rollback` 不是普通用户的入口
-
-源码里的 `claude rollback [target]` 被包在 `USER_TYPE === 'ant'` 的条件中，并标注为 `ANT-ONLY`。这是一条内部发布回滚路径，普通外部用户不能把它当作通用降级命令。对普通用户而言，已公开、可审计的替代方式是 `claude install <具体版本>`；如果当前安装形态不是 native，则应使用对应的包管理器。
-
-### npm 安装和 PATH 也会改变最终版本
-
-如果用户原本通过 npm 安装，切换版本的动作属于 npm，而不是 `settings.json`：
-
-```bash
-npm install -g @anthropic-ai/claude-code@2.1.88
-claude --version
-```
-
-本地项目安装则应在项目目录使用相同的版本号约束。要注意 native、npm global、npm local 或 Homebrew/winget 并存时，命令行最终执行哪个文件由 `PATH` 决定。2.1.88 的更新诊断会检查多份安装并提示配置与实际安装类型不一致；排查时可以使用：
-
-```bash
-which -a claude       # macOS / Linux
-where.exe claude      # Windows
-claude --version
-```
-
-这也解释了为什么“我改了版本配置却没生效”经常发生：配置可能改对了，但 shell 仍然先找到另一份 `claude`。
-
-### 能切换不代表任何历史版本都能用
-
-精确版本路径仍有明确边界：目标版本必须在发布仓库或 npm registry 中存在，并且要有当前操作系统和架构的构建产物；manifest 不存在、平台条目缺失、网络下载失败、校验和不匹配或用户没有写入权限，安装都会失败。即使客户端成功切换，账号权限、模型可用性和服务端兼容性也不由本地 CLI 版本单独决定。
-
-所以“普通用户能否通过修改本地配置使用其他版本”的准确答案是：**仅修改配置不行；使用公开安装器或包管理器安装指定版本可以。配置决定更新策略，安装文件和 `PATH` 决定实际运行版本。**
+因此准确答案是：**普通用户不能通过修改本地配置更新到内部或测试版本；`claude update` 只支持 `latest` / `stable`。如果某个非渠道版本被明确公开到二进制仓库或 npm，普通用户可以用 `claude install <version>` 或 npm 安装它；否则就需要内部构建、私有下载源和相应权限。**
 
 ## 本章先建立三个概念
 
@@ -467,3 +445,7 @@ Session Memory 保存单会话长期信息以后，memdir 与 Team Memory 如何
 - [Troubleshoot Claude Code installation](https://code.claude.com/docs/en/troubleshoot-install)
 
 - [How to Update Claude Code to the Latest Version](https://claudcod.com/blog/update-claude-code/)
+
+- [Claude Code CLI reference](https://code.claude.com/docs/en/cli-usage)
+
+- [@anthropic-ai/claude-code on npm](https://www.npmjs.com/package/%40anthropic-ai/claude-code)
