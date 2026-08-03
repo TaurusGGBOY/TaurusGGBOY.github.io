@@ -376,7 +376,7 @@ Team Memory 在这套文件协议上增加 `team/` 共享作用域。它只同�
 
 ## 留给下一篇的问题
 
-团队记忆能够积累以后，AutoDream 如何在后台挑选素材、生成 Dream，并把结果重新纳入未来会话？
+普通用户可以使用 Claude Code 的 Team Memory 吗？
 
 ## 参考资料
 

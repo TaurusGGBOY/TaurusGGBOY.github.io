@@ -12,15 +12,56 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-上一篇留下的问题是：团队记忆能够积累以后，AutoDream 如何在后台挑选素材、生成 Dream，并把结果重新纳入未来会话？
+上一篇的问题是：**普通用户可以使用 Claude Code 的 Team Memory 吗？**
 
-先看触发点：AutoDream 挂在主 Agent 每轮结束后的 `stopHooks`，依次过开关、运行模式、冷却时间、最近有改动的会话数和跨进程锁。只有这些门槛全部通过，系统才注册 `DreamTask` 并启动隔离的 `runForkedAgent()`；它不是常驻定时器，也不是每轮都读取全部 transcript。
+先给结论：**普通用户不能靠修改 `settings.json` 把 Team Memory 强行打开，但普通账号也不是永远不能用。** 是否可用取决于发行版是否编译进了 Team Memory、账号是否被灰度开关放行，以及你要的是本地 `team/` 目录还是面向团队的远端同步。
 
-它所谓的“挑选素材”分成两层。调度层按 transcript 修改时间找出上次整合后发生变化的会话，并排除当前会话；进入 Dream 后，Agent 先看已有记忆和日志，再按需要窄范围搜索 JSONL transcript。候选顺序由文件时间决定，语义筛选则交给提示词和工具搜索。
+### 先分清“本地 Team Memory”和“远端同步”
 
-后台 Agent 可以自由使用 Read、Grep、Glob，也可以运行只读 Bash；Edit 和 Write 则只能落在 auto-memory 目录。它把新信息合并进 topic 文件，修正过期内容，并把 `MEMORY.md` 维护为短索引。成功时锁文件的 mtime 留作新的“上次整合时间”；失败或用户终止时恢复旧 mtime，让后续会话仍有重试机会。
+这两个词经常被混在一起，源码实际上把它们拆成了不同的门槛：
 
-这些文件在后续会话构建上下文时生效：`loadMemoryPrompt()` 提供记忆规则与目录，`getMemoryFiles()` 读取 `MEMORY.md` 入口，topic 文件再由索引和搜索规则引导按需读取。当前主会话只追加一条“Improved …”系统消息，因此 AutoDream 形成跨会话闭环。
+| 能力 | 源码中的必要条件 | 不满足时的结果 |
+| --- | --- | --- |
+| 本地读取和注入 `team/` | 构建期 `TEAMMEM`、auto memory 开启、GrowthBook 的 `tengu_herring_clock` 为 `true` | 不生成 combined Team Memory prompt；普通配置不能补上构建期能力 |
+| 从服务端 pull / 向服务端 push | 上一行条件，再加第一方 Anthropic OAuth、有效 access token，以及 inference/profile 两个 scope | 本地记忆即使存在，也不会远端同步；API key、BYOK 或其他 provider 不满足这道门 |
+| 自动持续同步 | 上一行条件，再加 `github.com` 的仓库 remote | watcher 不启动；没有 GitHub remote 的项目不会建立团队同步 |
+
+因此，“能不能使用”至少要先问清楚是哪一种：没有远端同步时，某个已经被放行的构建仍可能在本机读取或写入 `team/`；但这不意味着其他成员会看到相同内容。
+
+### 第一层：`TEAMMEM` 是构建期能力，不是设置项
+
+`feature('TEAMMEM')` 来自 `bun:bundle`。`setup.ts` 只有在这个编译期常量为 `true` 时，才会动态加载 `startTeamMemoryWatcher()`；如果构建时为 `false`，相关分支会被裁剪，运行时再改 `settings.json` 也无法把它变回来。这里要区分两个事实：还原源码能证明它是编译期 gate，但不能仅凭 source map 证明你手上的每一个公开构建最终把该常量编译成了什么值。
+
+### 第二层：账号还要通过灰度开关
+
+本地 Team Memory 的运行时判断是：
+
+```ts
+export function isTeamMemoryEnabled(): boolean {
+  if (!isAutoMemoryEnabled()) return false
+  return getFeatureValue_CACHED_MAY_BE_STALE(
+    'tengu_herring_clock',
+    false,
+  )
+}
+```
+
+这意味着 auto memory 关闭时，Team Memory 一定关闭；auto memory 开启也不够，还要让 `tengu_herring_clock` 返回 `true`。它的静态回退值是 `false`，所以这不是普通用户可以在设置文件里填一个字段就能打开的功能。源码还显示，`CLAUDE_INTERNAL_FC_OVERRIDES` 这类 GrowthBook 环境覆盖只在 `USER_TYPE === 'ant'` 时生效，不能当成普通用户开关。
+
+### 第三层：远端同步只接受第一方 OAuth
+
+`isTeamMemorySyncAvailable()` 直接返回 `isUsingOAuth()`。后者还会检查 API provider 必须是 `firstParty`、base URL 必须是 Anthropic 第一方地址、token 必须有 access token，并且同时具备 inference 和 profile scope。也就是说，使用 API key、Bedrock、Vertex、其他兼容 provider，或者只有不完整 scope 的登录状态，都不能走远端 Team Memory 同步。
+
+watcher 的启动顺序也很明确：先检查 `TEAMMEM` 和两个运行时开关，再调用 `getGithubRepo()`；只有解析到 `github.com/owner/repo` 才会先 pull 一次团队记忆，随后建立文件 watcher。没有 GitHub remote 时，源码会记录 `no github.com remote, skipping sync` 并退出这条同步路径。
+
+### 所以普通用户到底能不能用？
+
+- 如果当前安装的公开构建没有把 `TEAMMEM` 编译进去，答案是不能；改配置、改普通环境变量都无效。
+- 如果发行版包含该能力，账号又被 `tengu_herring_clock` 灰度放行，那么普通的第一方 OAuth 账号可以使用本地 Team Memory；源码没有要求必须是内部用户。
+- 如果还想和团队共享，就必须继续满足 OAuth scope 和 GitHub remote 条件。API key 用户即使能运行其他 Claude Code 功能，也不能因此获得远端 Team Memory。
+- 如果你只是想让团队共享稳定的项目约定，官方当前文档公开推荐的仍是通过版本控制共享项目 `CLAUDE.md`；Auto memory 则是机器本地的记忆机制。这和源码里受灰度控制的 `team/` 目录不是同一个产品入口。
+
+外部对这段 source map 的拆解，也把 Team Memory 描述为“同一组织中、经过认证且操作同一仓库的用户共享团队目录”，并强调文件会先经过 secret guard，再由 watcher 批量同步。这些分析与源码的 OAuth、GitHub 和密钥扫描分支相互印证，但它们是源码分析文章，不应被当成 Anthropic 对公开账号资格的官方承诺。
 
 ## 本章先建立三个概念
 
@@ -401,3 +442,7 @@ Dream 把经验沉淀下来以后，Assistant 与 KAIROS 如何利用这些记�
 - [Claude Code Auto Memory](https://code.claude.com/docs/en/memory)
 
 - [Dive into Claude Code：生产级 Agent 的设计空间](https://arxiv.org/abs/2604.14228)
+
+- [Inside Claude Code's Team Memory Sync](https://jakegoldsborough.com/blog/2026/inside-claude-codes-team-memory-sync/)
+
+- [Session Transcripts and Team Memory](https://leehongji.github.io/Relearn-Claude-Code/claude-code/session-transcripts-and-team-memory)
