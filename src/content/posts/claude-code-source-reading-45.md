@@ -12,9 +12,11 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-如何 100% 抽到最稀有的 Buddy？
+既然 Buddy 的结果由身份 seed 确定，社区是如何实现 100% 抽到最稀有的 Buddy 的？
 
-先给结论：在不修改源码、也不更换用户身份的前提下，做不到 100% 抽到 `legendary`。2.1.88 的可见源码里，“抽取”不是每次执行 `/buddy` 都重新进行一次独立随机，而是由用户身份派生的确定性结果；同一身份在同一套源码规则下会一直得到同一套 `bones`。重复打开、退出或读取 Buddy，不会把 1% 慢慢累积成保底。
+先修正上一版的结论：如果限定为普通用户沿着官方 `/buddy` 路径，不修改身份 seed、不修改 Claude Code，那么确实做不到 100% 抽到 `legendary`。但“控制 seed 后也做不到”是不准确的。社区已经实现了可重复命中指定稀有度的工具；它利用的是确定性映射，而不是让 1% 概率在重复尝试中变成保底。
+
+2.1.88 的可见源码里，“抽取”不是每次执行 `/buddy` 都重新进行一次独立随机，而是由用户身份派生的确定性结果；同一身份在同一套源码规则下会一直得到同一套 `bones`。`roll(userId)` 接收一个开放字符串 `userId`，把它与固定 `SALT` 拼接后送进 `hashString()` 和 `mulberry32()`；同一个输入就会得到同一个伪随机序列。重复打开、退出或读取 Buddy，不会把 1% 慢慢累积成保底。
 
 最稀有档是 `legendary`。`RARITY_WEIGHTS` 的总和为 100，`rollRarity()` 先取一个 `[0, 1)` 的伪随机数，再按 `RARITIES` 的顺序扣除权重：
 
@@ -30,7 +32,7 @@ imagePosition: "left"
 
 这正是 seeded PRNG 和普通“每次重新抽卡”的区别：相同种子会产生相同序列，因此结果可复现；真正能把概率变成 100% 的抽卡系统，必须另有 hard pity、计数器或显式选择逻辑。当前 `StoredCompanion` 只保存模型生成的 `name`、`personality` 与 `hatchedAt`，没有抽取次数、失败次数或 pity 状态，源码也没有“失败后重抽直到 legendary”的循环。
 
-如果只是做本地测试，可以利用导出的 `rollWithSeed()` 找一个已知会落入 `legendary` 区间的种子：
+如果只是做本地测试，可以利用导出的 `rollWithSeed(seed)` 找一个已知会落入 `legendary` 区间的种子。这里的 `seed` 同样是开放字符串；函数直接把它送进哈希和 PRNG，不读取全局配置：
 
 ```ts
 for (let i = 0; ; i++) {
@@ -42,9 +44,17 @@ for (let i = 0; ; i++) {
 }
 ```
 
-这段代码只能说明“在测试 harness 中可以预先挑种子”。生产读取路径仍然是 `getCompanion() → roll(companionUserId())`，不是 `rollWithSeed()`；如果要让真实 Buddy 100% 命中，就必须控制生产使用的身份、让目标运行时的 `hashString()` 与搜索环境一致，或者直接修改 `rollRarity()` / 增加保底逻辑。这些都属于测试或源码改造，不是普通用户通过 `/buddy` 能完成的操作。尤其是已有 OAuth `accountUuid` 时，修改 fallback 的 `config.userID` 也不会改变实际种子。
+但社区的 reroll 实现并不是调用生产路径里的 `rollWithSeed()`。它先离线暴力生成候选身份，逐个计算物种和稀有度，找到目标结果后，再让生产路径使用这个候选身份。已有公开脚本包含 `reroll.js`、`verify.js` 和配置修复脚本，可以按物种与稀有度搜索；这也是“100%”成立的准确含义：不是每次随机试验的概率变成 100%，而是先找到一个确定会落入目标区间的 seed，再重复使用它。
+
+生产路径是 `getCompanion() → roll(companionUserId())`，而 `companionUserId()` 的优先级是 `oauthAccount?.accountUuid ?? userID ?? 'anon'`。因此社区方案通常分成四步：先备份配置，搜索一个会得到 `legendary` 的候选 `userID`；如果配置中存在 `oauthAccount.accountUuid`，让它回退到候选 `userID`；删除 `companion` 以触发重新孵化；重启 Claude Code 后执行 `/buddy`。直接修改 `userID` 对已有 `accountUuid` 的账号不起作用，因为可选链取到非空 `accountUuid` 后就不会继续回退。删除 `accountUuid`、依赖 OAuth 令牌继续工作，是社区实现的未受官方支持的做法，重新登录也可能把真实 UUID 写回来；不应把它当作认证兼容性的保证。
+
+还有一类更激进的社区工具不替换身份，而是修改已安装 CLI 中的 `SALT`，再搜索一个新的盐值来命中目标 Buddy。这种方法可以保留真实账号 seed，但涉及本地程序补丁、macOS 代码签名或自动更新后的重新修补，维护成本和破坏风险更高。
+
+这条链路还受运行时和版本约束。源码中的 `hashString()` 在存在 Bun 时使用 `Bun.hash()`，否则使用 FNV-1a 风格的回退实现；搜索脚本必须与实际 CLI 走同一分支，否则离线找到的 ID 可能在目标环境中得到不同结果。本文的源码事实边界仍是 2.1.88，后续版本已经出现 Buddy 被移除的情况，所以这些社区工具不能推断为当前所有 Claude Code 版本都可用。
 
 直接编辑配置里的 `rarity` 同样无效。`getCompanion()` 返回 `{ ...stored, ...bones }`，重新生成的 `bones` 位于后面，会覆盖配置中残留的 `rarity`、`species` 等字段。这种设计把 Buddy 做成“稳定身份”，而不是可以靠改配置或反复重开刷新的 loot box。
+
+因此，上一版结论应当加上边界：普通 `/buddy` 没有 reroll 或 pity；但控制生产使用的身份，或修改 CLI 的盐值，就可以把一个统计上的 1% 结果变成当前版本、当前运行时下的确定性结果。
 
 ## 本章先建立三个概念
 
@@ -415,3 +425,13 @@ Claude Code 的 Voice 是一条很薄的适配链：终端自动重复事件推�
 - [Seeds and Deterministic Generation](https://www.abratabia.com/procedural-generation/seeds-and-determinism.php)
 
 - [Gacha Probability Calculator：Pull Odds & Pity System](https://www.hakaru.io/tools/gacha-probability-calculator)
+
+- [I Reverse-Engineered Claude Code's /buddy System and Got a Legendary Cat](https://dev.to/ithiria894/i-reverse-engineered-claude-codes-buddy-system-heres-how-to-reroll-yours-2ghj)
+
+- [claude-code-buddy-reroll：暴力搜索身份并校验 Buddy 结果](https://github.com/ithiria894/claude-code-buddy-reroll)
+
+- [`reroll.js`：社区实现的候选身份搜索脚本](https://github.com/ithiria894/claude-code-buddy-reroll/blob/master/reroll.js)
+
+- [Claude Code Buddy Marketplace：社区选择工具与版本提示](https://claude-buddy.org/)
+
+- [Claude Code issue #42677：后续版本移除 Buddy 的兼容性线索](https://github.com/anthropics/claude-code/issues/42677)
