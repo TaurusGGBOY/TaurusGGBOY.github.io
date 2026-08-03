@@ -117,7 +117,7 @@ Agent 执行内核：请求 → 循环 → 消息 → API → 工具
 | 11 | 一次调用的完整生命周期 | 追踪工具查找、`validateInput`、授权、执行、结果映射和持久化，区分一般输入校验与具体工具语义。 |
 | 12 | 权限引擎 | 拆解 allow、ask、deny、permission mode、优先级、用户确认和权限上下文传播。 |
 | 13 | 命令执行安全边界 | 分析 Bash/PowerShell 解析、路径和命令验证、沙箱、危险操作识别，以及云端分类模型与本地校验的边界。 |
-| 14 | PowerShell 脚本为什么晚到执行阶段才报错 | 从 AST、权限检查、运行时环境和错误通道说明静态通过不代表执行成功，给出定位思路。 |
+| 14 | 快照与历史如何实现回滚 | 解释 Read 凭据与写入保护、checkpoint/file history 的保存、按文件恢复和不可回滚的副作用。 |
 | 15 | 本地与网络检索如何协作 | 比较 Glob、Grep、ripgrep、WebSearch、WebFetch 的搜索、分页、截断和错误恢复策略。 |
 | 16 | 项目上下文如何注入 | 解释系统提示词分块、CLAUDE.md、环境信息和动态 section 怎样组成有效上下文。 |
 | 17 | 长会话如何继续运行 | 梳理 token 估算、microcompact、partial/full compact、摘要回填和压缩后的清理。 |
@@ -264,4 +264,3 @@ Claude Code 的核心不是某一个神奇的 prompt，而是一组围绕模型�
 - [Claude Code now supports artifacts](https://claude.com/blog/artifacts-in-claude-code)
 
 - [Introducing Claude Tag](https://www.anthropic.com/news/introducing-claude-tag)
-
