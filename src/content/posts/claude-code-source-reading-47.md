@@ -12,15 +12,56 @@ imagePosition: "left"
 
 ## 回答上一篇的问题
 
-文档与建议生成以后，Claude Code 如何通过通知、mailbox 与 output style 把结果送到正确的人、Agent 和界面，并完成整个运行闭环？
+MagicDocs 的最佳实践是什么？
 
-先把“结果送给谁”拆成三个问题：**Claude Code 分开处理表达、投递和提醒，并为每一层保留自己的确认语义。** Output Style 在生成前约束模型怎样说；mailbox 负责内容或控制消息何时到目标 Agent；notification 只负责把注意力拉回终端或外部 Hook。
+先给结论：**把 MagicDocs 当成“会被持续维护的、高信号架构索引”，不要把它写成项目百科、变更日志或 API 手册。** 一份好的 Magic Doc 只回答几件读者真正需要重新发现的问题：这个子系统为什么存在，关键入口在哪里，组件怎样连接，哪些约定或陷阱不明显，以及设计取舍是什么。它应该短、稳定、能帮助下一位工程师找到源码，而不是把源码重新抄一遍。
 
-`output style` 在模型推理前进入 system prompt，决定 Claude 应该怎样组织回答；mailbox 保存“谁发给谁”的内容或控制消息，并在目标 Agent 可以接收时进入下一轮；notification 面向人，负责把“该回来看看了”送到 TUI、终端或 Hook。真正的回答仍由当前运行宿主承接：交互式会话交给 REPL 渲染，`-p` 与 SDK 则写成 text、JSON 或 `stream-json`。
+这里有一个必须先说清楚的版本边界：本系列还原的是 2.1.88。源码中的 `initMagicDocs()` 只有在 `process.env.USER_TYPE === 'ant'` 时才注册文件读取监听器和 post-sampling hook；普通公开构建不能仅靠创建 `# MAGIC DOC:` 文件或写 `~/.claude/magic-docs/prompt.md` 打开这条内部路径。非官方追踪文章还记录了 MagicDocs 在 v2.1.91 被移除。因此，下面的“最佳实践”首先适用于理解这套内部设计；普通用户若要落地，应使用 skill、subagent、Stop hook 或插件做一个受控的等价实现，而不是假定当前 CLI 仍会自动更新它。
 
-这三个通道不能互相替代。把消息写进 teammate mailbox，不代表人已经收到桌面提醒；发出系统通知，也不会把结果自动塞进另一个 Agent 的上下文；选择 `Explanatory`，更不会把 stdout 从纯文本变成 JSON。
+社区实现 Airbender 给出了一个很实用的分流原则：**描述系统如何工作**的事实适合放进 MagicDocs；**每次都必须成立的前置假设**放进 `CLAUDE.md`；**需要在某个动作发生时重新加载的步骤**做成 Skill；**可以完全机械验证的规则**交给 Hook；**偶尔才相关的个人偏好**放进 Memory。这样做的价值不是多几个目录，而是避免把所有内容塞进每轮都会消耗上下文的 `CLAUDE.md`。
 
-如果把整条链路压缩成一句话，就是：**先用 output style 约束“怎么说”，再由 Query Loop 产生内容；内容按当前宿主送往 TUI 或 SDK，跨 Agent 内容按地址进入 mailbox；需要唤回人的事件另走 notification；人或 Agent 的下一次输入再进入同一套循环。**
+**第一条实践是按架构边界拆文档。** 不要建立一份覆盖整个仓库的 `architecture.md`，也不要按每个源文件创建一份。更好的切分单位是一个子系统、一个稳定入口或一条跨模块边界，例如 `Authentication`、`Billing`、`Query Loop`。Airbender 的初始化流程会先探索仓库，再让用户在“按子系统、按顶层目录、按入口点或混合切分”之间选择；这比让模型自行决定几十个文件更容易保持长期稳定。一个文档可以从几百词的骨架开始，只有出现非显然的新洞见时才增长。
+
+**第二条实践是把标题和作者意图当成接口。** 文件开头使用稳定的标题：
+
+```md
+# MAGIC DOC: Authentication architecture
+
+_只保留稳定入口、安全边界和非显然的失败模式。_
+```
+
+2.1.88 的 `detectMagicDocHeader(content)` 会识别 `# MAGIC DOC:` 标题，并把标题后紧邻的斜体行作为可选的文档专属说明。源码的匹配正则实际上允许多行位置，但实践上仍应把标题放在第一行；标题和斜体说明一旦建立，就不要让自动更新器改名或重写。斜体说明应描述“这份文档应该保留什么”，而不是塞入一套与通用提示词重复的编码规范。
+
+**第三条实践是只写高信号的当前状态。** 外部作者提炼出的 MagicDocs 原始提示词，和社区复刻实现的 README，都反复强调同一组边界：
+
+| 应该保留 | 应该删除或避免 |
+| --- | --- |
+| 高层架构、关键入口、组件连接方式 | 逐函数、逐参数、逐行的代码导览 |
+| 非显然约定、陷阱、失败边界 | 代码一眼就能看出的信息 |
+| 设计决策及其理由、关键依赖 | 每次提交的 changelog、历史叙述 |
+| 指向源码、文档和协议的导航链接 | 低级实现细节、重复的 `CLAUDE.md` 内容 |
+
+“当前状态”比“历史过程”更重要。模块从 Redis 换成 Postgres 后，直接改写“当前使用 Postgres”这段；不要追加“以前使用 Redis，现在改成……”的流水账。这样下一次 fork 读取时得到的是可用地图，而不是考古记录。
+
+**第四条实践是只有实质性新信息才触发更新。** 源码默认提示要求模型在没有 substantial new information 时不调用 `Edit`，而不是每次对话结束都生成一次“我检查过了”。普通用户复刻时也应保留这个门槛：一次工具调用、一次已经写进文档的事实或一条临时错误，不值得触发文档改写；新的系统边界、关键依赖、非显然 gotcha 才值得进入文档。更新必须是就地替换、删除过时内容或整理结构，不能把每轮对话追加到文件末尾。
+
+**第五条实践是把自动写入限制在精确文件。** 2.1.88 的 MagicDocs Agent 只有 `Edit` 工具，`canUseTool` 还会检查输入的 `file_path` 必须等于当前被跟踪的文档路径；`Write`、Bash 和其他文件路径全部 deny。它在 forked context 中运行，主会话继续自己的工作。社区复刻如果只做到“后台启动一个 subagent”，却没有精确路径权限，结果很容易从维护一份架构文档变成顺手修改源码、配置甚至删除文件。最低安全线应包括：只允许目标文档的 Edit、保留 git diff/备份、自动更新前后做 Markdown 与链接检查，并把失败当成旁路失败而不是阻塞主任务。
+
+**第六条实践是给自动化增加一个“清理”回路。** 内部实现只在主 REPL 自然收尾、最后一条 assistant turn 没有 tool call 时串行更新已经读过的文档；文件被删除、不可读或移除标题后，它会停止跟踪。Airbender 的公开复刻再加了一层 Stop hook：退出时检查 `git diff`，清掉失效路径和死链接。这两层职责不同：后台更新负责捕获新洞见，Stop hook 负责结构性收敛。不要用一个无限运行的 hook 在每次工具调用后重写整套文档。
+
+**第七条实践是定期用新上下文验收，而不是只看文件变长。** 可以用一个全新的 subagent 或新会话问三类问题：能否从文档找到真正入口，能否说出一个非显然的失败边界，能否指出文档与当前代码不一致的地方。如果答案仍然需要重新扫描整个仓库，说明文档没有提供导航；如果回答大量复述源代码，说明信号密度太低；如果无法找出过期路径，说明清理回路不够。社区作者还把这种过程写成 red/green/refactor：先用干净上下文测试缺口，再加入最小文档，最后删除没有带来行为改善的内容。
+
+最后给一个可执行的判断表：
+
+| 信息 | 更合适的落点 |
+| --- | --- |
+| “认证模块由哪些组件组成、入口在哪里、为什么这样连” | MagicDocs 或等价的架构文档 |
+| “这个仓库永远用 pnpm，提交前必须跑测试” | `CLAUDE.md` 或机械 Hook |
+| “发布时按这 8 步执行并等待审批” | Skill |
+| “用户偏好把多个小改动合成一个 PR” | Memory |
+| “能用脚本 100% 判定的格式/测试规则” | Hook |
+
+因此，MagicDocs 最佳实践不是“让 Claude 自动多写一些 Markdown”，而是维护一张小而准确的系统地图：按边界切分、稳定标题、当前状态、高信号内容、实质性变更才更新、精确路径权限、后台更新加退出清理，并且随时准备在公开版本里用 Skill/Hook/Subagent 替代它。
 
 ## 本章先建立三个概念
 
@@ -455,3 +496,11 @@ Output Style 面向即将推理的模型，规定回答的表达方式；Mailbox
 - [Claude Code Hooks：Notification](https://code.claude.com/docs/en/hooks)
 
 - [Claude Code Agent Teams：Mailbox](https://code.claude.com/docs/en/agent-teams)
+
+- [Stop putting everything in CLAUDE.md：Airbender 与 MagicDocs 的设计取舍](https://translunar.io/blog/2026/04/06/airbender/)
+
+- [Anthropic quietly removed MagicDocs from Claude Code](https://translunar.io/blog/2026/04/05/magicdocs-removed/)
+
+- [Claude Code 提示词全景目录：Magic Docs 提示词规则整理](https://xdlkc.github.io/2026/04/01/claude-code-prompts-catalog/index.html)
+
+- [translunar/airbender：公开复刻 MagicDocs 的插件与决策树](https://github.com/translunar/airbender)

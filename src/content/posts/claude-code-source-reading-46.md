@@ -478,7 +478,7 @@ Prompt Suggestions 在停止阶段预测用户下一句，先经过功能门与�
 
 ## 留给下一篇的问题
 
-文档与建议生成以后，Claude Code 如何通过通知、mailbox 与 output style 把结果送到正确的人、Agent 和界面，并完成整个运行闭环？
+MagicDocs 的最佳实践是什么？
 
 ## 参考资料
 
