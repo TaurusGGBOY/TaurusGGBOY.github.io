@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读15：本地与网络检索如何协作"
 published: 2026-07-24T16:47:02+08:00
-updated: 2026-07-24T16:47:02+08:00
+updated: 2026-08-04
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -9,7 +9,6 @@ draft: false
 image: "/images/posts/claude-code-source-reading-15/claude-code-source-reading-00.png"
 imagePosition: "left"
 ---
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：你知道 rewind 的时候哪些东西是无法回滚的吗？
@@ -18,16 +17,44 @@ imagePosition: "left"
 
 本文只分析 `@anthropic-ai/claude-code@2.1.88` 的还原源码，不把后续版本的 `/rewind` UI 选项倒灌进来。对这一版，结论可以沿调用链落地：`fileHistoryRewind → applySnapshot → restoreBackup/unlink` 只恢复已有备份的磁盘文件，不撤销外部副作用，也不提供跨文件事务。
 
-## 先把“不能回滚”拆成六类
+## 关键结论（Key Takeaways）
+
+- **检索是“发现来源—定位内容—读取证据—回填上下文”四步流水线**：Glob 发现路径、Grep 定位命中、Read 读取局部证据、WebSearch 发现网页候选、WebFetch 提取指定页面；每一步的截断结果都要被模型解释后才能决定下一步。
+- **限制本身也是结果**：100 条路径、250 条 grep 结果、Read 的 256 KB / 25,000 token 上限、WebSearch 的 8 次搜索、WebFetch 的 100,000 字符，都必须连同 `truncated`、`appliedLimit`、`offset` 或错误状态一起解释——空结果从来只对本次搜索窗口成立。
+- **Glob 与 Grep 的 ignore 语义不同**：Glob 默认加 `--no-ignore`（`CLAUDE_CODE_GLOB_NO_IGNORE` 默认按 `true` 处理），Grep 保留 ripgrep 的 ignore 规则并显式排除 `.git`/`.svn`/`.hg` 等版本目录。
+- **WebSearch 只给候选来源，不做事实校验**：`allowed_domains` 只过滤结果；标题、摘要和链接可能过时、错误或包含 prompt injection，主模型必须通过 WebFetch、来源比较和清楚引用完成验证。
+- **WebFetch 有四道网络边界**：URL 校验、域名权限（`domain:<hostname>`，默认 ask）、Anthropic 域名预检（10 秒）、实际请求（60 秒超时、10 MB 上限、10 跳重定向）；跳到不同 host 时要求模型用新 URL 重新授权。
+
+## 本篇新增机制
+
+相对上一篇“file-tools-and-rollback”（文件如何安全读写），本篇在心智模型中新增三块：
+
+| 新增机制 | 解决的问题 | 关键符号 |
+|---|---|---|
+| 检索流水线 | 候选发现、内容读取、相关性裁剪和证据回填是四个独立步骤 | `Glob` → `Grep` → `Read`；`WebSearch` → `WebFetch` |
+| 有界结果 | 分页、截断与范围参数限制一次检索占用的上下文和执行时间 | `truncated`、`appliedLimit`、`offset`、`head_limit` |
+| 证据局部性 | 模型应拿到与问题最接近的路径、行号和片段，以便继续验证 | `files_with_matches`、`-A/-B/-C`、`file_unchanged` |
+
+## 问题
+
+先接住上一篇留下的问题：**你知道 rewind 的时候哪些东西是无法回滚的吗？**
+
+把 rewind 当成“给 Claude Code 加了一个 Ctrl+Z”很容易误导。真正的问题是：当模型已经改文件、跑命令、推送 Git，又想回到某个消息时，哪一层状态有快照，哪一层根本没有进入文件历史？
+
+本文只分析 `@anthropic-ai/claude-code@2.1.88` 的还原源码，不把后续版本的 `/rewind` UI 选项倒灌进来。对这一版，结论可以沿调用链落地：`fileHistoryRewind → applySnapshot → restoreBackup/unlink` 只恢复已有备份的磁盘文件，不撤销外部副作用，也不提供跨文件事务。
+
+先把“不能回滚”拆成六类：
 
 | 边界 | 为什么不能回滚 | `2.1.88` 源码落点 |
 |---|---|---|
 | **Bash 或人工改动** | 文件历史只在 Write、Edit、NotebookEdit 真正落盘前调用 `fileHistoryTrackEdit`；通过 Bash 的 `sed`、`mv`、`cp` 或用户编辑器改文件，不会自动留下同一套备份。 | `fileHistoryTrackEdit` 的调用方是文件编辑工具，而不是任意进程监控器。 |
 | **网络、数据库、部署和 Git 外部副作用** | `git push`、数据库写入、API 请求、发布部署已经改变了外部系统，复制一份本地文件备份无法反向撤销它们。 | `fileHistoryRewind` 最终只调用 `copyFile`、`chmod` 或 `unlink`。 |
 | **没有进入当前 trackedFiles 的文件** | 没有在目标消息检查点建立备份，就没有可供 `applySnapshot` 解析的 `backupFileName`；其他会话或检查点之外的文件不属于这次恢复范围。 | `FileHistorySnapshot.trackedFileBackups` 与 `applySnapshot(state, targetSnapshot)`。 |
-| **对话和模型已经产生的上下文** | 这条 `fileHistoryRewind` 调用链没有截断 transcript，也没有撤销已经完成的模型推理。较新的交互式产品可能另外提供“恢复对话”选项，但那是另一条控制路径，不能和本版文件恢复混为一谈。 | `REPL.tsx` / `print.ts` 调用的是文件历史恢复函数。 |
+| **对话和模型已经产生的上下文** | 这条 `fileHistoryRewind` 调用链没有截断 transcript，也没有撤销已经完成的模型推理。较新的交互式产品可能另外提供“恢复对话”选项，但那是另一条控制路径。 | `REPL.tsx` / `print.ts` 调用的是文件历史恢复函数。 |
 | **不存在、被淘汰或未启用的 checkpoint** | checkpointing 被关闭、备份创建失败、snapshot 被淘汰，或者 `messageId` 找不到匹配 snapshot 时，系统没有完整的目标版本可恢复。 | `fileHistoryEnabled`、最多保留 100 个 snapshot、`The selected snapshot was not found`。 |
 | **跨文件的完整一致性** | `applySnapshot` 按文件循环并逐个捕获异常；某个文件恢复失败时，前面已经恢复的文件不会自动回滚。 | `applySnapshot` 的单文件 `try/catch` 与 `tengu_file_history_rewind_restore_file_failed` 事件。 |
+
+![rewind 的六类边界](/images/posts/claude-code-source-reading-15/15-rewind-boundaries-handdrawn.png)
 
 这个表也解释了为什么“代码回来了”不等于“任务回到了过去”。最多只能说：在目标消息对应的文件检查点里，仍有备份、且恢复操作成功执行的那些文件回来了。命令产生的构建目录、Git 指针、远程服务状态、另一会话的修改，以及模型已经看过的上下文，都要分别处理。
 
@@ -35,31 +62,13 @@ imagePosition: "left"
 
 因此，实践中可以按问题类型选择动作：只是文件改错了，优先用 code-only 的思路恢复文件；如果是模型已经陷入错误推理，单纯恢复文件不够，还要考虑恢复对话或重新开会话；如果是命令已经推送到远端、写入数据库或完成部署，就应该使用对应系统的补偿操作或 Git/发布系统的回滚，而不是继续寻找一个本地 checkpoint。
 
-本文继续限定在 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码。下面的代码均来自 `restored-src/`，只省略与本段结论无关的字段与分支。
+**本篇继续追问：当模型需要“找到证据”时，本地与网络检索工具分别覆盖哪一段？** 下面沿“本地定位—MCP 取证—网络核对”的路线展开。
 
-## 本章先建立三个概念
+## 正文
 
-- **检索流水线**：候选发现、内容读取、相关性裁剪和证据回填是四个独立步骤。
+本文只引用 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 还原源码；路径用于定位函数，不代表 Anthropic 内部目录。代码片段省略埋点、UI 和无关分支；代码块以 `[source]` 标注证据层级，块内注释注明 `restored-src/` 路径（2.1.88 还原源码）。
 
-- **有界结果**：分页、截断与范围参数限制一次检索占用的上下文和执行时间。
-
-- **证据局部性**：模型应拿到与问题最接近的路径、行号和片段，以便继续验证。
-
-![本地与网络检索的有界流水线](/images/posts/claude-code-source-reading-15/15-retrieval-pipeline-detail-handdrawn.png)
-
-这张图把检索拆成“发现路径、定位内容、读取证据、回填上下文”四步；分页和截断不是装饰，而是控制单次调用的成本和信息范围。
-
-## 金额工单先查本地，再查外部
-
-你没有让 Claude Code 一上来搜索互联网，而是给了一个有顺序的调查要求：
-
-> 先读取 `CLAUDE.md`、金额单位工单和相关代码；通过 issue-tracker MCP 读取事故记录，必要时搜索 Stripe 官方文档。
-
-Claude Code 先用 Glob、Grep、Read 缩小本地范围，再按需调用 MCP、WebSearch 或 WebFetch。路径、匹配片段、工单字段和网页正文都会回到同一条调查上下文，但每种检索的权限、分页、截断和失败边界不同。
-
-下面沿“本地定位—MCP 取证—网络核对”的路线，说明这些工具如何协作，而不是把所有搜索都叫作 RAG。值班工程师真正需要的是可回溯的证据链，不是搜索结果数量。
-
-## 先建立一张检索地图
+### 先把检索拆成五层地图
 
 当任务只问一个函数时，从根目录读取所有文件既慢又会污染上下文。Claude Code 把检索拆成三个问题：先找候选路径，再定位内容，最后读取能支撑判断的局部证据；网络检索再把“发现来源”和“读取页面”分开。
 
@@ -75,11 +84,36 @@ Claude Code 先用 Glob、Grep、Read 缩小本地范围，再按需调用 MCP�
 
 图里的回箭头表示检索不会一次完成。模型先用 `Glob` 确定范围，再用更窄的 `Grep` 找行，最后 `Read` 相邻片段；网页路径同样先用 `WebSearch` 找候选，再交给 `WebFetch` 读取指定页面。每一步的截断结果都必须被模型解释后，才能决定下一步检索。
 
-## Glob 先找路径，不读取文件内容
+沿用金额工单的调查要求：
+
+> 先读取 `CLAUDE.md`、金额单位工单和相关代码；通过 issue-tracker MCP 读取事故记录，必要时搜索 Stripe 官方文档。
+
+Claude Code 先用 Glob、Grep、Read 缩小本地范围，再按需调用 MCP、WebSearch 或 WebFetch。路径、匹配片段、工单字段和网页正文都会回到同一条调查上下文，但每种检索的权限、分页、截断和失败边界不同。值班工程师真正需要的是可回溯的证据链，不是搜索结果数量。
+
+### 搜索策略对比矩阵：五条检索通道选哪条
+
+在进入逐工具细节之前，先放一张对比矩阵。它把 `Glob`（工具）、`Grep`（工具）、`ripgrep`（Grep 底层的二进制）、`WebSearch`、`WebFetch` 五个检索通道按同一组维度并列——选错通道的代价不是慢，而是证据链本身不可回溯：
+
+| 维度 | `Glob` | `Grep`（工具） | `ripgrep`（底层二进制） | `WebSearch` | `WebFetch` |
+|---|---|---|---|---|---|
+| 回答的问题 | 文件在哪里 | 哪些文件/行匹配正则 | 原始匹配（无分页层） | 哪些网页可能相关 | 指定页面里有什么 |
+| 输入 | `pattern`、`path` | `pattern`、`path/glob/type`、`output_mode` | `pattern`、`-A/-B/-C`、`--hidden` 等 flag | `query`、`allowed_domains`/`blocked_domains` | `url`、`prompt` |
+| 默认上限 | 100 条路径 | 250 条（`DEFAULT_HEAD_LIMIT`，`head_limit: 0` 取消） | 20 MB stdout buffer | `max_uses: 8` 次服务端搜索 | 100,000 字符 Markdown |
+| 排序 | mtime 从旧到新（`--sort=modified`） | `files_with_matches` 从新到旧；`content`/`count` 保留原序 | 由调用方决定 | 服务端相关性排序，不可控 | 页面原文顺序 |
+| ignore 行为 | 默认 `--no-ignore`（`CLAUDE_CODE_GLOB_NO_IGNORE`） | 保留 ignore，排除 `.git/.svn/.hg/.bzr/.jj/.sl` | 默认尊重 ignore 文件 | 不适用 | 不适用 |
+| 权限边界 | 读取规则 + 权限 ignore pattern | 同左 | 无（工具层叠加） | provider/功能开关启用条件 | `domain:<hostname>` deny/ask/allow，默认 ask |
+| 网络 | 无 | 无 | 无 | 专用模型流 + 服务端搜索 | HTTP 请求 + Anthropic 预检 |
+| 失败语义 | 空数组 → `No files found` | 退出码 1 = 无匹配；超时抛 `RipgrepTimeoutError` | EAGAIN 重试一次；`ENOENT/EACCES/EPERM` 抛出 | 服务端错误码进结果数组 | 无效 URL/域名拒绝/超时/`EGRESS_BLOCKED` 抛错 |
+| 适用阶段 | 第一步：缩小候选目录 | 第二步：在内容里定位行 | 需要精确 flag 控制的定制搜索 | 本地证据不足时发现来源 | 对候选 URL 提取证据 |
+
+矩阵之外还有一条选择启发式：**先本地、后网络；先路径、后内容、再证据。** 本地搜索不可用时才引入网络；网络搜索只产生候选，任何网页内容都要经过 WebFetch 的边界并以独立来源交叉核对，不能把搜索摘要当最终证据。MCP 检索（如 issue-tracker）与 `Read` 共用证据回填，但其权限与分页由对应 MCP 服务定义，不在本篇五通道之内。
+
+### Glob 先找路径，不读取文件内容
 
 `restored-src/src/tools/GlobTool/GlobTool.ts` 的输入很小：必填 `pattern`，可选 `path`。调用方省略 `path` 时，`GlobTool.getPath()` 把搜索根回退到 `getCwd()`。
 
-```ts
+```ts [source]
+// restored-src/src/tools/GlobTool/GlobTool.ts（2.1.88 还原源码）
 async call(input, { abortController, getAppState, globLimits }) {
   const start = Date.now()
   const appState = getAppState()
@@ -122,11 +156,12 @@ Glob 的可见集合同时取决于 pattern、搜索根、两个环境变量、�
 
 在调用前，`GlobTool.validateInput()` 还会检查显式 `path` 是否存在且为目录。Windows UNC 路径会跳过这次预先 `stat`，以规避验证阶段触发 NTLM 凭据泄漏；后续仍进入共享权限流程。目录缺失返回 `errorCode: 1`，路径存在但类型为非目录时返回 `errorCode: 2`。
 
-## Grep 在内容里定位，并把排序与分页说清楚
+### Grep 在内容里定位，并把排序与分页说清楚
 
 `Glob` 只看路径。需要寻找函数名、错误文本或调用痕迹时，`GrepTool` 才进入文件内容。它在 `restored-src/src/tools/GrepTool/GrepTool.ts` 中组装参数，再调用 `restored-src/src/utils/ripgrep.ts` 的 `ripGrep()` 执行正则搜索。
 
-```ts
+```ts [source]
+// restored-src/src/tools/GrepTool/GrepTool.ts（2.1.88 还原源码）
 function applyHeadLimit<T>(
   items: T[],
   limit: number | undefined,
@@ -163,11 +198,12 @@ Grep 保留 ripgrep 自己的 ignore 规则，参数中省略 `--no-ignore`。�
 
 `ripGrep()` 对退出状态做了专门区分：退出码 `1` 才是正常的无匹配；`ENOENT`、`EACCES`、`EPERM` 会抛出；EAGAIN 会以单线程 `-j 1` 重试一次。默认超时在 WSL 为 60 秒，其他平台为 20 秒，可由 `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS` 的正整数秒覆盖。超时且结果为空时抛出 `RipgrepTimeoutError`，明确提醒模型缩小路径或 pattern，从状态上区分搜索未完成与零命中。如果异常发生前已有完整行，部分错误路径会返回这些行，因此读者仍要把它理解成一次有执行边界的观察。
 
-## Read 读取确定范围，并阻止一个文件吞掉上下文
+### Read 读取确定范围，并阻止一个文件吞掉上下文
 
 搜索最终需要落到内容。`FileReadTool` 同时处理文本、`image`、`notebook`、`pdf`、PDF 页图片 `parts`，以及重复读取命中的 `file_unchanged`。本篇聚焦最常见的文本路径。
 
-```ts
+```ts [source]
+// restored-src/src/tools/FileReadTool/FileReadTool.ts（2.1.88 还原源码）
 const defaults = getDefaultFileReadingLimits()
 const maxSizeBytes =
   fileReadingLimits?.maxSizeBytes ?? defaults.maxSizeBytes
@@ -187,23 +223,24 @@ const maxTokens =
 
 `Read` 同样先经过 `checkReadPermissionForTool()`。显式 deny 路径在输入校验阶段就会返回错误，危险设备文件也会被拒绝。路径在 cwd 之外时，权限上下文和内部可读路径共同给出 allow、ask 或 deny；只读属性只影响副作用分类，不扩大可读目录。
 
-## 本地搜索的边界由 cwd、ignore 和权限共同决定
+### 本地搜索的边界由 cwd、ignore 和权限共同决定
 
 把三种本地工具放在一起看，可以得到一个更准确的范围公式：
 
 `可见结果 = 搜索根 ∩ pattern/type/glob ∩ ignore 后剩余路径 ∩ 权限可读范围 ∩ 本页与大小限制`
 
-cwd 只是省略 `path` 时的默认根。显式绝对路径可以指向 cwd 外部，此时会进入 `checkReadPermissionForTool()`：deny 规则优先拒绝，ask 规则要求确认，allow 规则或受认可的内部只读路径才能继续。上一章讨论的权限与沙箱边界，在检索工具这里仍然有效。
+cwd 只是省略 `path` 时的默认根。显式绝对路径可以指向 cwd 外部，此时会进入 `checkReadPermissionForTool()`：deny 规则优先拒绝，ask 规则要求确认，allow 规则或受认可的内部只读路径才能继续。上一篇讨论的权限与沙箱边界，在检索工具这里仍然有效。
 
-ignore 由多层规则组成：Glob 与 Grep 使用不同的 ripgrep 参数，权限系统还会生成自己的 ignore pattern。因此，排查漏搜时要同时记录工具、cwd、path、环境变量和权限配置。
+ignore 由多层规则组成：Glob 与 Grep 使用不同的 ripgrep 参数（`--no-ignore` vs 保留 ignore），权限系统还会生成自己的 ignore pattern。因此，排查漏搜时要同时记录工具、cwd、path、环境变量和权限配置。
 
 排序更不能混为一谈。Glob 的底层列表按修改时间从旧到新；Grep 的 `files_with_matches` 在工具层重排为从新到旧；`content` 和 `count` 则保留 ripgrep 返回顺序再分页。Claude Code 选择这些顺序，是为了让路径发现稳定、让最近修改的命中文件优先进入有限窗口。
 
-## WebSearch 找候选来源，不直接抓页面
+### WebSearch 找候选来源，不直接抓页面
 
 `WebSearchTool` 与本地 Grep 的实现差异很大。它构造 Anthropic API 的 `web_search_20250305` server tool，再发起一条独立的模型流。
 
-```ts
+```ts [source]
+// restored-src/src/tools/WebSearchTool/WebSearchTool.ts（2.1.88 还原源码）
 function makeToolSchema(input: Input): BetaWebSearchTool20250305 {
   return {
     type: 'web_search_20250305',
@@ -229,11 +266,12 @@ function makeToolSchema(input: Input): BetaWebSearchTool20250305 {
 
 工具是否出现还取决于 provider 与模型。2.1.88 的 `isEnabled()` 对 first-party 和 Foundry 返回 `true`，Vertex 仅对源码列出的 Claude 4 系列名称返回 `true`，其他 provider 返回 `false`。这只是客户端启用条件，不代表当前账号、地区、网络和服务端一定可用。
 
-## WebFetch 把指定 URL 变成与问题相关的内容
+### WebFetch 把指定 URL 变成与问题相关的内容
 
 拿到链接后，`WebFetchTool` 才负责抓页面。它的输入只有 `url` 和 `prompt`：前者告诉工具去哪里，后者告诉二次模型从页面里提取什么。`prompt` 必填，工具始终按提取要求处理页面。
 
-```ts
+```ts [source]
+// restored-src/src/tools/WebFetchTool/WebFetchTool.ts（2.1.88 还原源码）
 const isPreapproved = isPreapprovedUrl(url)
 
 let result: string
@@ -272,11 +310,12 @@ if (
 
 外部页面必须按不可信输入处理。域名 allow、HTTPS、blocklist 和重定向检查只决定连接资格；页面事实与 prompt injection 仍需独立判断。`applyPromptToMarkdown()` 会把页面 Markdown 与提取要求一起交给二次模型；静态源码只显示连接与提取流程，未提供通用 sanitizer 保证。因此，页面返回的命令、配置建议和事实仍要由主 Agent 结合用户任务、权限规则与其他证据判断。
 
-## 失败必须作为独立状态回到 Agent
+### 失败必须作为独立状态回到 Agent
 
 五种工具最终都要回到同一套工具执行生命周期。`restored-src/src/services/tools/toolExecution.ts` 的 `checkPermissionsAndCallTool()` 在调用成功后执行工具自己的 `mapToolResultToToolResultBlockParam()`；`restored-src/src/utils/toolResultStorage.ts` 的 `processToolResultBlock()` 还会对过大的普通文本结果执行持久化处理。得到的块形如：
 
-```ts
+```ts [source]
+// restored-src/src/tools/WebFetchTool/WebFetchTool.ts（2.1.88 还原源码）
 return {
   tool_use_id: toolUseID,
   type: 'tool_result',
@@ -300,27 +339,78 @@ return {
 
 主模型拿到 `tool_result` 后，可以缩小 pattern、翻到下一页、读取另一个范围、改用其他来源，或者向用户说明当前边界。这里才是分层搜索真正闭环的地方：工具负责产生可解释的观察，query loop 负责决定下一步。
 
-## 小结
+## 源码映射
 
-Claude Code 的检索能力可以概括成三条原则。
+| 主题 | 关键文件（`restored-src/src/`） | 关键函数 / 符号 | 证据 |
+|---|---|---|---|
+| 路径发现 | `tools/GlobTool/GlobTool.ts`、`utils/glob.ts` | `GlobTool.call()`、`glob()`、`extractGlobBaseDirectory()`、`--sort=modified` | 源码已确认 |
+| Glob 环境变量 | `utils/glob.ts` | `CLAUDE_CODE_GLOB_NO_IGNORE`、`CLAUDE_CODE_GLOB_HIDDEN` | 源码已确认 |
+| 内容定位 | `tools/GrepTool/GrepTool.ts`、`utils/ripgrep.ts` | `GrepTool.call()`、`applyHeadLimit()`、`DEFAULT_HEAD_LIMIT`、`ripGrep()` | 源码已确认 |
+| 读取证据 | `tools/FileReadTool/FileReadTool.ts`、`limits.ts` | `getDefaultFileReadingLimits()`、`readFileInRange()`、`MaxFileReadTokenExceededError` | 源码已确认 |
+| 读取去重 | `tools/FileReadTool/FileReadTool.ts` | `readFileState`、`file_unchanged`、`tengu_read_dedup_killswitch` | 源码已确认 |
+| 网络发现 | `tools/WebSearchTool/WebSearchTool.ts` | `makeToolSchema()`、`web_search_20250305`、`max_uses: 8`、`tengu_plum_vx3` | 源码已确认 |
+| 网络提取 | `tools/WebFetchTool/WebFetchTool.ts` | `getURLMarkdownContent()`、`applyPromptToMarkdown()`、`MAX_MARKDOWN_LENGTH`、`EGRESS_BLOCKED` | 源码已确认 |
+| 结果回填 | `services/tools/toolExecution.ts`、`utils/toolResultStorage.ts` | `checkPermissionsAndCallTool()`、`mapToolResultToToolResultBlockParam()`、`processToolResultBlock()` | 源码已确认 |
 
-第一，先缩范围，再读内容。Glob 发现路径，Grep 定位命中，Read 读取确定片段；WebSearch 发现来源，WebFetch 提取指定页面。工具之间允许跳步，但职责边界清楚。
+## 设计决策
 
-第二，限制本身也是结果。100 个路径、250 条 grep 结果、Read 的字节/token 上限、WebSearch 的 8 次搜索和 WebFetch 的 100,000 字符，都必须连同截断、offset 或错误状态一起解释。空结果从来只对本次搜索窗口成立。
+**第一，先缩范围，再读内容。** Glob 发现路径、Grep 定位命中、Read 读取确定片段；WebSearch 发现来源、WebFetch 提取指定页面。工具之间允许跳步，但职责边界清楚：路径枚举绝不直接读取文件内容，网页发现绝不直接抓取页面。这样每一层的代价都可控，证据链可回溯。
 
-第三，搜索范围由运行环境决定。cwd、ignore、权限、provider、域名规则、代理和网络状态都会改变可见结果。
+**第二，限制本身也是结果。** 100 个路径、250 条 grep 结果、Read 的字节/token 上限、WebSearch 的 8 次搜索和 WebFetch 的 100,000 字符，都必须连同截断、offset 或错误状态一起解释。空结果从来只对本次搜索窗口成立；`truncated`、`appliedLimit`、`appliedOffset` 这些字段就是让模型能区分“没有”和“还没看完”。
 
-从 query loop 的角度看，检索工具的共同价值只有一个：把一个过大的未知空间，压缩成下一轮模型可以继续判断的观察结果。
+**第三，网络内容按不可信输入处理。** 域名 allow、HTTPS、blocklist 与重定向检查只决定连接资格，不保证页面事实；搜索摘要不能作为最终证据，提取的 125 字符逐字引用限制与 `tool_result` 的来源提醒，都是为了让主模型保持可核验的引用习惯。
+
+**第四，搜索范围由运行环境决定。** cwd、ignore、权限、provider、域名规则、代理和网络状态都会改变可见结果；Glob 与 Grep 的 ignore 语义还刻意不同，因此排查漏搜时必须同时记录工具、cwd、path、环境变量与权限配置。
+
+## 练习：给一次金额工单调查画出检索路径
+
+用 15 分钟做下面这件事，全部在测试目录进行：
+
+1. 在测试仓库里分别运行 `claude -p "Glob **/*conversion* 并列出结果"` 与 `claude -p "Grep 'unit' --output_mode content -- -n"`，对比两者的返回：路径列表 vs 带行号内容，观察 `truncated` / `appliedLimit` 字段。
+2. 创建一个 `.gitignore` 并在其中放一个测试文件，分别用 Glob（默认 `--no-ignore`）与 Grep 搜索它，确认 Glob 能找到而 Grep 默认跳过——对照 `CLAUDE_CODE_GLOB_NO_IGNORE` 与 Grep 保留 ignore 的设计差异。
+3. 对一个已知大文件先 Grep 定位行号，再用 `Read` 的 `offset`/`limit` 读取局部；第二次对相同范围重复 Read，观察是否出现 `file_unchanged`。
+4. 对一份公开文档运行 WebSearch 找 2 个候选链接，再对其中一个用 WebFetch 提取关键段落；观察 WebFetch 结果末尾是否要求列出来源，以及 `allowed_domains` 与 `blocked_domains` 同时设置时工具是否直接失败。
+
+**预期输出：**
+
+- 第 1 步：Glob 返回 `filenames` 数组与 `numFiles`/`truncated`；Grep 的 `content` 模式返回带行号的命中行，超过 250 条时出现 `appliedLimit`。
+- 第 2 步：被 `.gitignore` 覆盖的文件在 Glob 下可见（默认忽略 ignore），在 Grep 下默认不可见；这直接验证对比矩阵中“ignore 行为”一行。
+- 第 3 步：重复读取相同范围时第二次返回 `file_unchanged` stub，不再重复传输内容；`tengu_read_dedup_killswitch` 保持默认 `false` 时该行为启用。
+- 第 4 步：`allowed_domains` 与 `blocked_domains` 同时非空时校验失败（源码对两个数组都非空返回错误）；WebFetch 结果包含二次模型提取的段落，并在 `tool_result` 末尾提示用 Markdown 链接列出来源。
+
+## 自测
+
+1. Glob 默认会遵守 `.gitignore` 吗？Grep 呢？为什么两者行为不同？
+2. `applyHeadLimit` 在什么情况下返回 `appliedLimit: undefined`？`head_limit: 0` 意味着什么？
+3. WebSearch 的 `allowed_domains` 提供安全保证吗？WebFetch 的四道网络边界分别是什么？
+
+<details>
+<summary>参考答案</summary>
+
+1. **Glob 默认不遵守**（`CLAUDE_CODE_GLOB_NO_IGNORE` 默认按 `true` 处理，添加 `--no-ignore`），**Grep 默认遵守**并显式排除 `.git/.svn/.hg/.bzr/.jj/.sl`。差异是刻意的：Glob 做路径发现时希望看到尽可能完整的候选集，Grep 定位内容时更倾向于尊重项目的 ignore 约定，避免把噪音文件带进命中窗口。
+
+2. **只有窗口之后确实没有更多结果时返回 `undefined`**（`wasTruncated` 为假）；`head_limit: 0` 表示取消条数上限，直接返回 `items.slice(offset)`，但 20,000 字符持久化阈值、ripgrep 20 MB stdout buffer 与上下文容量仍然约束总成本。
+
+3. **不提供安全保证**，只负责结果过滤；页面事实与 prompt injection 仍需独立验证。四道边界是：URL 校验（2,000 字符、无凭证、hostname 至少两点分段、HTTP→HTTPS）、域名权限（`domain:<hostname>` deny/ask/allow，默认 ask，重定向目标独立授权）、域名预检（Anthropic domain info，10 秒超时，`skipWebFetchPreflight` 可跳过）、实际请求（60 秒超时、10 MB 上限、10 跳重定向、`EGRESS_BLOCKED`）。
+
+</details>
+
+## 回顾：检索如何压缩未知空间
+
+<details>
+<summary>展开查看回顾</summary>
+
+Claude Code 的检索能力可以概括成三条原则：第一，先缩范围再读内容——Glob 发现路径、Grep 定位命中、Read 读取片段，WebSearch 发现来源、WebFetch 提取页面；第二，限制本身也是结果——100 条路径、250 条 grep 结果、25,000 token、8 次搜索、100,000 字符都必须连同截断、offset 或错误状态一起解释；第三，搜索范围由运行环境决定——cwd、ignore、权限、provider、域名规则、代理和网络状态都会改变可见结果。从 query loop 看，检索工具的共同价值，是把过大的未知空间压缩成下一轮可以继续判断的观察。
+
+</details>
 
 ## 留给下一篇的问题
 
 你知道 Claude Code 会用你默认的模型进行 WebSearch 吗？
 
-## 参考资料
+## 相关链接
 
-- [Claude Code Checkpoints and Rewind](https://www.clearly.sh/blog/claude-code-checkpoints-rewind)
-- [Claude Code Checkpoints & Rewind](https://jordanjamesmedia.com/blog/post/claude-code-checkpoints-rewind/)
-- [Claude Code session resume/continue guide](https://thepromptshelf.dev/blog/claude-code-session-resume-continue-guide-2026/)
+- **上一篇**：[14 如何通过快照与历史实现回滚](./14-file-tools-and-rollback.md)——rewind 边界的来源
+- **下一篇**：[16 系统提示与项目上下文如何组装并注入](./16-system-prompt-and-project-context.md)——回答本文的 WebSearch 模型问题
 - [Claude Code 工具参考](https://code.claude.com/docs/en/tools-reference)
-
 - [Claude Code 上下文窗口](https://code.claude.com/docs/en/context-window)

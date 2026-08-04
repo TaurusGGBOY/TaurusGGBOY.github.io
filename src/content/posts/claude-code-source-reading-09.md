@@ -7,8 +7,8 @@ category: "AI / Architecture"
 draft: false
 image: "/images/posts/claude-code-source-reading-09/claude-code-source-reading-00.png"
 imagePosition: "left"
+updated: 2026-08-04
 ---
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：**你知道 Beta 开关打开的时候有什么新功能吗？**
@@ -102,27 +102,31 @@ export function getToolSearchBetaHeader(): string {
 
 本文仍以仓库中从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。为了突出主线，下面的源码片段会省略无关字段、日志和错误上报分支；省略处不改变本文讨论的控制流。
 
-## 本章先建立三个概念
+## Key Takeaways
 
-- **能力契约**：工具名称、输入 Schema、权限检查、执行函数和结果映射共同定义可调用能力。
+- `Tool` 把**模型可见的契约**（`name`、`aliases`、`inputSchema`、`description`）与**宿主执行的能力**（`isEnabled`、`isConcurrencySafe`、`isReadOnly`、`validateInput`、`checkPermissions`、`call`）放在同一个对象上；注册表保存的是一组完整契约，名称只是查找入口。
+- `buildTool` 把缺省行为集中到一处：`isEnabled` 默认 `true`，`isConcurrencySafe` / `isReadOnly` / `isDestructive` 默认 `false`，`checkPermissions` 默认 `allow` 并转交通用权限系统；新工具先按串行、保守路径执行。
+- 注册表是当前会话的一份 `Tools` 数组（`readonly Tool[]`）：`getTools()` 先过滤特殊工具与 deny 规则，再按 `isEnabled()` 筛选；`assembleToolPool()` 按名称排序去重，内置工具同名胜出，分区排序是为了稳定 prompt cache。
+- MCP 与插件工具经 `fetchToolsForClient()` 适配成内部 `Tool`；`runToolUse()` 只做精确主名或别名匹配，找不到时回填 `<tool_use_error>` 的 `tool_result`。
+- 校验有两层且顺序不能颠倒：`inputSchema.safeParse` 结构校验 → `validateInput` 业务校验；任意一层失败都成为与原始 `tool_use_id` 关联的 `is_error: true` 结果。
 
-- **双层校验**：结构校验确认输入形状，语义校验结合当前项目和调用上下文判断可执行性。
+## 本篇新增机制
 
-- **注册表快照**：每轮请求使用当前会话装配出的工具集合，扩展来源在进入模型前被规范化。
+相对上一篇“api-streaming”（请求如何传输），本篇新增三块：
 
-![工具契约从 Schema 到执行结果的闭环](/images/posts/claude-code-source-reading-09/09-tool-contract-detail-handdrawn.png)
+| 新增机制 | 解决的问题 | 关键符号 |
+|---|---|---|
+| 能力契约 | 工具名称、输入 Schema、权限检查、执行函数和结果映射共同定义可调用能力 | `Tool`、`ToolDef`、`BuiltTool` |
+| 双层校验 | 结构校验确认输入形状，语义校验结合项目和调用上下文判断可执行性 | `inputSchema.safeParse`、`validateInput` |
+| 注册表快照 | 每轮请求使用当前会话装配出的工具集合，扩展来源在进入模型前被规范化 | `getTools()`、`assembleToolPool()` |
 
-这张图把工具生命周期压缩成一条链：注册表提供契约，`tool_use` 按名称取回对象，输入先校验，权限通过后才允许副作用。
+## 问题：模型说“请调用 Read”，运行时怎么知道 Read 是谁
 
-## 同一个事故怎样变成工具调用
+**模型返回一个 `tool_use`（比如 `tool_use.name = 'Read'`），运行时怎么知道 Read 是谁？** 你并没有告诉模型“请调用某个函数”，只描述了现象和约束；模型可能先提出 Read、Grep 或 WebSearch 的 `tool_use`，运行时再从当前注册表找到对应对象，读取名称、Schema、权限元数据和 `call` 实现。校验通过后工具才真正执行，结果回到模型。**模型看到的是一份契约，宿主持有的是一个可执行对象；名称相同不等于输入一定合法，也不等于当前会话一定有权限调用。**
 
-工单进来后，你并没有告诉模型“请调用某个函数”。你只描述了现象和约束：先读代码、核对回调字段、不要越过权限确认。模型可能先提出 Read、Grep 或 WebSearch 的 `tool_use`；运行时再从当前注册表找到对应对象，读取名称、Schema、权限元数据和 `call` 实现。
+## 正文
 
-校验通过后工具才真正执行，结果回到模型，用户才会看到“找到了金额单位问题”这类说明。模型看到的是一份契约，宿主持有的是一个可执行对象；名称相同不等于输入一定合法，也不等于当前会话一定有权限调用。
-
-上一章解释事件怎样流动，本章把金额单位工单里的工具契约与宿主持有的执行对象接起来。
-
-## 先建立一个简单模型
+### 先建立一个简单模型
 
 把工具从声明带到执行，关键只有两个交接点：
 
@@ -131,11 +135,7 @@ export function getToolSearchBetaHeader(): string {
 
 这两个阶段必须使用对应的契约，才能保证模型看到的名称与 Schema 和执行时的查找、校验一致。Claude Code 的 `Tool` 抽象把“告诉模型什么”和“宿主真正执行什么”放在同一个对象上。
 
-![Claude Code 从工具池装配到调用前校验的流程](/images/posts/claude-code-source-reading-09/09-tool-contract-handdrawn.png)
-
-图里的 `READY` 表示工具已经找到并通过输入校验。权限、Hooks、实际调用和结果回传属于下一阶段，后续章节会继续展开。
-
-## Tool 把模型契约与宿主执行放在同一对象
+### Tool 把模型契约与宿主执行放在同一对象
 
 我们先看 `restored-src/src/Tool.ts` 中 `Tool` 的核心字段：
 
@@ -178,19 +178,17 @@ export type Tool<
 }
 ```
 
-**类型说明：** `Tool` 同时保存可被模型理解的名称和输入结构，以及宿主执行时需要的校验、并发属性和 `call`。因此，注册表保存一组具有完整契约的 `Tool` 对象，名称只是查找入口。
+> 证据：`restored-src/src/Tool.ts`，`Tool` 联合类型的核心字段。
 
-**参数说明：** `Input` 是 Zod 对象 Schema，默认任意对象形状；`Output` 默认 `unknown`；`P` 是进度数据类型，默认通用 `ToolProgressData`。`aliases` 提供可选别名，`searchHint` 提供工具搜索提示；`inputSchema` 是本地结构校验源，`inputJSONSchema` 可直接保留 MCP 服务端 Schema，省略时由 API 层从 Zod 转换。`description(input, options)` 根据当前输入生成描述；`options.isNonInteractiveSession` 区分宿主是否能交互，`toolPermissionContext` 提供权限规则，`tools` 提供当前工具池。`call()` 的 `args` 是解析后输入，`context` 是会话上下文，`canUseTool` 负责权限询问，`parentMessage` 关联 assistant 消息；`onProgress` 省略时只关闭该回调通道。`isConcurrencySafe`、`isReadOnly` 都基于本次输入判断，`isEnabled` 决定是否进入工具池，`name` 是主查找键；`validateInput` 省略时跳过第二层业务校验，但结构校验仍由 `inputSchema` 执行。
+**类型说明：** `Tool` 同时保存可被模型理解的名称和输入结构，以及宿主执行时需要的校验、并发属性和 `call`。注册表保存一组具有完整契约的 `Tool` 对象，名称只是查找入口。
 
-这份接口可以分成三组职责：
+**参数说明：** `Input` 是 Zod 对象 Schema，默认任意对象形状；`Output` 默认 `unknown`；`P` 是进度数据类型，默认通用 `ToolProgressData`。`aliases` 提供可选别名，`searchHint` 提供工具搜索提示；`inputSchema` 是本地结构校验源，`inputJSONSchema` 可直接保留 MCP 服务端 Schema，省略时由 API 层从 Zod 转换。`call()` 的 `args` 是解析后输入，`context` 是会话上下文，`canUseTool` 负责权限询问，`parentMessage` 关联 assistant 消息；`onProgress` 省略时只关闭该回调通道。`isConcurrencySafe`、`isReadOnly` 都基于本次输入判断，`isEnabled` 决定是否进入工具池，`name` 是主查找键；`validateInput` 省略时跳过第二层业务校验，但结构校验仍由 `inputSchema` 执行。
 
-- `name`、`aliases`、`inputSchema` 和描述告诉模型“怎样调用”。
-- `isEnabled`、`isConcurrencySafe`、`isReadOnly` 等元数据告诉宿主“是否暴露、怎样调度”。
-- `validateInput`、权限检查和 `call` 决定“这一次具体输入能否执行，以及怎样执行”。
+`Tool` 接口上还有两个结果侧字段值得记录：`maxResultSizeChars` 是“结果超过该字符数就持久化到文件、模型只收到带路径的预览”的阈值（`Read` 为 `Infinity`，避免 Read→file→Read 循环）；`strict` 开启严格模式，只在与 `tengu_tool_pear` 实验组合时生效。
 
-也就是说，Schema 和执行函数属于同一个对象。名称查找一旦命中，后续阶段就能继续使用同一份契约。
+这份接口可以分成三组职责：`name`、`aliases`、`inputSchema` 和描述告诉模型“怎样调用”；`isEnabled`、`isConcurrencySafe`、`isReadOnly` 等元数据告诉宿主“是否暴露、怎样调度”；`validateInput`、权限检查和 `call` 决定“这一次具体输入能否执行，以及怎样执行”。
 
-## buildTool 把缺省行为集中起来
+### buildTool 把缺省行为集中起来
 
 内置工具大多通过 `buildTool` 构造。它的价值不在于复杂，而在于把缺省值集中到一个地方：
 
@@ -218,13 +216,15 @@ export function buildTool<D extends AnyToolDef>(def: D): BuiltTool<D> {
 }
 ```
 
+> 证据：`restored-src/src/Tool.ts`（`buildTool` 的当前落点），`TOOL_DEFAULTS` 与 `buildTool()` 完整实现。
+
 **函数说明：** `buildTool` 先铺开 `TOOL_DEFAULTS`，再写入基于 `def.name` 的展示名，最后铺开 `def`。因此，工具自己声明的同名字段优先级最高；其余字段沿用默认值。
 
-**参数说明：** `def` 是 `ToolDef`，必须提供其余契约字段，并可覆盖所有默认实现。`isEnabled` 默认 `true`；`isConcurrencySafe`、`isReadOnly`、`isDestructive` 默认 `false`，各自的可选 `input` 只影响工具覆盖实现，默认函数直接返回保守值。`checkPermissions(input, _ctx)` 默认返回 `allow` 与原 `updatedInput`，随后仍进入通用权限系统；可选 `_ctx` 只为覆盖实现预留上下文。`toAutoClassifierInput` 默认返回空字符串，表示不给自动分类器额外摘要；`userFacingName` 的基础默认值为空，但 `buildTool` 会先改为 `def.name`，最终仍允许 `def.userFacingName` 覆盖。
+**参数说明：** `def` 是 `ToolDef`，必须提供其余契约字段，并可覆盖所有默认实现。`isEnabled` 默认 `true`；`isConcurrencySafe`、`isReadOnly`、`isDestructive` 默认 `false`。`checkPermissions(input, _ctx)` 默认返回 `allow` 与原 `updatedInput`，随后仍进入通用权限系统；`toAutoClassifierInput` 默认返回空字符串，表示不给自动分类器额外摘要；`userFacingName` 的基础默认值为空，但 `buildTool` 会先改为 `def.name`，最终仍允许 `def.userFacingName` 覆盖。
 
-这里的设计有一个很实用的结果：新增工具时，开发者可以复用默认实现；与调度、安全相关的未知信息则采用保守值。例如，`isConcurrencySafe` 缺省为 `false`，新工具会先按串行路径执行。
+这里的设计有一个很实用的结果：新增工具时，开发者可以复用默认实现；与调度、安全相关的未知信息则采用保守值。例如 `isConcurrencySafe` 缺省为 `false`，新工具会先按串行路径执行。
 
-## 注册表其实是当前会话的一份 Tools 数组
+### 注册表其实是当前会话的一份 Tools 数组
 
 源码把 `Tools` 定义为 `readonly Tool[]`。每次装配都会根据运行模式、权限上下文、MCP 连接状态和功能开关生成当前工具池，数组顺序还决定重名查找的首个命中项。
 
@@ -242,11 +242,11 @@ export const getTools = (permissionContext: ToolPermissionContext): Tools => {
 }
 ```
 
-**函数说明：** `getTools` 从基础工具集合出发，先处理特殊工具和 deny 规则，再调用每个工具的 `isEnabled()`。只有返回 `true` 的对象才进入内置工具池。
+> 证据：`restored-src/src/tools.ts`，`getTools()` 的内置工具筛选主干。
 
-**参数说明：** `permissionContext` 包含权限模式和 allow、deny、ask 规则。源码中的外部模式包括 `acceptEdits`、`bypassPermissions`、`default`、`dontAsk`、`plan`；内部类型还包含受功能开关控制的 `auto` 和只用于内部传播的 `bubble`。这里传入完整上下文，工具可据此读取模式与规则。`isEnabled()` 是零参数方法，只依据工具闭包、环境和功能开关判断。
+**函数说明：** `getTools` 从基础工具集合出发，先处理特殊工具和 deny 规则，再调用每个工具的 `isEnabled()`；只有返回 `true` 的对象才进入内置工具池。为什么先把 `isEnabled()` 的结果全部算出来再做 `filter`？从这段源码可以确认，这样能保证每个候选工具在本次筛选中只调用一次。
 
-为什么先把 `isEnabled()` 的结果全部算出来，再做 `filter`？从这段源码可以确认，这样能保证每个候选工具在本次筛选中只调用一次。
+**参数说明：** `permissionContext` 包含权限模式和 allow、deny、ask 规则。源码中的外部模式包括 `acceptEdits`、`bypassPermissions`、`default`、`dontAsk`、`plan`；内部类型还包含受功能开关控制的 `auto` 和只用于内部传播的 `bubble`。`isEnabled()` 是零参数方法，只依据工具闭包、环境和功能开关判断。
 
 接下来，`assembleToolPool` 把内置工具与 MCP 工具汇合：
 
@@ -266,13 +266,15 @@ export function assembleToolPool(
 }
 ```
 
+> 证据：`restored-src/src/tools.ts`，`assembleToolPool()` 完整实现。
+
 **函数说明：** `assembleToolPool` 分别取得允许使用的内置工具和 MCP 工具，按名称排序后连接，再按 `name` 去重。内置工具排在前面，所以同名时由内置工具胜出。源码注释还说明，分区排序是为了让内置工具保持连续，从而稳定 prompt cache。
 
-**参数说明：** `permissionContext` 决定两类工具的 deny 过滤；`mcpTools` 是当前 AppState 中已经发现的 MCP `Tool` 数组，空数组表示当前未发现 MCP 工具。返回值仍是只读语义的 `Tools`。MCP 连接与工具发现发生在更早阶段，这个函数只合并已发现对象。
+**参数说明：** `permissionContext` 决定两类工具的 deny 过滤；`mcpTools` 是当前 AppState 中已经发现的 MCP `Tool` 数组，空数组表示当前未发现 MCP 工具。MCP 连接与工具发现发生在更早阶段，这个函数只合并已发现对象。
 
 所以，“注册一个工具”至少有两层含义：代码中存在工具定义，只说明它有机会进入候选集；进入本轮 `options.tools`，才说明执行器真的可以按名称找到它。
 
-## MCP 与插件怎样汇入同一份契约
+### MCP 与插件怎样汇入同一份契约
 
 MCP server 返回协议层 tool 描述，`restored-src/src/services/mcp/client.ts` 中的 `fetchToolsForClient` 会把它适配成 Claude Code 内部 `Tool`：
 
@@ -296,13 +298,15 @@ return toolsToProcess.map((tool): Tool => {
 })
 ```
 
+> 证据：`restored-src/src/services/mcp/client.ts`，`fetchToolsForClient()` 的 MCP→内部 Tool 适配。
+
 **函数说明：** `fetchToolsForClient` 请求 MCP 的 `tools/list`，随后以基础 `MCPTool` 为模板，把每个远端工具转换成内部 `Tool`。远端名称、Schema、只读提示和真正的 MCP 调用函数因此进入与内置工具相同的数组。
 
-**参数说明：** `client` 必须是 `connected` 状态且声明 `tools` capability，否则函数返回空数组。`fullyQualifiedName` 由 server 与 tool 名组成；返回对象先展开基础 `MCPTool`，`name` 在 `skipPrefix` 为真时使用远端原名，否则使用限定名。`mcpInfo.serverName/toolName` 保留双向映射，`isMcp: true` 标记来源。`skipPrefix` 只在 SDK 类型连接且 `CLAUDE_AGENT_SDK_MCP_NO_PREFIX` 为真时启用。`readOnlyHint: true` 同时让 `isReadOnly()` 与 `isConcurrencySafe()` 返回真，假值回退到 `false`；`inputJSONSchema` 原样保存远端 `inputSchema`。
+**参数说明：** `client` 必须是 `connected` 状态且声明 `tools` capability，否则函数返回空数组。`fullyQualifiedName` 由 server 与 tool 名组成；`name` 在 `skipPrefix` 为真时使用远端原名，否则使用限定名（`mcp__server__tool`）。`mcpInfo.serverName/toolName` 保留双向映射，`isMcp: true` 标记来源。`skipPrefix` 只在 SDK 类型连接且 `CLAUDE_AGENT_SDK_MCP_NO_PREFIX` 为真时启用。`readOnlyHint: true` 同时让 `isReadOnly()` 与 `isConcurrencySafe()` 返回真；`inputJSONSchema` 原样保存远端 `inputSchema`。
 
-这里还要区分两份 Schema 的用途。MCP 适配器保留远端 `inputJSONSchema`，API 层会优先把它发给模型；但基础 `MCPTool.inputSchema` 是允许额外字段的 Zod 对象。也就是说，本地通用 `safeParse` 对 MCP 参数只做宽松对象检查，远端 JSON Schema 的最终约束还要由模型生成阶段和 MCP server 承担。
+这里还要区分两份 Schema 的用途：MCP 适配器保留远端 `inputJSONSchema`，API 层会优先把它发给模型；但基础 `MCPTool.inputSchema` 是允许额外字段的 Zod 对象。也就是说，本地通用 `safeParse` 对 MCP 参数只做宽松对象检查，远端 JSON Schema 的最终约束还要由模型生成阶段和 MCP server 承担。
 
-插件工具通过 MCP 汇入注册表。启用的插件可以声明 MCP server，`restored-src/src/services/mcp/config.ts` 会把它们收集进 MCP 配置；连接和发现完成后，对应工具再进入 `mcpTools`：
+插件工具通过 MCP 汇入注册表。启用的插件可以声明 MCP server，`restored-src/src/services/mcp/config.ts` 会把它们收集进 MCP 配置：
 
 ```ts
 const pluginResult = await loadAllPluginsCacheOnly()
@@ -314,19 +318,15 @@ for (const servers of pluginServerResults) {
 }
 ```
 
-**函数说明：** 这段代码位于 `getClaudeCodeMcpConfigs` 的插件 MCP 收集阶段。它只遍历启用的插件，读取各插件声明的 MCP server，并合并到插件服务器配置中。服务器连接成功后，工具再经过 `fetchToolsForClient` 变成内部 `Tool`。
+> 证据：`restored-src/src/services/mcp/config.ts`，`getClaudeCodeMcpConfigs()` 的插件 MCP 收集阶段。
 
-**参数说明：** `loadAllPluginsCacheOnly()` 是零参数函数，返回结果中的 `enabled` 与 `errors` 取决于运行时插件状态；`getPluginMcpServers(plugin, mcpErrors)` 接收一个已启用插件和可累积错误的数组，返回服务器对象或 `undefined`，合并逻辑只处理已返回对象。插件贡献的命令、Agent、Skill 和 Hooks进入各自注册路径，本文的 `Tool` 注册表只接收工具对象。
+**函数说明：** 这段代码只遍历启用的插件，读取各插件声明的 MCP server，并合并到插件服务器配置中；服务器连接成功后，工具再经过 `fetchToolsForClient` 变成内部 `Tool`。
 
-于是三种来源在执行前完成了汇合：
+**参数说明：** `loadAllPluginsCacheOnly()` 是零参数函数，返回结果中的 `enabled` 与 `errors` 取决于运行时插件状态；`getPluginMcpServers(plugin, mcpErrors)` 接收一个已启用插件和可累积错误的数组，返回服务器对象或 `undefined`，合并逻辑只处理已返回对象。
 
-- 内置工具直接实现或通过 `buildTool` 得到 `Tool`。
-- 普通 MCP 工具由 `fetchToolsForClient` 适配成 `Tool`。
-- 插件声明的 MCP server 先进入 MCP 连接流程，发现的工具再适配成 `Tool`。
+于是三种来源在执行前完成了汇合：内置工具直接实现或通过 `buildTool` 得到 `Tool`；普通 MCP 工具由 `fetchToolsForClient` 适配成 `Tool`；插件声明的 MCP server 先进入 MCP 连接流程，发现的工具再适配成 `Tool`。来源不同，进入 `options.tools` 以后使用的是同一套名称查找、输入校验和执行入口。
 
-来源不同，进入 `options.tools` 以后使用的是同一套名称查找、输入校验和执行入口。
-
-## tool_use 怎样找到真正的工具
+### tool_use 怎样找到真正的工具
 
 模型响应到达工具执行层后，`runToolUse` 首先按名称查找工具，再进入输入校验和调用。名称匹配逻辑非常直接：
 
@@ -343,9 +343,11 @@ export function findToolByName(tools: Tools, name: string): Tool | undefined {
 }
 ```
 
-**函数说明：** `toolMatchesName` 先比较主名称，再检查别名；`findToolByName` 返回数组中第一个匹配对象。匹配失败时返回 `undefined`，调用方随后生成“工具不存在”的错误结果；查找过程采用精确名称和别名比较。
+> 证据：`restored-src/src/services/tools/toolExecution.ts`，`toolMatchesName()` 与 `findToolByName()` 完整实现。
 
-**参数说明：** `tool.aliases` 可以是字符串数组或 `undefined`；可选链之后的结果再用 `?? false` 回退，所以 `undefined` 会产生“不匹配”结果。`name` 是模型 `tool_use.name` 提供的任意字符串，源码只约束其为字符串。`tools` 的顺序会影响同名对象谁先命中，不过正常装配路径已经按名称去重。
+**函数说明：** `toolMatchesName` 先比较主名称，再检查别名；`findToolByName` 返回数组中第一个匹配对象。匹配失败时返回 `undefined`，调用方随后生成“工具不存在”的错误结果。
+
+**参数说明：** `tool.aliases` 可以是字符串数组或 `undefined`；可选链之后的结果再用 `?? false` 回退。`name` 是模型 `tool_use.name` 提供的任意字符串，源码只约束其为字符串。`tools` 的顺序会影响同名对象谁先命中，不过正常装配路径已经按名称去重。
 
 `runToolUse` 使用的正是当前上下文里的可用工具池：
 
@@ -377,13 +379,15 @@ if (!tool) {
 }
 ```
 
+> 证据：`restored-src/src/services/tools/toolExecution.ts`，`runToolUse()` 的名称查找与未知工具分支。
+
 **函数说明：** `runToolUse` 先查本轮 `options.tools`。第一次失败后，只允许从全部基础工具中恢复“旧别名”对应的工具，用于兼容旧 transcript；主名称命中不属于这个回退。仍然找不到时，它生成带 `is_error: true` 的 `tool_result` 并结束本次调用，实际错误文本是 `No such tool available`。
 
-**参数说明：** 原函数的 `toolUse` 含 `name`、`input`、`id`；`assistantMessage` 提供父消息和关联 UUID；`canUseTool` 是后续权限回调；`toolUseContext.options.tools` 是本轮工具池。查找失败时，yield 对象的 `message` 是一条 user message；其 `content` 数组包含 `type: 'tool_result'`、错误文本、`is_error: true` 和原始 `tool_use_id`。`toolUseResult` 给宿主保留错误摘要，`sourceToolAssistantUUID` 指回发起调用的 assistant 节点。名称匹配与 alias fallback 均来自 `runToolUse` 的真实分支。
+**参数说明：** 原函数的 `toolUse` 含 `name`、`input`、`id`；`assistantMessage` 提供父消息和关联 UUID；`canUseTool` 是后续权限回调。查找失败时，yield 对象的 `message` 是一条 user message；其 `content` 数组包含 `type: 'tool_result'`、错误文本、`is_error: true` 和原始 `tool_use_id`；`sourceToolAssistantUUID` 指回发起调用的 assistant 节点。
 
-这也回答了“禁用工具会怎样”。大多数情况下，`isEnabled=false` 的工具已经在 `getTools` 阶段被移除，执行时查找不到，最终走未知工具分支。
+这也回答了“禁用工具会怎样”：大多数情况下，`isEnabled=false` 的工具已经在 `getTools` 阶段被移除，执行时查找不到，最终走未知工具分支。
 
-## 输入校验有两层，顺序不能颠倒
+### 输入校验有两层，顺序不能颠倒
 
 找到工具以后，执行层先做结构校验，再做工具自己的业务校验。核心代码位于同一文件的 `checkPermissionsAndCallTool`：
 
@@ -404,15 +408,15 @@ if (isValidCall?.result === false) {
 }
 ```
 
-**函数说明：** `checkPermissionsAndCallTool` 先用 Zod `safeParse` 验证并解析输入。只有 `success=true` 才把 `parsedInput.data` 传给 `validateInput`。任意一层失败都会由真实的 `createUserMessage` 内联构造错误 `tool_result` 返回给模型，`call` 只接收两层校验均成功的数据；代码块已经用注释明确标出省略的消息字段。
+> 证据：`restored-src/src/services/tools/toolExecution.ts`，`checkPermissionsAndCallTool()` 的两层校验。
 
-**参数说明：** 原函数的 `input` 是布尔值、字符串或数字组成的对象，但各工具的 Zod Schema 可以进一步约束字段。`safeParse` 返回成功或失败的判别联合。`validateInput` 可为 `undefined`；可选调用在这种情况下得到 `undefined`，不会进入失败分支。它的返回值只能是 `{ result: true }`，或 `{ result: false, message: string, errorCode: number }`。因此，业务校验失败必须同时提供给模型看的消息和用于记录的数字错误码。
+**函数说明：** `checkPermissionsAndCallTool` 先用 Zod `safeParse` 验证并解析输入。只有 `success=true` 才把 `parsedInput.data` 传给 `validateInput`。任意一层失败都会由真实的 `createUserMessage` 内联构造错误 `tool_result` 返回给模型，`call` 只接收两层校验均成功的数据。
 
-两层校验解决的是不同问题。例如，一个文件工具可以先用 Schema 确认 `file_path` 是字符串，再在 `validateInput` 中检查文件是否存在、大小是否超过限制、路径是否符合当前权限上下文。把这两件事合成一个 Schema 并不现实，因为第二类条件依赖运行时状态。
+**参数说明：** 原函数的 `input` 是布尔值、字符串或数字组成的对象，但各工具的 Zod Schema 可以进一步约束字段。`safeParse` 返回成功或失败的判别联合。`validateInput` 可为 `undefined`；可选调用在这种情况下得到 `undefined`，不会进入失败分支。它的返回值只能是 `{ result: true }`，或 `{ result: false, message: string, errorCode: number }`——业务校验失败必须同时提供给模型看的消息和用于记录的数字错误码。
 
-校验失败会被包装成 `is_error: true` 的 `tool_result`，关联原来的 `tool_use_id`，再交还给对话循环。模型因此有机会修正参数并重新调用，进程继续处理后续消息。
+两层校验解决的是不同问题：例如一个文件工具可以先用 Schema 确认 `file_path` 是字符串，再在 `validateInput` 中检查文件是否存在、大小是否超过限制、路径是否符合当前权限上下文。把这两件事合成一个 Schema 并不现实，因为第二类条件依赖运行时状态。校验失败会被包装成 `is_error: true` 的 `tool_result`，关联原来的 `tool_use_id`，再交还给对话循环；模型因此有机会修正参数并重新调用。
 
-## ToolUseContext 为什么不能省
+### ToolUseContext 为什么不能省
 
 如果输入参数已经包含路径、命令和选项，为什么 `validateInput` 与 `call` 还要接收 `ToolUseContext`？因为同一组参数能否执行，取决于它所在的会话。
 
@@ -437,29 +441,63 @@ export type ToolUseContext = {
 }
 ```
 
+> 证据：`restored-src/src/Tool.ts`（或 `restored-src/src/query.ts` 引用的上下文类型），`ToolUseContext` 类型定义。
+
 **类型说明：** `ToolUseContext` 把当前工具池、MCP 连接、运行模式、取消信号、文件状态和 AppState 访问能力一起传入校验与调用。它让工具可以读取会话状态，但不需要依赖某个具体 UI 组件。
 
-**参数说明：** `options.tools` 与 `options.mcpClients` 是当前工具和连接快照，`isNonInteractiveSession` 区分无头/SDK 与交互式路径；`maxBudgetUsd` 传入时启用金额检查，`refreshTools` 存在时可取得 MCP 中途连接后的新工具集。`abortController` 传播取消，`readFileState` 保存 Read-before-Write 凭据，`getAppState`/`setAppState` 读取和更新应用状态。`requestPrompt(sourceName, toolInputSummary)` 只在宿主支持交互时出现：`sourceName` 标记请求来源，摘要字符串用于展示，`null` 或省略都使 UI 缺少摘要内容；返回函数处理具体 `PromptRequest`。`toolUseId` 传入时关联当前调用，省略时由外层上下文维持关系。
+**参数说明：** `options.tools` 与 `options.mcpClients` 是当前工具和连接快照，`isNonInteractiveSession` 区分无头/SDK 与交互式路径；`maxBudgetUsd` 传入时启用金额检查，`refreshTools` 存在时可取得 MCP 中途连接后的新工具集。`abortController` 传播取消，`readFileState` 保存 Read-before-Write 凭据，`getAppState`/`setAppState` 读取和更新应用状态。`requestPrompt(sourceName, toolInputSummary)` 只在宿主支持交互时出现；`toolUseId` 传入时关联当前调用。
 
 `ToolUseContext` 在这条链路上解决三个明确问题：查找当前真正可用的工具、让业务校验读取运行状态、把取消与交互能力传入具体调用。
 
-## 三类失败边界
+### 三类失败边界
 
-现在可以把调用前的失败分成三类。
+现在可以把调用前的失败分成三类。第一类是名称失败：`name` 和 `aliases` 都匹配不到，返回 `No such tool available`——可能是模型生成了不存在的名称，也可能是工具已经被权限规则、运行模式或 `isEnabled()` 从工具池移除。第二类是结构失败：名称正确，但 `inputSchema.safeParse` 不接受模型给出的字段类型或形状，执行层返回 `InputValidationError`，不会调用工具自己的业务逻辑。第三类是业务失败：结构已经正确，但 `validateInput` 根据路径、文件状态或其他上下文返回 `result: false`，错误信息来自具体工具。
 
-第一类是名称失败。`name` 和 `aliases` 都匹配不到，返回 `No such tool available`。这可能是模型生成了不存在的名称，也可能是工具已经被权限规则、运行模式或 `isEnabled()` 从工具池移除。
+还有两个现实运行边界：一是当前用户最终能看到哪些工具——环境变量、构建特性、权限规则、MCP 连接和插件启用状态都会改变工具池，单看 `getAllBaseTools()` 不能还原某次真实会话；二是外部工具声明是否可信——Claude Code 会清理 MCP 返回的数据并把它适配到内部契约，但工具描述、JSON Schema 和只读注解仍来自外部 server。
 
-第二类是结构失败。名称正确，但 `inputSchema.safeParse` 不接受模型给出的字段类型或形状。执行层返回 `InputValidationError`，不会调用工具自己的业务逻辑。
+### 全局工具清单矩阵（GLOBAL TOOL INVENTORY）
 
-第三类是业务失败。结构已经正确，但 `validateInput` 根据路径、文件状态或其他上下文返回 `result: false`。它同样会变成错误 `tool_result`，但错误信息来自具体工具。
+下表列出 `restored-src/src/tools/` 中可确认的内置工具及 MCP 适配工具，每行回答六个问题。取值规则：`isReadOnly` / `isConcurrencySafe` / `isEnabled` 来自各工具文件的实现；“默认”指沿用 `buildTool` 的 `TOOL_DEFAULTS`；“—” 表示该文件内未静态确认。`maxResultSizeChars` 是“结果超过该字符数即持久化到文件、模型收到带路径预览”的阈值（`src/Tool.ts` 契约字段）。
 
-还有两个现实运行边界：
+| 工具（名称常量） | isReadOnly | isConcurrencySafe | 权限入口 | 输入上限 | 结果上限（maxResultSizeChars） | 非交互行为 |
+|---|---|---|---|---|---|---|
+| `Read`（FileReadTool） | true | true | 只读直通 | `DEFAULT_MAX_OUTPUT_TOKENS = 25000`，env `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS` > GrowthBook > 默认（`limits.ts`） | `Infinity`（永不落盘） | 直通 |
+| `Glob` | true | true | 只读直通 | `maxResults` 可选字段（`Tool.ts`） | 100_000 | 直通 |
+| `Grep` | true | true | 只读直通 | — | 20_000 | 直通 |
+| `WebSearch` | true | true | 网络权限 | — | 100_000 | 可降级用 haiku 子模型（`useHaiku`） |
+| `WebFetch` | true | true | 网络权限；`isPreapprovedHost()` 预批准列表 | — | 100_000 | 直通 |
+| `Bash` | 按命令推导（`readOnlyValidation.ts`） | 默认 false | Bash 权限引擎（`bashPermissions.ts` + 只读命令放行） | —（输出截断） | —（未在文件内确认） | 非交互输出差异走权限模式 |
+| `Write`（FileWriteTool） | 默认 false | 默认 false | 文件写入权限 | — | 100_000 | 权限决定 |
+| `Edit`（FileEditTool） | 默认 false | 默认 false | 文件编辑权限 | — | 100_000 | 权限决定 |
+| `NotebookEdit` | 默认 false | 默认 false | 文件编辑权限 | — | 100_000 | 权限决定 |
+| `TodoWrite` | 默认 | 默认 | 通用权限引擎 | — | 100_000 | `isEnabled = !isTodoV2Enabled()` |
+| `TaskCreate` | — | true | 通用权限引擎 | — | 100_000 | `isEnabled = isTodoV2Enabled()` |
+| `TaskGet` / `TaskList` | true | true | 通用权限引擎 | — | 100_000 | 门控 `isTodoV2Enabled()` |
+| `TaskUpdate` / `TaskStop` | — / — | true | 通用权限引擎 | — | 100_000 | 门控 `isTodoV2Enabled()` |
+| `TaskOutput` | — | — | 通用权限引擎 | — | — | — |
+| `Agent` | 默认 false | 默认 false | 子 Agent 委派 | — | — | 创建子会话 |
+| `Skill` | 默认 | 默认 | 命令/技能执行 | — | 100_000 | 执行已加载技能 |
+| `Sleep` | 默认 | 默认 | 无副作用 | — | — | 无操作等待 |
+| `Config` | 按输入 | true | 通用权限引擎 | — | 100_000 | 读取/设置配置 |
+| `EnterPlanMode` | true | true | 专用入口（`shouldDefer: true`） | — | 100_000 | agent 上下文直接抛错；KAIROS 通道激活时禁用 |
+| `ExitPlanMode` | false（注释：现写盘） | true | 专用入口 | — | 100_000 | 提交 plan 状态 |
+| `EnterWorktree` / `ExitWorktree` | 默认 | 默认 | 文件系统/工作区权限 | — | 100_000 | 创建工作区/退出 |
+| `SendMessage`（Brief/SendUserMessage） | — | — | 通用权限引擎 | — | 100_000 | 门控 `isAgentSwarmsEnabled()` |
+| `TeamCreate` / `TeamDelete` | — | — | 通用权限引擎 | — | 100_000 | 门控 `isAgentSwarmsEnabled()` |
+| `CronCreate` / `CronList` / `CronDelete` | — | — | 通用权限引擎 | — | 100_000（Create/List） | 门控 `isKairosCronEnabled()` |
+| `McpAuth` | false | false | 专用认证流程 | — | 10_000 | 交互式 OAuth |
+| `mcp__server__tool`（MCPTool） | `readOnlyHint ?? false` | `readOnlyHint ?? false` | MCP 权限规则 | 远端 JSON Schema 约束 | 100_000 | `isMcp: true`，来源标记 |
+| `ListMcpResources` / `ReadMcpResource` | true | true | 只读直通 | — | 100_000 | 直通 |
+| `RemoteTrigger` | — | true | 通用权限引擎 | — | 100_000 | 门控远程通道 |
+| `ToolSearch` | true | true | 只读直通 | — | 100_000 | `isEnabled = isToolSearchEnabledOptimistic()` |
+| `StructuredOutput`（SyntheticOutput） | true | true | 无副作用 | — | 100_000 | 直通 |
+| `REPL` / `PowerShell` / `LSP` | — | — | 平台/功能门控 | — | 100_000（LSP） | 交互或平台相关 |
 
-一是当前用户最终能看到哪些工具。环境变量、构建特性、权限规则、MCP 连接和插件启用状态都会改变工具池，单看 `getAllBaseTools()` 不能还原某次真实会话。
+> 证据说明：`isReadOnly`/`isConcurrencySafe`/`isEnabled` 列来自各工具文件内方法实现；`maxResultSizeChars` 来自各工具文件内的字面量（如 `FileReadTool.ts:342`、`GrepTool.ts:164`、`McpAuthTool.ts:71`）；FileRead 的 token 上限来自 `FileReadTool/limits.ts`（env > GrowthBook > `DEFAULT_MAX_OUTPUT_TOKENS`）。表中“—”代表该文件内未静态确认，不代表能力不存在；权限入口列是对各工具权限形态的概括，逐条核对以对应章节（12 权限引擎、13 沙箱、27 MCP）为准。
 
-二是外部工具声明是否可信。Claude Code 会清理 MCP 返回的数据，并把它适配到内部契约，但工具描述、JSON Schema 和只读注解仍来自外部 server。
+这张表的读法：工具池裁剪发生在 `getTools()` / `assembleToolPool()`，而“这次调用能不能跑”还要看 `isConcurrencySafe`（决定能否并行）、`checkPermissions`（权限瀑布）与两层输入校验。**只读不全是豁免，权限入口才是执行前的强制关卡。**
 
-## 小结
+### 小结
 
 Claude Code 找到工具的过程并不神秘，但边界很清楚：
 
@@ -469,15 +507,90 @@ Claude Code 找到工具的过程并不神秘，但边界很清楚：
 4. `runToolUse` 只做精确主名称或别名匹配。未知工具、结构错误和业务校验失败都会变成与原 `tool_use_id` 关联的错误结果。
 5. 通过两层输入校验只代表调用已经具备进入权限与执行阶段的条件，不代表权限已批准，更不代表执行成功。
 
-把这条链路记成一句话就是：先裁剪能力，再按名取对象，最后用对象自己的契约验证输入。
+把这条链路记成一句话就是：**先裁剪能力，再按名取对象，最后用对象自己的契约验证输入。**
+
+## 源码映射
+
+| 主题 | 关键文件（`restored-src/src/`） | 关键函数 / 符号 | 证据 |
+|---|---|---|---|
+| 工具契约 | `Tool.ts` | `Tool`、`ToolDef`、`BuiltTool`、`buildTool()`、`TOOL_DEFAULTS` | 源码已确认 |
+| 内置工具筛选 | `tools.ts` | `getTools()`、`filterToolsByDenyRules()`、`getAllBaseTools()`、`specialTools` | 源码已确认 |
+| 工具池装配 | `tools.ts` | `assembleToolPool()`、`uniqBy()` | 源码已确认 |
+| MCP 适配 | `services/mcp/client.ts`、`services/mcp/config.ts` | `fetchToolsForClient()`、`getPluginMcpServers()`、`buildMcpToolName()` | 源码已确认 |
+| 名称查找 | `services/tools/toolExecution.ts` | `toolMatchesName()`、`findToolByName()`、`runToolUse()` | 源码已确认 |
+| 两层校验 | `services/tools/toolExecution.ts` | `checkPermissionsAndCallTool()`、`inputSchema.safeParse`、`validateInput()` | 源码已确认 |
+| 执行上下文 | `Tool.ts`（`ToolUseContext`） | `options.tools`、`abortController`、`requestPrompt`、`readFileState` | 源码已确认 |
+
+## 设计决策
+
+**第一，契约与执行放同一对象。** 模型看到的 Schema 与宿主执行的 `call` 来自同一个 `Tool`，名称查找一旦命中，后续校验、权限和执行共用同一份契约；不会出现“文档里的工具”和“可执行的工具”两套定义。
+
+**第二，缺省值集中 + 保守默认。** `buildTool` 的 `TOOL_DEFAULTS` 让新工具只需写契约字段；`isConcurrencySafe`/`isReadOnly`/`isDestructive` 默认 `false`，未知信息按保守值处理——新工具先串行、先询问，而不是默认放行。
+
+**第三，注册表是“当前会话的快照”而非全局单例。** 每轮请求的工具池由权限模式、功能开关、MCP 连接和插件状态共同装配；`assembleToolPool` 排序去重让内置工具连续、同名胜出，既稳定 prompt cache，也保证查找可预期。
+
+**第四，外部来源必须适配，不能直接信任。** MCP 的 tool 描述、JSON Schema 和只读注解都来自外部 server，适配器把它们映射成内部 `Tool` 并用 `readOnlyHint` 推导并发/只读属性；内部通用 `safeParse` 只做宽松对象检查，远端 Schema 的约束留给模型生成阶段与 server。
+
+**第五，失败必须可回喂。** 名称失败、结构失败、业务失败都成为与原始 `tool_use_id` 关联的错误 `tool_result`，模型下一轮能看到“为什么不行”并修正参数——工具层不吞错误，也不绕过配对协议。
+
+## 练习：给一个“假想工具”设计契约并走一遍装配
+
+用 10–15 分钟完成：
+
+1. 设想一个工具 `ListEnv`（列出当前环境变量），先写出它的 `ToolDef`：`name`、`inputSchema`（允许 `prefix?: string`）、`isReadOnly()`（应返回 `true` 吗？）、`isConcurrencySafe()`、`call()` 的最小实现。
+2. 不写代码，回答：如果它漏写 `isConcurrencySafe`，`buildTool` 会给它什么默认值？如果它是 `isEnabled = false`，它会出现在 `getTools()` 的结果里吗？
+3. 模拟一次执行：模型返回 `tool_use.name = 'ListEnv'`、`input = { prefix: 123 }`（数字），走一遍 `findToolByName` → `safeParse` → （失败）→ 生成 `tool_result` 的完整路径，确认 `tool_use_id` 是否原样回填。
+4. 在真实 Claude Code 里跑 `claude -p "列出当前目录" --output-format json 2>/dev/null | head`，观察 JSON 里 `tool_use.name` 与实际工具名是否对应。
+
+## 自测
+
+1. `buildTool` 给 `isConcurrencySafe` 的默认值是什么？为什么选这个值？
+2. `assembleToolPool` 为什么先按名称排序再连接、去重？
+3. 两层输入校验分别解决什么问题？`validateInput` 返回 `undefined` 意味着什么？
+
+<details>
+<summary>参考答案</summary>
+
+1. **默认 `false`**（`TOOL_DEFAULTS`）。与调度、安全相关的未知信息采用保守值：新工具先按串行路径执行，避免并发调用把未知副作用放大。
+
+2. **稳定 prompt cache + 查找可预期**：内置工具连续排列保证缓存前缀稳定；`uniqBy('name')` 去重后，内置工具排在前面，同名时由内置工具胜出，模型看到的名称与执行时的查找一致。
+
+3. **结构校验**（`inputSchema.safeParse`）确认输入形状，**业务校验**（`validateInput`）结合文件状态、路径、权限上下文判断可执行性——第二类条件依赖运行时状态，无法放进静态 Schema。`validateInput` 为 `undefined` 表示工具没有实现第二层校验，可选调用得到 `undefined`，不会进入失败分支，结构校验仍照常执行。
+
+</details>
+
+## 回顾：上一篇的问题
+
+<details>
+<summary>回顾：Beta 开关打开的时候有什么新功能？（回答 08 留下的问题）</summary>
+
+用户看到的是一个开关，服务端收到的却是一组按 provider、模型和运行模式计算出的 `betas` header。开关只解除发送限制，每项 Beta 还要通过自己的模型与运行条件；控制第一方实验 Beta 的是禁用开关 `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`：
+
+```ts
+export function shouldIncludeFirstPartyOnlyBetas(): boolean {
+  return (
+    (getAPIProvider() === 'firstParty' || getAPIProvider() === 'foundry') &&
+    !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS)
+  )
+}
+```
+
+> 证据：`restored-src/src/utils/model/providers.ts`（2.1.88 source map 还原源码），`shouldIncludeFirstPartyOnlyBetas()` 完整实现。
+
+发请求时 `getMergedBetas()` 把模型 Beta、Agent 所需 Beta 与 SDK 允许的 Beta 合并去重；`ANTHROPIC_BETAS` 按逗号切分追加，SDK 传入的 Beta 先过 allowlist。只有 `betas` 数组非空才写入参数。能力示例：1M 上下文（`context-1m-2025-08-07`）、交错思考、上下文管理、结构化输出、Tool Search（第一方/Foundry 用 `advanced-tool-use-2025-11-20`，Vertex/Bedrock 用 `tool-search-tool-2025-10-19`）。
+
+所以准确答案是：**它解除一部分第一方实验能力的发送限制；真正发出的能力由 `getMergedBetas()` 根据模型、provider、运行模式和 feature gate 逐项组合。**
+
+</details>
 
 ## 留给下一篇的问题
 
 你知道 Claude Code 自带哪些 tool 吗？
 
-## 参考资料
+## 相关链接
 
+- **上一篇**：[08 Claude 请求与响应如何传输](./08-api-streaming.md)
+- **下一篇**：[10 多个 tool_use 如何串并行执行](./10-tool-orchestration.md)——`isConcurrencySafe` 进入调度决策
 - [Seeing like an agent: how we design tools](https://claude.com/blog/seeing-like-an-agent)
 - [Anthropic 工具调用实现指南](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/implement-tool-use)
-
 - [Claude Code 工具参考](https://code.claude.com/docs/en/tools-reference)

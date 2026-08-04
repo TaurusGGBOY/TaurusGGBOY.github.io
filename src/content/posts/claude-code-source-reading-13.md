@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读13：如何建立命令执行安全边界"
 published: 2026-07-24T16:47:00+08:00
-updated: 2026-07-24T16:47:00+08:00
+updated: 2026-08-04
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -9,7 +9,6 @@ draft: false
 image: "/images/posts/claude-code-source-reading-13/claude-code-source-reading-00.png"
 imagePosition: "left"
 ---
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：当 permission mode 为 `auto` 时，“自动”具体体现在哪里？
@@ -45,31 +44,57 @@ if (
 
 也就是说，`auto` 只改变“谁来处理未决的 ask”，不改变 Bash 后面还要经过的命令解析、沙箱和平台执行边界。下面先固定这三个概念，再沿一条 Bash 输入追踪它们如何协作。
 
-## 本章先建立三个概念
+## 关键结论（Key Takeaways）
+
+- **`auto` 只替代“谁来处理未决的 `ask`”，不替代整条执行链**：即使分类器返回 `allow`，Bash 仍要继续经过解析、权限、沙箱与平台执行边界，后面每一层都在回答不同的问题。
+- **解析层先还原命令图**：`cd /tmp && cat input.txt | sed 's/a/b/' > result.txt` 会被拆成子命令、管道、重定向与目录变化；解析不出完整结构（`too-complex` / `parse-unavailable`）时，控制流倾向回到 `ask`，显式 deny 始终保留更高优先级。
+- **命令名允许，不代表输出目标也被允许**：源码在整串原始命令上单独补做 `checkPathConstraints` 重定向检查，防止旧的字符串分割把 `> /etc/passwd` 从子命令中剥离。
+- **Permission 与 Sandbox 是相邻但独立的两层**：`shouldUseSandbox()` 只是路径选择；沙箱不可用、命令需越界、解析失败分别进入提示、常规权限或硬失败路径。
+- **超时不一定杀进程**：`shouldAutoBackground` 为真且注册了回调时，超时会请求后台化；`AbortSignal.reason === 'interrupt'`（用户提交新消息）保留进程，其他 reason 才杀进程树。
+
+## 本篇新增机制
+
+相对上一篇“permission-engine”（规则如何决策），本篇在心智模型中新增三块：
+
+| 新增机制 | 解决的问题 | 关键符号 |
+|---|---|---|
+| 命令图 | 复合 shell 输入拆成子命令、重定向和管道，权限判断才能覆盖真实操作 | `ParseForSecurityResult`（`simple` / `too-complex` / `parse-unavailable`）、`astCommand.redirects` |
+| 操作系统级隔离 | Seatbelt / bubblewrap 把文件与网络边界施加给 Bash 及其子进程 | `shouldUseSandbox()`、`SandboxManager`、`dangerouslyDisableSandbox` |
+| 降级策略 | 沙箱不可用、命令需越界和解析失败分别进入提示、常规权限或硬失败路径 | `getSandboxUnavailableReason()`、`failIfUnavailable`、`wrapWithSandbox()` |
+
+## 问题
+
+先接住上一篇留下的问题：**当 permission mode 为 `auto` 时，“自动”具体体现在哪里？**
+
+先给结论：**`auto` 不是把所有工具直接放行，而是把权限链里原本需要交给人的 `ask`，交给一组源码明确的自动决策路径。** 已经命中 deny 或 allow 的结果不会重新进入这条路径；只有 `hasPermissionsToUseToolInner()` 返回 `ask` 时，外层 `hasPermissionsToUseTool()` 才会继续检查 `auto`。
+
+入口条件是 `TRANSCRIPT_CLASSIFIER` 功能开启，并且当前 mode 是 `auto`；源码还允许处于 `plan` mode、但会话已经激活 auto 状态时进入同一分支。自动首先体现为两个无需调用分类器的快速路径：系统会用 `acceptEdits` mode 重新检查一次工具权限，如果该工具在这个模式下本来就能放行，就直接返回 `allow`；随后再检查 `SAFE_YOLO_ALLOWLISTED_TOOLS`，白名单中的安全工具也直接返回 `allow`。两个快速路径生成的仍是标准 `PermissionDecision`，只是 `decisionReason` 标记为 `mode: 'auto'`，随后沿普通执行链把 `updatedInput` 交给 `tool.call()`。
+
+如果快速路径没有命中，自动就体现为一次独立的 classifier 判断。这里的“分类模型”不是打包在本机、离线运行的规则模型：`classifyYoloAction()` 通过 `sideQuery()` 调用 Anthropic Messages API，把精简 transcript、action、工具编码和权限上下文发到云端模型。`getClassifierModel()` 只负责选择模型名——内部用户可由 `CLAUDE_CODE_AUTO_MODE_MODEL` 覆盖，功能配置可提供 `tengu_auto_mode_config.model`，否则回退到主循环模型。返回值里的 `shouldBlock` 决定结果：`false` 生成 `behavior: 'allow'`，`true` 记录 denial 状态并生成 `behavior: 'deny'`；连续拒绝达到限制时，源码还可能回到人工确认。
+
+因此，“自动”真正替换的是 `ask → allow/deny` 这一段决策，不是 `permission → tool.call` 的全部链路。不可由 classifier 放行的 safety check、`requiresUserInteraction()` 返回真的工具，以及功能未开启时的 PowerShell，都不会被这条自动路径静默批准。分类器 transcript 超过上下文时，交互模式退回普通确认；无交互的 headless 路径直接终止。分类器不可用时，还要根据 `tengu_iron_gate_closed` 的运行时开关决定 fail-closed 拒绝还是回退到普通权限处理。
+
+**本篇继续追问：即使 `auto` 放行了，命令从字符串变成进程，还要过哪些关？** 本篇把这条链路拆成解析、权限、沙箱、平台执行与输出五层。
+
+## 正文
+
+本文只引用 `@anthropic-ai/claude-code@2.1.88` 的还原代码。路径用于定位实现，不代表 Anthropic 内部目录；代码片段删去无关分支，但不改写控制逻辑；代码块以 `[source]` 标注证据层级，块内注释注明 `restored-src/` 路径（2.1.88 还原源码）。
+
+### 先把这条链路的三层职责固定下来
 
 - **命令图**：复合 shell 输入需要拆成子命令、重定向和管道，权限判断才能覆盖真实操作。
-
 - **操作系统级隔离**：Seatbelt 或 bubblewrap 把文件与网络边界施加给 Bash 及其子进程。
-
 - **降级策略**：沙箱不可用、命令需越界和解析失败分别进入提示、常规权限或硬失败路径。
 
 ![从命令解析到操作系统沙箱的安全链](/images/posts/claude-code-source-reading-13/13-command-sandbox-detail-handdrawn.png)
 
 这张图把 Bash 的安全链分成三步：解析命令结构、完成权限判断、再决定是否用 sandbox 包裹真实进程；任何一步失败都不会伪装成执行成功。
 
-## 金额工单的测试命令不能直接跑出去
-
-修复候选代码后，你希望把长测试放到后台，但不希望一条带重定向的命令悄悄覆盖工作区文件：
+沿用金额工单的场景：修复候选代码后，你希望把长测试放到后台，但不希望一条带重定向的命令悄悄覆盖工作区文件：
 
 > 跑金额计算、支付回调和前端复现测试；所有 Bash、文件写入、网络访问和外部工具调用都遵守当前权限规则与 Hook。
 
 模型可以提出 `git`、测试脚本或构建命令，但 Bash 解析器会先拆开管道、重定向、替换和复合命令；权限规则逐段检查，Sandbox 再决定是否包裹进程、限制 cwd、环境和网络。最后才由真实 shell 执行，超时、Abort、后台运行和非零退出码分别形成不同终态。
-
-下面从这张工单的一条测试命令开始，把“模型想执行”与“操作系统真的执行”之间的安全边界画出来。
-
-## 从一条 Bash 输入开始
-
-本文只引用 `@anthropic-ai/claude-code@2.1.88` 的还原代码。路径用于定位实现，不代表 Anthropic 内部目录；代码片段删去无关分支，但不改写控制逻辑。
 
 拿一条 `cd /tmp && cat input.txt | sed 's/a/b/' > result.txt` 作为观察点。模型只提交一个 `command` 字符串，运行时却要拆出子命令、管道、重定向，完成权限判断，再决定是否给最终 shell 包上 sandbox：
 
@@ -77,11 +102,12 @@ if (
 
 Permission 和 Sandbox 是相邻但独立的两层。权限回答“允许这个动作吗”，Sandbox 回答“允许动作在哪些资源边界内运行”；即使权限通过，也可能因为平台能力、配置或沙箱失败走提示、降级或拒绝。
 
-## 输入 Schema 先固定可控变量
+### 输入 Schema 先固定可控变量
 
 `BashTool` 接收命令字符串以及超时、后台执行和沙箱覆盖。`restored-src/src/tools/BashTool/BashTool.tsx` 中的 `fullInputSchema` 如下：
 
-```ts
+```ts [source]
+// restored-src/src/tools/BashTool/BashTool.tsx（2.1.88 还原源码）
 const fullInputSchema = lazySchema(() => z.strictObject({
   command: z.string().describe('The command to execute'),
   timeout: semanticNumber(z.number().optional()).describe(`Optional timeout in milliseconds (max ${getMaxTimeoutMs()})`),
@@ -117,7 +143,7 @@ For commands that are harder to parse at a glance (piped commands, obscure flags
 
 输入约束只能保证字段形状。`command` 仍是一门完整 shell 语言，这就是下一层必须解析它的原因。
 
-## 解析层恢复命令中的真实操作
+### 解析层恢复命令中的真实操作
 
 考虑下面这条命令：
 
@@ -129,7 +155,8 @@ cd /tmp && cat input.txt | sed 's/a/b/' > result.txt
 
 `restored-src/src/tools/BashTool/bashPermissions.ts` 中的 `bashToolHasPermission` 先尝试得到 AST，再把结果归入三类。解析结果不是最终权限，它只是让后续规则知道命令中有哪些真实操作：
 
-```ts
+```ts [source]
+// restored-src/src/tools/BashTool/bashPermissions.ts（2.1.88 还原源码）
 let astRoot = injectionCheckDisabled
   ? null
   : feature('TREE_SITTER_BASH_SHADOW') && !shadowEnabled
@@ -164,13 +191,14 @@ if (astResult.kind === 'too-complex') {
 - `too-complex`：解析成功，但发现命令替换、展开、控制流或解析差异等无法可靠静态判断的结构。它不会直接放行，而是先保留显式 deny 的优先级，再回到 `ask`。
 - `parse-unavailable`：tree-sitter 未加载、功能开关未启用，或者命令注入检查被环境变量关闭，随后进入旧解析路径，继续由后续规则判断。
 
-这里可以看到一个重要原则：解析结果不完整时，控制流倾向于请求确认；显式拒绝规则仍保持更高优先级。解析层给权限系统提供更接近真实执行结构的输入。
+这里可以看到一个重要原则：**解析结果不完整时，控制流倾向于请求确认；显式拒绝规则仍保持更高优先级。** 解析层给权限系统提供更接近真实执行结构的输入。
 
-## 复合命令要逐段检查，重定向还要单独补查
+### 复合命令要逐段检查，重定向还要单独补查
 
 解析得到子命令后，`bashToolCheckPermission` 依次处理精确规则、deny/ask、路径约束、allow、`sed` 约束、模式和只读判断：
 
-```ts
+```ts [source]
+// restored-src/src/tools/BashTool/bashPermissions.ts（2.1.88 还原源码）
 if (matchingDenyRules[0] !== undefined) {
   return {
     behavior: 'deny',
@@ -226,11 +254,34 @@ if (matchingAllowRules[0] !== undefined) {
 
 为什么还要在整串原始命令上补做重定向检查？因为旧的字符串分割可能把 `> /etc/passwd` 从子命令中剥离。源码在合并子命令判断之后，仍用原始输入调用 `checkPathConstraints`；有 AST 时则直接传入 AST 识别到的 redirects。也就是说，命令名称允许，不代表输出目标路径也被允许。
 
-## Permission 通过以后，Sandbox 才决定是否包裹进程
+### 危险模式库：拆掉每一道护栏会怎样
+
+把上面几层护栏拆开看，每一种“危险模式”其实都有对应的默认防线；防线一旦被配置或平台条件拆掉，就会退化成反例里描述的后果。这张库把常态防线与“拆掉护栏后的样子”并排对照：
+
+| 危险模式 | 常态护栏 | 反例：护栏被拆掉后 | 2.1.88 源码落点 |
+|---|---|---|---|
+| `curl ... \| sh`（下载即执行） | 权限规则先检查 `curl` 子命令；沙箱再把网络与文件写入边界施加给进程 | 显式 `dangerouslyDisableSandbox: true` 且 `allowUnsandboxedCommands` 未关（默认 `true`）：命令以宿主机全量文件系统与网络权限直接落地 | `shouldUseSandbox()`、`sandbox-adapter.ts` 默认值 |
+| `> /etc/passwd` 重定向越界 | 对整串原始命令单独补查 redirects 的目标路径 | 只按空格拆分出的子命令名判断权限：`cd` 或 `cat` 被放行，重定向目标从未被检查 | `checkPathConstraints(input, ...)` 与 `astCommand?.redirects` |
+| `rm -rf` / 破坏性命令 | 显式 deny 规则优先于一切；`too-complex` 分支也先跑 `checkEarlyExitDeny` | deny 规则缺失：降级为 `ask`；在 `auto` 模式下该 `ask` 会被分类器接管 | `checkEarlyExitDeny()`、`matchingDenyRules[0]` |
+| `$(...)` / `eval` / 进程替换（动态代码） | AST 解析出 `too-complex` 后回到 `ask`，不静默放行 | 注入检查被环境变量关闭或 `TREE_SITTER_BASH_SHADOW` 生效：进入 `parse-unavailable` 旧路径，静态看到的命令可能不等于运行时执行的命令 | `injectionCheckDisabled`、`astResult.kind` |
+| 子进程环境注入 | `subprocessEnv()` 筛选构造环境，并固定 `GIT_EDITOR: 'true'`、`CLAUDECODE: '1'` | 全量透传宿主环境：编辑器类工具可能触发交互注入；非交互会话可能拿到本不该存在的交互通道 | `Shell.ts` 的 `subprocessEnv()` |
+| 命令永不结束 | `timeout` 默认 120000 ms，超时后 `SIGTERM` 杀进程树或转后台 | `BASH_DEFAULT_TIMEOUT_MS` 被设成超大值且禁止后台化：命令无限挂起，占用会话 | `#handleTimeout()` 的 `#doKill(SIGTERM)` |
+| 输出塞爆上下文 | `EndTruncatingAccumulator` 只回填 preview，大输出持久化到 tool-results 目录 | 全量输出原样回填：一次 `find /` 就能把上下文预算耗尽 | `MAX_PERSISTED_SIZE = 64 * 1024 * 1024` |
+| `cd` 跑到项目外 | 命令结束后 `resetCwdIfOutsideProject` 恢复会话 cwd | 该恢复缺失：后续命令全部在项目外执行，路径权限规则的实际判定基准漂移 | `BashTool.call` 的 cwd 恢复 |
+| Windows 下载执行链（`IEX`、encoded command） | PowerShell AST 解析器检查动态命令名、`Invoke-Expression`、编码命令与提权参数 | 只做字符串黑名单：大小写、编码或拼接即可绕过；解析失败直接放行则完全失去这层防线 | `powershellSecurity.ts`、`PowerShellTool.tsx` |
+
+再展开两个反例的完整推导。
+
+**反例 A：`dangerouslyDisableSandbox` 的放行条件。** `shouldUseSandbox` 里 `input.dangerouslyDisableSandbox && SandboxManager.areUnsandboxedCommandsAllowed()` 返回 `true` 才真正取消沙箱。注意 `allowUnsandboxedCommands` 缺失时默认回退为 `true`——如果企业策略没有显式收紧，一个 `dangerouslyDisableSandbox: true` 的输入就能让命令脱离文件与网络边界。excluded list 同理：它只是 user-facing convenience，不提供黑名单式安全保证，真正的把关在权限层与 `allowUnsandboxedCommands` 策略。
+
+**反例 B：解析器不可用时，`parse-unavailable` 不等于放行。** 注入检查被环境变量关闭或 tree-sitter 未加载时，系统不会直接放行，而是进入旧解析路径由后续规则继续判断。风险在于：旧路径对 `$()`、管道、控制流的拆分能力弱于 AST，`too-complex` 时那些“无法可靠静态判断”的结构在旧路径下可能被当作简单命令处理，使 `ask` 比 AST 路径更晚出现。这正是“解析层不完整 → 请求确认”原则要兜住的窗口。
+
+### Permission 通过以后，Sandbox 才决定是否包裹进程
 
 权限回答的是“能不能调用”，沙箱回答的是“调用以后进程能看到什么”。`restored-src/src/tools/BashTool/shouldUseSandbox.ts` 把这一步写得很直接：
 
-```ts
+```ts [source]
+// restored-src/src/tools/BashTool/shouldUseSandbox.ts（2.1.88 还原源码）
 export function shouldUseSandbox(input: Partial<SandboxInput>): boolean {
   if (!SandboxManager.isSandboxingEnabled()) return false
 
@@ -261,11 +312,12 @@ export function shouldUseSandbox(input: Partial<SandboxInput>): boolean {
 
 还需要核对平台、依赖、excluded command、显式覆盖以及企业策略。
 
-## 沙箱不可用时，有“提示”“降级”和“拒绝”三条边界
+### 沙箱不可用时，有“提示”“降级”和“拒绝”三条边界
 
 `isSandboxingEnabled` 会同时检查平台支持、依赖、平台列表和用户设置。任何一项不满足都会返回 `false`。为了避免用户明明开启沙箱却无声降级，`getSandboxUnavailableReason` 另外生成可读原因：
 
-```ts
+```ts [source]
+// restored-src/src/utils/sandbox/（2.1.88 还原源码）
 function getSandboxUnavailableReason(): string | undefined {
   if (!getSandboxEnabledSetting()) return undefined
 
@@ -300,7 +352,8 @@ function getSandboxUnavailableReason(): string | undefined {
 
 真正包装命令时，`wrapWithSandbox` 则不会把初始化竞争悄悄吞掉：
 
-```ts
+```ts [source]
+// restored-src/src/utils/sandbox/（2.1.88 还原源码）
 async function wrapWithSandbox(
   command: string,
   binShell?: string,
@@ -323,11 +376,12 @@ async function wrapWithSandbox(
 
 `wrapWithSandbox` 把命令改写为沙箱运行时可执行的字符串。`command` 是必填命令；`binShell` 可选，`undefined` 时交给底层管理器选择；`customConfig` 可选，用来覆盖部分 `SandboxRuntimeConfig`；`abortSignal` 可选，存在时可中止包装或初始化流程。沙箱已启用但初始化 Promise 缺失时会直接抛错，原命令保持未执行状态。
 
-## 真实执行还要确定 shell、cwd 和环境
+### 真实执行还要确定 shell、cwd 和环境
 
 经过前面几层以后，`BashTool.call` 调用 `runShellCommand`，后者再进入 `restored-src/src/utils/Shell.ts` 的 `exec`。到这里才真正准备子进程：
 
-```ts
+```ts [source]
+// restored-src/src/utils/Shell.ts（2.1.88 还原源码）
 export async function exec(
   command: string,
   abortSignal: AbortSignal,
@@ -371,11 +425,12 @@ export async function exec(
 
 第三，主线程命令可以通过临时 cwd 文件把 `cd` 的结果写回会话状态；子 Agent 设置 `preventCwdChanges`，其目录变化只作用于子任务。命令结束后如果 cwd 跑到项目权限范围外，`BashTool.call` 还会调用 `resetCwdIfOutsideProject` 做恢复。这个机制维护会话 cwd，文件访问限制仍由沙箱负责。
 
-## 超时、Abort 和后台运行具有不同终态
+### 超时、Abort 和后台运行具有不同终态
 
 命令执行时间长时，最容易误解的是“超时就一定杀进程”。`ShellCommandImpl` 实际上根据是否允许自动后台化选择两条路径：
 
-```ts
+```ts [source]
+// restored-src/src/utils/ShellCommand.ts（2.1.88 还原源码）
 static #handleTimeout(self: ShellCommandImpl): void {
   if (self.#shouldAutoBackground && self.#onTimeoutCallback) {
     self.#onTimeoutCallback(self.background.bind(self))
@@ -401,11 +456,12 @@ static #handleTimeout(self: ShellCommandImpl): void {
 
 显式 `run_in_background: true` 会注册 `LocalShellTask`，把输出、取消和完成通知纳入任务状态；若后台任务被环境变量禁用，则继续以前台方式执行。后台化以后前台 timeout 会被清除，但输出文件仍有 size watchdog，避免持续追加占满磁盘。
 
-## 输出也有边界：模型看到的只是预览
+### 输出也有边界：模型看到的只是预览
 
 命令结束并不意味着所有输出都会原样塞回上下文。`BashTool.call` 使用 `EndTruncatingAccumulator` 保存前部预览；当 `TaskOutput` 判断结果过大时，完整输出会被复制到 tool-results 目录：
 
-```ts
+```ts [source]
+// restored-src/src/tools/BashTool/BashTool.tsx（2.1.88 还原源码）
 const MAX_PERSISTED_SIZE = 64 * 1024 * 1024
 let persistedOutputPath: string | undefined
 
@@ -434,7 +490,7 @@ if (result.outputFilePath && result.outputTaskId) {
 
 映射成 `tool_result` 时，模型会拿到一段 preview 和持久化路径提示，之后可以用 Read 工具读取。复制、链接或 stat 失败时，代码保留已有 stdout preview，并省略完整输出可用性声明。输出裁剪只保护上下文和磁盘预算，命令权限仍在执行前单独判断。
 
-## macOS、Linux、Windows 不能套用同一条结论
+### macOS、Linux、Windows 不能套用同一条结论
 
 源码明确把平台差异写进了执行器。
 
@@ -446,22 +502,81 @@ Windows 原生平台使用独立的 `PowerShellTool` 和 PowerShell AST 解析�
 
 平台分支本身就是安全模型的一部分。
 
-## 小结
+## 源码映射
 
-回到上一篇的问题：`auto` 只替代了权限层对未决 `ask` 的处理方式，并没有把命令执行变成无条件放行。即使自动路径返回 `allow`，Bash 仍要继续解析、沙箱化并经过平台执行边界；`allow` 只批准一次操作意图，后面的每一层仍在回答不同问题。
+| 主题 | 关键文件（`restored-src/src/`） | 关键函数 / 符号 | 证据 |
+|---|---|---|---|
+| 输入契约 | `tools/BashTool/BashTool.tsx` | `fullInputSchema`、`_simulatedSedEdit` | 源码已确认 |
+| 解析与分类 | `tools/BashTool/bashPermissions.ts` | `bashToolHasPermission()`、`parseForSecurityFromAst()`、`checkEarlyExitDeny()` | 源码已确认 |
+| 子命令与路径 | `tools/BashTool/bashPermissions.ts` | `bashToolCheckPermission()`、`checkPathConstraints()`、`astCommand.redirects` | 源码已确认 |
+| 沙箱决策 | `tools/BashTool/shouldUseSandbox.ts` | `shouldUseSandbox()`、`containsExcludedCommand()` | 源码已确认 |
+| 沙箱默认值 | `utils/sandbox/sandbox-adapter.ts` | `sandbox.enabled`、`allowUnsandboxedCommands`、`failIfUnavailable`、`enabledPlatforms` | 源码已确认 |
+| 沙箱可用性 | `utils/sandbox/` | `getSandboxUnavailableReason()`、`wrapWithSandbox()`、`initialize()` | 源码已确认 |
+| 进程执行 | `utils/Shell.ts` | `exec()`、`subprocessEnv()`、`resolveProvider` | 源码已确认 |
+| 超时与取消 | `utils/ShellCommand.ts` | `ShellCommandImpl.#handleTimeout()`、`#abortHandler()`、`#doKill(SIGTERM)` | 源码已确认 |
+| 输出持久化 | `tools/BashTool/BashTool.tsx` | `EndTruncatingAccumulator`、`MAX_PERSISTED_SIZE`、`getToolResultPath()` | 源码已确认 |
+| 平台分支 | `tools/PowerShellTool/`、`tools/BashTool/` | `powershellSecurity.ts`、sandbox 兜底拒绝 | 源码已确认 |
 
-解析层尽量还原命令真实结构，权限层把结构映射到 allow、ask、deny，沙箱层限制进程能接触的资源，平台执行层处理 shell、cwd、环境、进程树、超时和取消，输出层再限制回填模型的内容规模。任何一层都不能单独提供完整安全。
+## 设计决策
 
-可靠的阅读方法是沿输入到副作用的路径，确认每一层拦截对象、失败出口与降级条件。
+**第一，解析、权限、沙箱、平台执行、输出五层各管各的问题。** 权限回答“允许吗”，沙箱回答“能碰哪些资源”，平台层决定 shell、cwd、环境与进程树，输出层限制回填规模。任何一层都不能单独提供完整安全；`auto` 的放行也只作用于权限层，这正是本篇开头结论的来源。
+
+**第二，不完整信息倾向保守。** 解析不出结构（`too-complex` / `parse-unavailable`）时回退到 `ask` 或旧路径继续判断，而不是直接放行；显式 deny 在任何分支都保持最高优先级。代价是静态信息不足时多一次确认，换来的是不会把不可见操作静默执行。
+
+**第三，诊断与强制分离。** `getSandboxUnavailableReason` 只负责告诉用户“为什么没启用”，`failIfUnavailable` 与初始化 Promise 缺失才真正拒绝执行。这样企业用户可以只开诊断、不阻断，也可以两条都开形成硬边界。
+
+**第四，excludedCommands 是路径选择，不是安全机制。** 它让不兼容沙箱的命令走 unsandboxed 路径，但最终能否执行仍由权限层与 `allowUnsandboxedCommands` 策略把关；把它当成黑名单会高估其保护力。
+
+## 练习：给一条危险命令画出四层护栏
+
+用 15–20 分钟做下面这件事，全部在测试目录进行：
+
+1. 在 `/tmp` 建一个测试目录，运行 `claude -p "cd /tmp/guard-test && printf 'x' > escaped.txt && cat escaped.txt"`，观察权限提示出现的时机和文案；再运行 `claude -p "cat /tmp/guard-test/escaped.txt > /tmp/outside.txt"`，对比重定向目标的权限提示是否独立出现。
+2. 查看当前沙箱状态：交互模式运行 `/sandbox`，记录 `sandbox.enabled`、`allowUnsandboxedCommands` 的显示值；对照 `getSandboxUnavailableReason()` 的四种返回（默认关闭 / 平台不支持 / enabledPlatforms 未命中 / 依赖缺失），说出你当前机器命中哪一种。
+3. 运行 `claude -p "sleep 5"` 并立即按 `Esc`，观察命令是否被取消；再运行一条 `sleep 3` 并等待，观察是否出现后台化提示。对照 `#handleTimeout()` 的两条分支（`onTimeoutCallback` 转后台 / `#doKill(SIGTERM)`）。
+4. 用 `claude -p "find / -name '*.log' 2>/dev/null | head -100"` 观察：如果输出被截断，`tool_result` 里是否出现持久化路径；用 Read 读取该路径，确认内容与 preview 的边界。
+
+**预期输出：**
+
+- 第 1 步：第一条命令的权限提示围绕 `cd` 与子命令展开；第二条命令会额外出现与 `/tmp/outside.txt` 相关的路径权限提示——这说明重定向目标被单独检查（`checkPathConstraints` 的整串补查）。
+- 第 2 步：默认状态下 `/sandbox` 显示 disabled 或依赖缺失提示；若显式开启，未装 bubblewrap 的 Linux 会看到 `dependencies are missing`，macOS 提示运行 `/sandbox` 或 `/doctor`。
+- 第 3 步：`Esc` 取消对应 `#abortHandler` 中 `reason !== 'interrupt'` 的 `kill()` 分支；长时间运行的命令在超时后可能转为后台任务，界面出现 task id 而不是超时错误。
+- 第 4 步：大输出被截断时，`tool_result` 末尾出现持久化路径，Read 该路径可拿到完整（或截断到 64 MiB）的输出。
+
+## 自测
+
+1. `auto` 模式会跳过 Bash 的解析与沙箱判断吗？为什么？
+2. 为什么 `> /etc/passwd` 这类重定向要单独补查，而不是只检查子命令本身？
+3. `AbortSignal.reason === 'interrupt'` 时进程为什么没有被杀？这属于四种终态中的哪一种？
+
+<details>
+<summary>参考答案</summary>
+
+1. **不会**。`auto` 只替换权限层对未决 `ask` 的处理方式：快速路径（`acceptEdits` 重查、`SAFE_YOLO_ALLOWLISTED_TOOLS` 白名单）或 classifier 判断；它生成的仍是标准 `PermissionDecision`，之后的解析、沙箱、平台执行与输出边界全部照常。
+
+2. **旧的字符串分割可能把重定向从子命令中剥离**。命令名称允许不代表输出目标路径也被允许；源码在合并子命令判断后仍用原始输入调用 `checkPathConstraints`，有 AST 时直接传入 `astCommand.redirects`，让输出目标也进入路径规则。
+
+3. **`'interrupt'` 表示用户提交了新消息**，进程被保留，调用链有机会把它转成后台任务；这属于“超时、用户 `Ctrl+B` 或 assistant 运行预算触发后台化”的第三种终态，而不是“超时被杀”。
+
+</details>
+
+## 回顾：如何沿一条命令追踪五层安全边界
+
+<details>
+<summary>展开查看回顾</summary>
+
+回到上一篇的问题：`auto` 只替代了权限层对未决 `ask` 的处理方式，并没有把命令执行变成无条件放行。即使自动路径返回 `allow`，Bash 仍要经过解析、权限、沙箱、平台执行与输出五层：解析层还原命令图，权限层在整串命令上补查重定向，沙箱层限制进程可见的文件与网络，平台层决定 shell、cwd、环境、超时与取消，输出层用 preview 加 64 MiB 持久化限制回填规模。危险模式库提醒我们：每一层护栏都可能被配置（如 `dangerouslyDisableSandbox`）或平台条件（WSL1、原生 Windows）拆掉，读懂安全链就要同时知道默认防线是什么、拆掉后会怎样。
+
+</details>
 
 ## 留给下一篇的问题
 
 从当前版本看来，为什么很多 PowerShell 脚本要到执行时才报错？
 
-## 参考资料
+## 相关链接
 
+- **上一篇**：[12 如何在允许、询问与拒绝之间决策](./12-permission-engine.md)——`auto` 决策的来源
+- **下一篇**：[14 如何通过快照与历史实现回滚](./14-file-tools-and-rollback.md)——回答本文的 PowerShell 问题
 - [How we built Claude Code auto mode](https://www.anthropic.com/engineering/claude-code-auto-mode)
-- [Enhancing Claude Code Safety with Auto Mode](https://blog.shinesoftcorp.com/blog/enhancing-claude-code-safety-with-auto-mode-a-deep-dive/)
 - [Claude Code 沙箱机制](https://code.claude.com/docs/en/sandboxing)
-
 - [Claude Code 权限配置](https://code.claude.com/docs/en/permissions)

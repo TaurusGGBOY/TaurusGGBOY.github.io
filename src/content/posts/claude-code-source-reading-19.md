@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读19：如何重试、降级并恢复执行"
 published: 2026-07-24T16:47:06+08:00
-updated: 2026-07-24T16:47:06+08:00
+updated: 2026-08-04
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -9,7 +9,6 @@ draft: false
 image: "/images/posts/claude-code-source-reading-19/claude-code-source-reading-00.png"
 imagePosition: "left"
 ---
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：你能想到 Hook 有什么妙用？
@@ -46,29 +45,44 @@ imagePosition: "left"
 
 所以，Hook 的妙用可以浓缩成一句话：**把不可忘记的规则放到不可绕过的事件点，把需要隔离的分析交给 subagent，把需要等待人的状态接到通知系统。** 它不是万能的工作流编排器；Hook 自身仍可能超时、失败或重复触发，生产配置要做 matcher、超时、幂等和递归保护。
 
-## 问题现场
+## Key Takeaways
 
-一次请求可能在 HTTP 层返回 529，在流已经输出一半时断开，或在工具实际执行后才抛出异常。把这些情况都写成“再试一次”，要么重复副作用，要么把本来可恢复的错误直接暴露给用户。
+- 错误恢复是**分层的控制流**：API 层负责退避和换模型，流层负责决定能否降级，工具层把失败回填为 `tool_result`，query loop 最后决定继续还是结束。
+- `shouldRetry()` 不是"一律重试"：**401 会刷新凭证后重试，429 对普通订阅用户默认不重试（Enterprise 可重试），400 等 4xx 不重试**——是否值得重放取决于凭证是否会刷新、连接是否会重建。
+- 连续 529 计数达到 **`MAX_529_RETRIES = 3`** 且配置了 `fallbackModel` 时触发换模；换模前必须**清空失败轮的 assistant 消息与 tool 暂存**，否则会产生孤儿 `tool_result` 甚至重复执行工具。
+- 工具失败**不盲目重做副作用**：构造 `is_error: true` 且与 `tool_use_id` 配对的 `tool_result` 交回模型，让模型检查现场、换参数或向用户说明。
+- 流式请求可降级为非流式，但源码保留**关闭开关**（`CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` / `tengu_disable_streaming_to_non_streaming_fallback`），因为部分流可能已经启动了工具，重做采样可能造成重复副作用。
+
+## 本篇新增机制
+
+本文回答"如何重试、降级并恢复执行"，确立四个机制：
+
+1. **分层恢复链**：Hook 层归并 outcome → 工具层回填 `tool_result` → API 层退避/换模 → 流层降级 → query loop 收尾。
+2. **标签与控制分离**：`classifyAPIError()` 只生成诊断标签，`shouldRetry()` 与外层上下文决定控制流。
+3. **三档降级**：连续 529 换备用模型、流式转非流式、模型错误"修复输入再试"。
+4. **终态收敛**：不可恢复错误变成结构化 assistant message，`queryLoop()` 运行失败 Hook 后终止。
+
+## 问题
+
+一次请求可能在 HTTP 层返回 529，在流已经输出一半时断开，或在工具实际执行后才抛出异常。把这些情况都写成"再试一次"，要么重复副作用，要么把本来可恢复的错误直接暴露给用户。
 
 ![错误分类、重试与熔断恢复阶梯](/images/posts/claude-code-source-reading-19/19-recovery-ladder-detail-handdrawn.png)
 
-本文把恢复动作放回产生错误的那一层：API 层负责退避和换模型，流层负责决定能否降级，工具层把失败回填为 `tool_result`，query loop 最后决定继续还是结束。
+## 正文
 
-## 错误恢复是一条分层的控制流
+本文全部引用 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 还原源码。代码块只保留证明控制流所需的字段，`// ...` 表示省略埋点、UI 消息和无关分支；每个代码块后标注证据位置与证据级别（[source] 直接摘录还原源码 / [pseudocode] 简化复述 / [inference] 依据结构推断 / [runtime] 运行时行为）。
 
-本文仍然只讨论本仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码。下面的代码片段会省略与当前结论无关的遥测、内部实验和 provider 分支；省略处会明确标出，其余内容直接取自还原源码。
+### 错误恢复是一条分层的控制流
 
 ![Claude Code 对 Hook、工具、API 与流式错误的分层恢复流程](/images/posts/claude-code-source-reading-19/19-errors-retries-recovery-handdrawn.png)
-
-### 三个概念如何决定恢复动作
 
 恢复链按错误产生的位置分层。Hook 的非零退出先成为 `non_blocking_error` 或 blocking feedback；工具异常被配对成带原 `tool_use_id` 的 `tool_result`；API 层再由 `classifyAPIError()` 和 `shouldRetry()` 判断连接、限流、认证或服务故障。只有尚未产生不可逆副作用、且当前 source 被允许重试的请求，才会进入 `Retry-After` 或指数退避加 jitter 的等待。
 
 把这三个概念放在一起，本章主线就是：先把错误关在正确的层里，再判断是否可重试；可重试时控制节奏，不可重试时把失败变成模型、用户或宿主能够识别的终态消息。
 
-## 这张金额单位工单失败时，Claude Code 先判断是哪一种失败
+### 这张金额单位工单失败时，Claude Code 先判断是哪一种失败
 
-10:03，工程师已经拿到金额字段的调用链，准备让模型读取 issue-tracker 的历史评论，API 却返回了 529；响应只输出了一半，终端停在“正在获取历史舍入规则”。10:11，重新检查本地代码时，Grep 因为一个已经被重命名的目录退出非零。10:46，修复分支上的测试又报错，但错误来自一个未安装的浏览器依赖，而不是金额断言。三件事都叫“失败”，可恢复方式完全不同。
+10:03，工程师已经拿到金额字段的调用链，准备让模型读取 issue-tracker 的历史评论，API 却返回了 529；响应只输出了一半，终端停在"正在获取历史舍入规则"。10:11，重新检查本地代码时，Grep 因为一个已经被重命名的目录退出非零。10:46，修复分支上的测试又报错，但错误来自一个未安装的浏览器依赖，而不是金额断言。三件事都叫"失败"，可恢复方式完全不同。
 
 工程师因此把任务约束写得很明确：
 
@@ -115,11 +129,35 @@ export function classifyAPIError(error: unknown): string {
 }
 ```
 
+> 证据：[source] `restored-src/src/services/api/errors.ts` 的 `classifyAPIError()`（2.1.88 source map 还原源码）。
+
 函数说明：`classifyAPIError(error)` 为日志和分析生成稳定字符串。它识别的源码分支还包括 `repeated_529`、`capacity_off_switch`、`prompt_too_long`、PDF/图片错误、三类 `tool_use` / `tool_result` 配对错误、`invalid_model`、计费与认证错误、Bedrock 模型访问错误、SSL 证书错误等。
 
 参数说明：`error` 是 `unknown`，所以函数先用 `instanceof`、HTTP status 和消息特征逐层缩窄。省略 `APIError.status` 时会跳过 4xx/5xx 回退；最终标签 `unknown` 表示静态分类器未命中已知形状。
 
 这里要特别注意：这一步只生成**诊断分类**。比如 401 会被标成认证类错误，但某些路径会刷新凭证后重试；429 会被标成 rate limit，但订阅用户、企业用户和无人值守模式的处理会分流。标签负责把错误说清楚，重试控制流由 `shouldRetry()` 和外层上下文决定。
+
+### 错误类型 → 恢复动作矩阵
+
+[inference] 本文把分散在源码各层的错误分类、恢复动作、重试上限与最终呈现汇成一张矩阵。错误类型与恢复动作来自 [source]；"重试上限"中未直接列出的数值（如 `maxRetries` 默认 10）已在文中对应小节确认；运行时开关行为属于 [runtime]。
+
+| 错误类型 | 分类标签 | 恢复动作 | 重试上限 | 最终呈现 |
+| --- | --- | --- | --- | --- |
+| 用户取消（`AbortError` / `APIUserAbortError`） | `aborted` | 清理资源，跳过一切重试 | 0 | `reason: aborted_streaming` / `aborted_tools` |
+| 连接错误（`APIConnectionError`、`ECONNRESET`、`EPIPE`） | `connection_error` | 重建 client；必要时禁用 keep-alive 重连 | `maxRetries + 1`（默认共 11 次尝试） | 最终 assistant error |
+| API 超时 | `api_timeout` | 退避后重试；流式可降非流式 | 同 `maxRetries + 1` | `api_retry` system message |
+| 429 限流 | `rate_limit` | 订阅用户默认不重试；Enterprise / persistent / `x-should-retry: true` 可重试 | 取决于 `shouldRetry()` 与订阅类型 | synthetic assistant message |
+| 529 过载 | `server_overload` | 指数退避；连续 3 次后 `fallbackModel` 换模 | `MAX_529_RETRIES = 3` | warning：`Switched to ... due to high demand` |
+| 5xx | `server_error` | 退避重试 | `maxRetries + 1` | assistant error `server_error` |
+| 401 / OAuth token revoked | 认证类 | 刷新凭证 / 清缓存后重试 | 每次重发前重新判断 | — |
+| 400 等其他 4xx | `client_error` | 不重试 | 0 | 交给用户修复输入 |
+| prompt too long | `prompt_too_long` | withheld → drain collapse → reactive compact → 重建消息重试 | `hasAttemptedReactiveCompact` 防死循环 | `transition.reason = 'reactive_compact_retry'` |
+| max_output_tokens | `max_output_tokens` | 输出上限升到 64K；仍截断则追加 meta message 从中断处继续 | `MAX_OUTPUT_TOKENS_RECOVERY_LIMIT` | 达到上限才显示被 withheld 的错误 |
+| 工具异常 | — | 回填 `is_error: true` 且配对 `tool_use_id` 的 `tool_result` | 不自动重试 | 下一轮模型决定修正或解释 |
+| Hook 非零退出 | `non_blocking_error` / `blocking` | 退出码 2 → blocking feedback；其他非零 → attachment | — | 模型可见反馈或用户可见附件 |
+| 流中断 / 不完整块 | — | 降级 `executeNonStreamingRequest()` | 1 次（可被 `disableFallback` 关闭） | 非流式结果或原错误 |
+
+矩阵中每一行都可以在正文对应小节找到源码证据。记住三件事：**401/429/529 这三类最容易混淆**（一个刷新凭证、一个看订阅、一个看连续计数）；**工具与 Hook 失败不走 API 重试**（前者回填给模型，后者归并 outcome）；**模型输入类错误先改状态再重试**（压缩、升上限），指数退避不会让同一份过长输入变短。
 
 ### API 重试：每次重发前都重新判断环境
 
@@ -157,6 +195,8 @@ export async function* withRetry<T>(
   throw new CannotRetryError(lastError, retryContext)
 }
 ```
+
+> 证据：[source] `restored-src/src/services/api/withRetry.ts` 的 `withRetry<T>()`（2.1.88 source map 还原源码）。
 
 函数说明：`withRetry<T>()` 包住一次 API 操作，成功时返回 `T`，等待重试时 yield 系统错误消息，耗尽或遇到不可重试错误时抛出 `CannotRetryError`。默认最大重试数是 10，因此普通情况下最多执行 `maxRetries + 1` 次操作。
 
@@ -203,11 +243,13 @@ function shouldRetry(error: APIError): boolean {
 }
 ```
 
+> 证据：[source] `restored-src/src/services/api/withRetry.ts` 的 `shouldRetry()`（2.1.88 source map 还原源码）。
+
 函数说明：`shouldRetry(error)` 只回答当前 `APIError` 是否值得再交给 `withRetry()`。片段省略了源码中优先级更高的分支：无人值守 persistent 模式会把 429/529 视作可重试；remote/CCR 模式会把 401/403 当作基础设施的短暂故障；消息里含 `overloaded_error`、或者是可调整 `max_tokens` 的上下文溢出，也会直接返回 `true`。
 
 参数说明：省略 `error.status` 时，在连接错误特判之后直接进入不可重试分支。服务端非标准头 `x-should-retry` 的可见值是字符串 `'true'`、`'false'` 或缺失；缺失时继续按连接类型和状态码判断，它还会受到订阅类型和内部运行环境约束。429 对普通订阅用户默认不走这里的常规重试，Enterprise 可重试。408 是请求超时，409 在源码注释中是 lock timeout，5xx 是服务端错误。其余 4xx 默认返回 `false`。
 
-这段代码也说明“HTTP 失败一律重试”为什么危险。400 往往说明参数或上下文有问题，重放不会改变结果；403 通常要用户修复授权。只有源码明确知道凭证会被刷新、连接会被重建，或者服务端声明可以重试时，才值得继续。
+这段代码也说明"HTTP 失败一律重试"为什么危险。400 往往说明参数或上下文有问题，重放不会改变结果；403 通常要用户修复授权。只有源码明确知道凭证会被刷新、连接会被重建，或者服务端声明可以重试时，才值得继续。
 
 ### 退避按服务端提示或指数公式计算
 
@@ -234,6 +276,8 @@ export function getRetryDelay(
   return baseDelay + jitter
 }
 ```
+
+> 证据：[source] `restored-src/src/services/api/withRetry.ts` 的 `getRetryDelay()`（2.1.88 source map 还原源码）。
 
 函数说明：`getRetryDelay()` 优先服从可解析的 `Retry-After` 秒数；header 缺失或无效时，从 500ms 开始指数增长，基础延迟默认封顶 32,000ms，再增加最多 25% 的随机 jitter。
 
@@ -282,6 +326,8 @@ export function getRetryDelay(
 }
 ```
 
+> 证据：[source] `restored-src/src/query.ts` 的 `queryLoop()` 模型请求循环（2.1.88 source map 还原源码）。
+
 函数说明：这段位于 `queryLoop()` 的模型请求循环。它只捕获 `withRetry()` 发出的换模信号；随后清掉失败尝试产生的 assistant、tool result 和 tool-use 暂存，丢弃流式工具执行器，再用备用模型重做整次模型请求。
 
 参数说明：`fallbackModel` 是可选字符串，缺失时不会进入该分支。`attemptWithFallback` 设为 `true` 让内层 while 再跑一次。新建 `StreamingToolExecutor` 时继续使用当前工具数组、`canUseTool` 与上下文。系统消息 level 固定为 `'warning'`，使用户能看到发生了降级。
@@ -319,6 +365,8 @@ const result = yield* executeNonStreamingRequest(
   // ...
 )
 ```
+
+> 证据：[source] `restored-src/src/services/api/claude.ts` 的 `queryModelWithStreaming()` 错误分支（2.1.88 source map 还原源码）。
 
 函数说明：这段来自 `queryModelWithStreaming()` 的错误分支。默认可从失败的 streaming 请求降到 non-streaming 请求；环境变量或远端开关启用时，则把原错误交回 `withRetry()`，不做中途降级。流式错误本身若是 529，会以初值 1 进入后续连续 529 计数。
 
@@ -378,6 +426,8 @@ const result = yield* executeNonStreamingRequest(
 }
 ```
 
+> 证据：[source] `restored-src/src/services/tools/toolExecution.ts` 的 `checkPermissionsAndCallTool()`（2.1.88 source map 还原源码）。
+
 函数说明：这段来自 `restored-src/src/services/tools/toolExecution.ts` 的 `checkPermissionsAndCallTool()`。它先用 `formatError()` 规范化错误，再运行 `PostToolUseFailure` Hook，最终返回一条 user role 的 `tool_result`，让 `queryLoop()` 把失败结果连同历史交给模型进入下一轮。
 
 参数说明：`toolUseID` 必须原样写入 `tool_use_id`，否则 API 无法配对；`processedInput` 是经过 Schema、工具校验和 PreToolUse 处理后的输入。`isInterrupt` 是布尔值，只在错误为项目自定义 `AbortError` 时为 `true`。`requestId` 可能为 `undefined`；`mcpServerType` 和安全化后的 base URL 只对 MCP 诊断有意义。`toolUseResult` 保存宿主侧原始错误表示，面向模型的 `content` 最长会由 `formatError()` 截到首尾合计 10,000 字符。
@@ -415,7 +465,9 @@ export interface HookResult {
 }
 ```
 
-类型说明：`HookResult` 把“Hook 自己运行失败”和“Hook 有意阻断业务动作”分开。`outcome` 只有源码列出的四个值：`success` 是成功；`blocking` 是明确阻断；`non_blocking_error` 表示 Hook 异常但不天然接管主控制流；`cancelled` 表示取消。
+> 证据：[source] `restored-src/src/utils/hooks.ts` 的 `HookResult`（2.1.88 source map 还原源码）。
+
+类型说明：`HookResult` 把"Hook 自己运行失败"和"Hook 有意阻断业务动作"分开。`outcome` 只有源码列出的四个值：`success` 是成功；`blocking` 是明确阻断；`non_blocking_error` 表示 Hook 异常但不天然接管主控制流；`cancelled` 表示取消。
 
 字段说明：`blockingError`、`preventContinuation`、`stopReason`、`additionalContext`、`updatedInput`、`retry` 都可以是 `undefined`。`permissionBehavior` 的可选值是 `'ask'`、`'deny'`、`'allow'`、`'passthrough'`；省略时该 Hook 不提供权限意见。`retry` 只由 PermissionDenied 等特定 Hook 输出消费。
 
@@ -423,7 +475,7 @@ export interface HookResult {
 
 命令 Hook 的退出码也有约定：0 被视为成功，2 或 JSON `decision: 'block'` 被视为阻断，其他非零通常进入非阻断错误。JSON 结构错误、进程启动失败或超时会被包装成 `hook_error_during_execution` / `hook_non_blocking_error` 一类 attachment，从而把扩展脚本故障限制在 Hook 协议内。
 
-“非阻断”结果仍会作为 attachment 展示。PreToolUse Hook 的明确 deny/stop 会让当前工具停在副作用边界之前；Stop Hook 的 blocking error 会作为反馈加入消息并让 `queryLoop()` 再跑一轮。普通执行错误若未形成 blocking decision，主流程可以继续。失败语义取决于生命周期节点与返回结果。
+"非阻断"结果仍会作为 attachment 展示。PreToolUse Hook 的明确 deny/stop 会让当前工具停在副作用边界之前；Stop Hook 的 blocking error 会作为反馈加入消息并让 `queryLoop()` 再跑一轮。普通执行错误若未形成 blocking decision，主流程可以继续。失败语义取决于生命周期节点与返回结果。
 
 ### 用户取消：Abort 走独立终止路径
 
@@ -439,19 +491,21 @@ export function isAbortError(e: unknown): boolean {
 }
 ```
 
+> 证据：[source] `restored-src/src/utils/errors.ts` 的 `isAbortError()`（2.1.88 source map 还原源码）。
+
 函数说明：`isAbortError()` 位于 `restored-src/src/utils/errors.ts`，统一识别三种取消形状。源码特意使用 `instanceof APIUserAbortError`，因为 minified build 可能改写构造器名，单纯比较 `constructor.name` 不可靠。
 
 参数说明：`e` 是 `unknown`。项目 `AbortError`、SDK `APIUserAbortError`、以及 `name === 'AbortError'` 的普通 `Error` 返回 `true`，其他值返回 `false`。这只是分类函数；不同调用点仍会决定如何清理资源和生成消息。
 
-在流式请求中，SDK 抛出 `APIUserAbortError` 后还要检查调用方的 `signal.aborted`：为真才是用户 ESC 取消；为假则被转换为 `APIConnectionTimeoutError`，进入超时处理。这个区分避免把 SDK 内部 timeout 错报成“用户中断”。
+在流式请求中，SDK 抛出 `APIUserAbortError` 后还要检查调用方的 `signal.aborted`：为真才是用户 ESC 取消；为假则被转换为 `APIConnectionTimeoutError`，进入超时处理。这个区分避免把 SDK 内部 timeout 错报成"用户中断"。
 
 `queryLoop()` 收到真实取消后跳过 assistant API error。模型流阶段取消会生成普通 interruption user message；工具阶段取消会生成 tool-use interruption result。如果 abort reason 是 `'interrupt'`，表示新的用户输入已经排队，源码会跳过额外 interruption message，避免重复上下文。取消最终返回的 reason 为 `aborted_streaming` 或 `aborted_tools`，流程随即停止退避。
 
-### 模型错误也有“修复输入再试”的分支
+### 模型错误也有"修复输入再试"的分支
 
 有些模型/API 错误表示当前上下文形状无法被接受。`queryLoop()` 会先修复状态，再用新状态重试。
 
-最典型的是 prompt too long。API error message 会先被 withheld，不立即显示；随后运行时优先尝试 drain 已暂存的 context collapse，再尝试一次 reactive compact。压缩成功后，`buildPostCompactMessages()` 重建消息链，并以 `transition.reason = 'reactive_compact_retry'` 继续。已经尝试过的布尔标志 `hasAttemptedReactiveCompact` 会保留，防止“压缩后仍过长 → 再压缩”的死循环。
+最典型的是 prompt too long。API error message 会先被 withheld，不立即显示；随后运行时优先尝试 drain 已暂存的 context collapse，再尝试一次 reactive compact。压缩成功后，`buildPostCompactMessages()` 重建消息链，并以 `transition.reason = 'reactive_compact_retry'` 继续。已经尝试过的布尔标志 `hasAttemptedReactiveCompact` 会保留，防止"压缩后仍过长 → 再压缩"的死循环。
 
 另一个例子是 `max_output_tokens`。在相应开关开启且省略显式环境变量覆盖时，它可以先把同一请求的输出上限提升到 64K；仍然截断时，再追加一条 meta user message，要求模型从中断处继续并拆小剩余工作。恢复次数由 `MAX_OUTPUT_TOKENS_RECOVERY_LIMIT` 限制。达到上限后，之前 withheld 的错误才会显示。
 
@@ -475,12 +529,12 @@ export function isAbortError(e: unknown): boolean {
 
 1. 工具失败已经形成配对的 `tool_result`：把它加入消息链，继续下一轮，让模型决定修正或解释。
 2. Stop Hook 明确返回 blocking feedback：把反馈加入消息，再运行一轮；`stopHookActive` 防止递归语义失控。
-3. API error 已经是 synthetic assistant message：执行 `StopFailure` Hook，跳过普通 Stop Hook，然后结束本轮，避免“错误 → Stop Hook 阻断 → 再请求 → 同一错误”的死循环。
+3. API error 已经是 synthetic assistant message：执行 `StopFailure` Hook，跳过普通 Stop Hook，然后结束本轮，避免"错误 → Stop Hook 阻断 → 再请求 → 同一错误"的死循环。
 4. 用户取消或无法预期的运行时异常：补齐缺失的 tool result / interruption 信息，释放 stream 资源，以 `aborted_*` 或 `model_error` 终止当前循环。
 
 本轮结束后，assistant error、tool error 和 interruption 仍以消息或 attachment 留给上层记录和展示；真正的会话持久化、resume 与 fork 正是下一篇要继续追踪的主题。
 
-
+### 静态源码能确认什么，不能确认什么
 
 静态源码可以确认默认重试数、HTTP status 与 header 的判断、指数退避公式、连续 529 的计数门槛、流转非流的入口、工具错误回填形状、Hook outcome、Abort 分支和 `queryLoop()` 的终止 reason。
 
@@ -488,26 +542,78 @@ export function isAbortError(e: unknown): boolean {
 
 副作用边界也必须保守描述。流式 fallback 会清理局部消息与 executor，但不能撤销已经落盘或提交到外部系统的动作。要判断一次失败能否安全重试，仍然需要检查具体工具实现和真实现场。
 
-## 小结
+## 源码映射表
 
-Claude Code 的错误恢复可以归纳为四层。
+路径前缀 `restored-src/` 表示 2.1.88 source map 还原源码。行号以当前仓库为准。
 
-Hook 层把结果归并成成功、阻断、非阻断错误或取消，让扩展失败不必自动升级为进程失败。工具层不盲目重做副作用，而是构造 `is_error: true` 且与 `tool_use_id` 配对的 `tool_result`，把修正机会交回 Agent 循环。
+| 机制 | 关键符号 | 位置 | 证据状态 |
+| --- | --- | --- | --- |
+| 分类标签 | `classifyAPIError()` | `src/services/api/errors.ts` | [source] 已确认 |
+| 重试入口 | `withRetry<T>()` / `getMaxRetries()` | `src/services/api/withRetry.ts` | [source] 已确认 |
+| 重试闸门 | `shouldRetry()` / `x-should-retry` / 429/401 分支 | `src/services/api/withRetry.ts` | [source] 已确认 |
+| 退避 | `getRetryDelay()` / `BASE_DELAY_MS` | `src/services/api/withRetry.ts` | [source] 已确认 |
+| 529 换模 | `MAX_529_RETRIES` / `FallbackTriggeredError` | `src/services/api/withRetry.ts` | [source] 已确认 |
+| 换模执行 | `queryLoop()` 的 fallback 分支 | `src/query.ts` | [source] 已确认 |
+| 流降级 | `queryModelWithStreaming()` / `executeNonStreamingRequest()` | `src/services/api/claude.ts` | [source] 已确认 |
+| 工具回填 | `checkPermissionsAndCallTool()` 的 catch 分支 | `src/services/tools/toolExecution.ts` | [source] 已确认 |
+| Hook outcome | `HookResult` / `outcome` 四值 | `src/utils/hooks.ts` | [source] 已确认 |
+| Abort 分类 | `isAbortError()` | `src/utils/errors.ts` | [source] 已确认 |
+| 模型错误修复 | `hasAttemptedReactiveCompact` / `MAX_OUTPUT_TOKENS_RECOVERY_LIMIT` | `src/query.ts` | [source] 已确认 |
+| 终态消息 | `getAssistantMessageFromError()` / `isApiErrorMessage` | `src/services/api/claude.ts` | [source] 已确认 |
 
-API 层用 `shouldRetry()` 判断连接、超时、锁冲突、限流、认证刷新与服务错误，再按 `Retry-After` 或指数退避加 jitter 等待；满足严格条件的连续 529 可以触发备用模型。流层还可以转为非流式请求，但实现同时保留关闭开关，因为部分流已经启动工具时，重做请求可能造成重复副作用。
+> 证据说明：上表全部条目都来自 2.1.88 还原源码的静态确认。两类边界需要区分：订阅类型、`USER_TYPE`、persistent/remote 模式、feature 开关、`fallbackModel` 具体值与网络故障分布属于 [runtime]；"流式降级不会重复副作用"受关闭开关约束的表述，以及错误矩阵的分类归并属于 [inference]/[runtime] 混合，正文已逐项注明。
 
-最后，真实 Abort 不参与重试；无法恢复的 API 错误会变成结构化 assistant message，`queryLoop()` 运行失败 Hook 后终止。这个设计让每个错误留在正确的协议层里，并给下一步留下可诊断、可恢复的状态。
+## 设计决策：为什么分层恢复，而不是一个全局 catch
+
+源码里找不到官方选型记录，下面的判断来自代码结构与调用关系，属于解释而非官方声明。
+
+**第一，为什么错误要关在产生它的那一层？** 因为不同层的错误拥有不同的信息与副作用状态。API 层知道 header 和状态码，可以判断凭证是否刷新、连接是否重建；工具层知道副作用可能已经发生，不能自动重放；流层知道部分工具可能已经启动。让上层盲目 catch 再"再试一次"，要么重复副作用，要么把本来可恢复的错误直接暴露给用户。
+
+**第二，为什么"诊断标签"与"重试决策"分离？** 因为同一个标签在不同环境下语义不同：401 在普通路径是认证错误、在 remote/CCR 是基础设施故障；429 对订阅用户和企业用户的处理分流。`classifyAPIError()` 负责把错误说清楚，`shouldRetry()` 与外层上下文负责决定怎么做——单一分类函数可以稳定，决策逻辑随运行环境变化。
+
+**第三，为什么工具失败不自动重试？** 因为执行器无法仅凭一个 exception 判断副作用是否发生：Bash 可能已执行前半段，Edit 可能已写盘，MCP 服务可能在返回错误前提交了远端事务。把 `is_error: true` 的 `tool_result` 回填给模型，是把修正机会交回 Agent 循环，同时避免在副作用状态未知时自动重做。
+
+**第四，为什么换模和流降级都要先清暂存？** 因为失败流中可能已经产出 `tool_use`，备用模型或非流式请求重试后会生成新的 ID；混入旧结果会制造孤儿 `tool_result`，严重时重复执行工具。先修复协议边界（清空 assistant 消息、tool result、tool-use 暂存、discard executor），再重做本次采样——这也是"不能撤销已落盘副作用"下的最小安全动作。
+
+## 练习：在真实会话里观察错误恢复
+
+1. **模拟一次 API 错误观察标签与呈现。** 在带网络的会话里运行一个长任务，在 debug 日志中定位 `classifyAPIError` 的标签输出与 `withRetry` 的 yield 消息（`retryInMs`、`retryAttempt`、`maxRetries`）。再用 `--model` 配一个不可用模型触发认证/模型错误，观察最终 assistant message 的 `error` 分类。约 15 分钟。
+
+2. **制造一次工具失败，观察回填形状。** 让 Bash 执行一个必然失败的命令（如 `ls /nonexistent`），在 debug 日志或 transcript 中确认失败被构造成 `type: 'tool_result'`、`is_error: true`、`tool_use_id` 配对的消息，且模型下一轮收到该结果后尝试修正而不是重复原命令。约 10 分钟。
+
+## 自测
+
+1. `classifyAPIError()` 与 `shouldRetry()` 的分工是什么？
+2. 为什么 529 换模前必须清空旧的 `toolUseBlocks`？
+3. 工具失败为什么不自动重试，而是回填 `tool_result`？
+
+<details>
+<summary>参考答案</summary>
+
+1. **标签 vs 决策。** `classifyAPIError()` 只生成稳定诊断标签（`errors.ts`），例如 401 是认证类、429 是 rate limit；是否重试由 `shouldRetry()` 与外层上下文决定（`withRetry.ts`），同一个标签在不同订阅类型、persistent/remote 模式下处理分流。标签负责把错误说清楚，控制流负责决定怎么做。
+
+2. **为了避免孤儿 `tool_result` 与重复执行。** 失败流可能已经产出一个 `tool_use`，备用模型重试后会生成新的 ID；把旧结果混进新请求会制造无法配对的孤儿 `tool_result`，严重时重复执行工具。因此换模分支先清空 `assistantMessages`、`toolResults`、`toolUseBlocks` 并 discard 流式执行器，再重做本次采样（`query.ts`）。
+
+3. **因为副作用状态未知。** Bash 可能已执行前半段，Edit 可能已写盘，MCP 服务可能在返回错误前提交了远端事务；执行器无法仅凭 exception 判断副作用是否发生（`toolExecution.ts`）。把 `is_error: true` 且配对 `tool_use_id` 的 `tool_result` 回填给模型，让模型检查现场、换参数或向用户说明，避免在副作用状态未知时自动重做。
+
+</details>
+
+## 回顾：Hook 有什么妙用
+
+<details>
+<summary>展开查看回顾</summary>
+
+上一篇问：你能想到 Hook 有什么妙用？Hook 最有价值的地方，不是替模型再写一段提示词，而是把"每次都必须发生"的动作放到生命周期边界上，变成可重复、可审计的工程约束。① `PreToolUse` 挡危险操作与敏感文件：在 Bash/Write/Edit 执行前拒绝 `rm -rf`、强制 push、fork bomb，阻止修改 `.env`、SSH key 和云凭证；规则在模型决策之后、工具副作用之前，即使 prompt 漏掉约束也过不了这道门。② `git commit` 变成自动 review 门禁：matcher 只匹配 `git commit`，启动 reviewer subagent 检查 staged diff，严重问题直接阻止，轻微问题自动修复但保持 unstaged。③ `SessionStart` 注入团队规则与分支状态，`Stop` 时由隔离 Agent 把筛选过的进展同步到 CLAUDE.md，但必须用 `stop_hook_active` 做循环护栏，否则 Stop Hook 会在每次重试时再次阻止停止。④ 把 `npm run dev`、`tail -f` 这类占住前台的命令识别后转入后台，主 Agent 继续推进。⑤ `Notification` 接桌面通知或 Slack，`Stop` 通知整个任务结束，把"人在等待"变成可达通知。一句话：把不可忘记的规则放到不可绕过的事件点，把需要隔离的分析交给 subagent，把需要等待人的状态接到通知系统。
+
+</details>
 
 ## 留给下一篇的问题
 
 Anthropic 提到 Fable 5 遇到一些问题时可以降级到 Opus 4.8 执行；根据 2.1.88 的源码，这种 fallback 是如何实现的？
 
-## 参考资料
+## 相关链接
 
-- [Claude Code's Most Underrated Feature: Hooks](https://www.reddit.com/r/ClaudeCode/comments/1qlzzzf/claude_codes_most_underrated_feature_hooks_wrote/)
-- [Automate Your Claude Code Workflow with Essential Hooks](https://www.reddit.com/r/ClaudeWorkflows/comments/1v6lxrg/workflow_automate_your_claude_code_workflow_with/)
-- [Advanced Claude Code Hooks for Prompt Improvement and Memory Sync](https://www.reddit.com/r/ClaudeWorkflows/comments/1v6onha/workflow_advanced_claude_code_hooks_for_automated/)
-- [Claude Code Hooks and Automation](https://claudcod.com/blog/claude-code-hooks/)
-- [Claude Code 错误参考](https://code.claude.com/docs/en/errors)
-
-- [Claude Code 监控与 API 错误事件](https://code.claude.com/docs/en/monitoring-usage)
+- **上一篇**：[18 生命周期机制如何横切整个运行时](./18-hooks-lifecycle.md)——`PostToolUseFailure` 与 `HookResult.outcome`
+- **下一篇**：[20 会话历史如何持久化与恢复](./20-session-history-and-resume.md)——回答本文的 fallback 实现问题
+- **平行阅读**：[8 API 流式与消息协议](./08-api-streaming.md)——`tool_use` / `tool_result` 配对协议
+- **官方参考**：[Claude Code 错误参考](https://code.claude.com/docs/en/errors)

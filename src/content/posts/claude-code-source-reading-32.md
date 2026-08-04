@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读32：Ink TUI 与交互式 REPL 如何渲染与刷新"
 published: 2026-07-24T16:47:19+08:00
-updated: 2026-07-24T16:47:19+08:00
+updated: 2026-08-04
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -9,7 +9,6 @@ draft: false
 image: "/images/posts/claude-code-source-reading-32/claude-code-source-reading-00.png"
 imagePosition: "left"
 ---
-
 ## 回答上一篇的问题
 
 上一篇留下的问题是：**共享状态准备好以后，Claude Code 如何用 Ink 和 React 构建终端 REPL，并把流式消息、工具进度与用户输入渲染到同一界面？**
@@ -24,6 +23,20 @@ imagePosition: "left"
 
 本篇继续以 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码为边界。下文代码块都来自 `restored-src/`；为了突出主链，省略了与当前结论无关的参数和分支，不把整理后的伪代码冒充完整源码。
 
+## Key Takeaways
+
+- 交互模式的渲染闭环是 **`键盘 → React 状态 → query 事件 → React 状态 → Ink 帧 → 终端`**：Agent 内核产生事件，React 保存并投影状态，Ink 把投影变成终端差量，三层分工使执行与渲染解耦。
+- 只有交互会话才挂载 UI：`main.tsx` 在 `isNonInteractiveSession` 为假时动态加载 `createRoot()` 并创建 Ink root；print/headless 分支根本不进入这棵 React 树。
+- REPL 是 **"输入路由器"**：`PromptInput.onSubmit()` 先处理空输入、图片、斜杠命令和 subagent/teammate 路由，最后才把普通 leader prompt 交给 `onSubmitProp`——不是每个按键都进 `query()`。
+- 流式文本与完整消息走**两条显示路径**：`streamingText` 是独立预览（`prefersReducedMotion` 与光标 bug 检测可关闭），完整 assistant message 到达时原子接管；临时工具进度替换末条消息，带历史语义的进度追加。
+- 帧绘制由项目内 Ink renderer 完成：`react-reconciler` 更新容器后，`onRender` 被节流到 **16ms（`FRAME_INTERVAL_MS = 16`）**，Yoga 布局、Screen buffer 与前帧 diff 只把变化 patch 写入 stdout。
+
+> ⚠️ **证据边界**：本文所有代码来自 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` source map 还原源码。`restored-src/` 只用于定位证据，不等同于 Anthropic 内部仓库原始目录；代码块只保留证明控制流所需的字段，`// ...` 表示省略埋点、UI 消息与无关分支。
+
+## 本篇新增机制
+
+31 解释了 AppState 这个共享数据平面。本篇回答它之上的问题：**这些状态怎样变成终端里持续刷新的画面？** 答案是 REPL——一棵同时接收键盘、query 事件和布局信息的 React 组件树，以及项目内 Ink renderer 把树翻译成终端控制序列。它揭示"React 声明界面、Ink 渲染终端"的两层分工，是 33（快捷键与 Vim 模式）的必备前提——所有按键都要先经过 `useInput()` 与组件树的事件传播。
+
 ## 问题现场
 
 终端 UI 同时要接收键盘、模型 token、工具进度、权限弹窗和窗口 resize。若每个回调直接写 `stdout`，光标和旧屏幕内容很快失去所有权；真正需要的是一棵能持续更新、又能控制差量刷新的组件树。
@@ -32,37 +45,25 @@ imagePosition: "left"
 
 本文沿着一轮交互追踪 `PromptInput → query() → onQueryEvent() → React state → Ink renderer`，重点看流式预览为什么和稳定消息列表分开，以及帧差如何最终写入终端。
 
-## 先补三个概念：REPL、React 和 Ink
+## 正文
+
+### 先补三个概念：REPL、React 和 Ink
 
 `REPL.tsx` 的重点不是终端打印函数，而是把输入、查询事件和屏幕输出放进同一棵组件树。React 保存可渲染快照，Ink renderer 才负责把树变成终端行；执行副作用仍在 `query()`、回调和 effect 中。
 
-### REPL 是一轮轮持续运行的交互循环
+**REPL 是一轮轮持续运行的交互循环**：`PromptInput` 读取输入，`query()` 可能多次模型推理与工具调用，事件回调更新显示，完成后输入区继续承接下一轮。它持有 UI 生命周期，却不取代 query loop、工具权限或 transcript 持久化。
 
-REPL 仍是 Read–Eval–Print Loop：`PromptInput` 读取输入，`query()` 可能多次模型推理与工具调用，事件回调更新显示，完成后输入区继续承接下一轮。它持有 UI 生命周期，却不取代 query loop、工具权限或 transcript 持久化。
+**React 是状态到界面的映射，不只用于浏览器**。组件声明当前消息、进度和输入应呈现什么，renderer 再决定如何落到屏幕。浏览器里的 renderer 是 React DOM；Claude Code 使用的是自己的 Ink renderer，最终操作终端屏幕缓冲区。相同的 `useState`、`useEffect`、Context 和组件组合仍然成立，只是 `<Box>`、`<Text>` 不会变成网页节点，而会参与终端布局与字符绘制。
 
-### React 是状态到界面的映射，不只用于浏览器
+**Ink 是 React 与终端之间的 renderer**：React reconciler 先生成 Ink 节点树，Yoga 计算宽高和位置，绘制器生成一帧 `Screen`，再与上一帧比较，把 ANSI 控制序列和文本差量写到终端。这个界面同时有消息列表、流式文本、旋转进度、固定输入区、权限弹窗、窗口缩放和滚动；如果每个模块都直接写 stdout，它们会争夺光标，旧内容也很难准确擦除。高频 token 流会触发大量状态变化，因此源码使用 16ms 帧节流、`useMemo`、稳定 key、虚拟列表和进度消息替换，让终端 REPL 在持续输出时控制刷新成本。
 
-React 在这里把状态映射为组件树并做 reconciliation；它不关心输出是 DOM 还是终端。组件声明当前消息、进度和输入应呈现什么，renderer 再决定如何落到屏幕。
+### 这张金额单位工单在终端里是怎样"动起来"的
 
-浏览器里的 renderer 是 React DOM，最终操作 DOM。Claude Code 使用的是自己的 Ink renderer，最终操作终端屏幕缓冲区。相同的 `useState`、`useEffect`、Context 和组件组合仍然成立，只是 `<Box>`、`<Text>` 不会变成网页节点，而会参与终端布局与字符绘制。
-
-### Ink 是 React 与终端之间的 renderer
-
-Ink 提供类似 Flexbox 的终端组件模型。Claude Code 2.1.88 还包含一套项目内 renderer：React reconciler 先生成 Ink 节点树，Yoga 计算宽高和位置，绘制器生成一帧 `Screen`，再与上一帧比较，把 ANSI 控制序列和文本差量写到终端。
-
-为什么要这样实现？因为这个界面同时有消息列表、流式文本、旋转进度、固定输入区、权限弹窗、窗口缩放和滚动。如果每个模块都直接写 stdout，它们会争夺光标，旧内容也很难准确擦除。React 把复杂性收敛成状态与组件树，Ink 再统一处理布局和屏幕更新。
-
-高频 token 流会触发大量状态变化，长对话还会放大列表变换和重绘成本。因此源码使用 16ms 帧节流、`useMemo`、稳定 key、虚拟列表和进度消息替换，让终端 REPL 在持续输出时控制刷新成本。
-
-## 这张金额单位工单在终端里是怎样“动起来”的
-
-值班工程师把终端窗口放在外接显示器的一角，输入调查请求后，屏幕先出现“正在读取项目规则”，接着变成文件路径、模型的半句解释和工具进度。模型准备第一次 Edit 时，权限确认框又临时占据底部；他输入 `/keybindings` 查看快捷键，随后把窗口拖窄，右侧的长路径开始换行。此时测试还没结束，屏幕上不能把前面的每一帧都重新打印一遍。
+工程师把终端窗口放在外接显示器的一角，输入调查请求后，屏幕先出现"正在读取项目规则"，接着变成文件路径、模型的半句解释和工具进度。模型准备第一次 Edit 时，权限确认框又临时占据底部；他随后把窗口拖窄，右侧的长路径开始换行。此时测试还没结束，屏幕上不能把前面的每一帧都重新打印一遍。
 
 输入框、权限确认、工具进度和模型流都由 REPL 送进 React/Ink 状态；终端 resize 或 Ctrl-C 又会产生新的控制事件。Ink 根据下一帧的组件树差异重绘，工程师看到的是同一张金额单位工单持续更新：先看到 99.90 的线索，再看到 9991 的回调证据，最后看到测试终态，而不是整屏重复打印。
 
-下面沿输入、流式响应、弹窗和取消的顺序，说明根组件、PromptInput、消息列表与渲染循环怎样接起来。
-
-## 根组件只在交互模式创建
+### 根组件只在交互模式创建
 
 `restored-src/src/main.tsx` 先判断运行模式；交互会话才加载 Ink 的 `createRoot()`：
 
@@ -74,6 +75,8 @@ if (!isNonInteractiveSession) {
   await showSetupScreens(root, permissionMode, /* ... */)
 }
 ```
+
+> 证据：`restored-src/src/main.tsx`（2.1.88 source map 还原源码），交互会话的 Ink root 创建。
 
 这段位于 CLI 主入口。`isNonInteractiveSession` 为 `true` 时不会进入分支，因此 print/headless 不会挂载终端 UI；`false` 才创建 Ink root。`ctx.renderOptions` 是渲染宿主参数，源码中的 `RenderOptions` 可提供 `stdout`、`stdin`、`stderr`、`exitOnCtrlC`、`patchConsole` 和 `onFrame`；前三项未提供时分别回退到进程标准流，两个布尔项默认都是 `true`，`onFrame` 可以是回调或 `undefined`。
 
@@ -95,19 +98,17 @@ export async function launchRepl(
 }
 ```
 
-`launchRepl()` 是交互 UI 的装配函数。`root` 是前面创建的可复用 Ink 根；`appProps.initialState` 提供共享状态起点，`stats` 存在时挂载统计 store，省略时跳过这层统计，`getFpsMetrics` 提供可选帧指标；`replProps` 承载命令、工具、初始消息、MCP 连接和运行配置；`renderAndRun` 同时负责挂载组件树与等待退出。函数返回 `Promise<void>`，退出结果交由外层生命周期处理。
+> 证据：`restored-src/src/replLauncher.tsx`（2.1.88 source map 还原源码）。
 
-`App` 内部提供 `AppStateProvider`、统计与 FPS Context，`REPL` 则继续维护输入、消息流、弹窗和当前屏幕等高频局部状态。上一篇讲的 AppState 是共享数据平面，并不意味着所有 UI 瞬时状态都必须塞进全局 store。
+`launchRepl()` 是交互 UI 的装配函数。`root` 是前面创建的可复用 Ink 根；`appProps.initialState` 提供共享状态起点，`stats` 存在时挂载统计 store，省略时跳过这层统计；`replProps` 承载命令、工具、初始消息、MCP 连接和运行配置；`renderAndRun` 同时负责挂载组件树与等待退出。`App` 内部提供 `AppStateProvider`、统计与 FPS Context，`REPL` 则继续维护输入、消息流、弹窗和当前屏幕等高频局部状态。上一篇讲的 AppState 是共享数据平面，并不意味着所有 UI 瞬时状态都必须塞进全局 store。
 
-## REPL 用一棵组件树组织交互
+### REPL 用一棵组件树组织交互
 
 `restored-src/src/screens/REPL.tsx` 的 `REPL()` 在 2.1.88 中是一个很大的组件。把细节折叠后，它的主要层次可以画成下面这样：
 
 ![Claude Code Ink TUI 与 REPL 渲染闭环手绘图](/images/posts/claude-code-source-reading-32/32-ink-tui-repl-handdrawn.png)
 
-图中 `AppStateProvider` 是共享状态屋顶。`REPL` 一侧接键盘和查询流，另一侧把状态投影成 `Messages`、`SpinnerWithVerb`、`PromptInput` 等组件，最后共同进入同一套 Ink 帧。
-
-源码中的主 JSX 能直接证明这棵树的关键分区：
+图中 `AppStateProvider` 是共享状态屋顶。`REPL` 一侧接键盘和查询流，另一侧把状态投影成 `Messages`、`SpinnerWithVerb`、`PromptInput` 等组件，最后共同进入同一套 Ink 帧。源码中的主 JSX 能直接证明这棵树的关键分区：
 
 ```tsx
 const mainReturn = <KeybindingSetup>
@@ -138,13 +139,13 @@ const mainReturn = <KeybindingSetup>
 </KeybindingSetup>
 ```
 
-这里的 `mainReturn` 是正常 prompt 屏幕的组件树。`FullscreenLayout.scrollable` 放历史消息和进度，`bottom` 放输入与对话框，因此流式内容增长时输入区仍可保持在底部。`Messages.messages` 接收已经选择好的消息投影；`streamingText` 在非加载状态传 `null`；`showSpinner` 是布尔门控；`PromptInput.input` 是当前字符串，`onInputChange` 和 `onSubmit` 分别处理编辑与提交。
+> 证据：`restored-src/src/screens/REPL.tsx`（2.1.88 source map 还原源码），`mainReturn` 主 JSX。
+
+`FullscreenLayout.scrollable` 放历史消息和进度，`bottom` 放输入与对话框，因此流式内容增长时输入区仍可保持在底部。`Messages.messages` 接收已经选择好的消息投影；`streamingText` 在非加载状态传 `null`；`showSpinner` 是布尔门控；`PromptInput.input` 是当前字符串，`onInputChange` 和 `onSubmit` 分别处理编辑与提交。
 
 源码还定义了 `Screen = 'prompt' | 'transcript'`。`prompt` 是正常交互屏幕，`transcript` 是查看完整记录的模式。除此之外的字符串不属于这个联合类型。REPL 会为 transcript 提前返回另一棵组件树，但两种屏幕仍复用 `Messages`，差别主要在虚拟滚动、搜索、是否展示全部内容，以及输入区是否存在。
 
-React 同时承担组件拆分和状态投影：屏幕模式、权限弹窗和输入焦点都成为状态分支，同一个状态快照只产生一棵明确的 UI 树。
-
-## 输入先进入 PromptInput，再选择提交目标
+### 输入先进入 PromptInput，再选择提交目标
 
 键盘输入并不会一律进入 `query()`。`PromptInput` 先处理空输入、图片、提示建议、斜杠命令、队友输入和普通 leader prompt。`restored-src/src/components/PromptInput/PromptInput.tsx` 的提交主干如下：
 
@@ -177,6 +178,8 @@ const onSubmit = useCallback(async (
 }, [/* ... */])
 ```
 
+> 证据：`restored-src/src/components/PromptInput/PromptInput.tsx`（2.1.88 source map 还原源码），提交主干。
+
 这个局部 `onSubmit()` 是输入路由器。`inputParam` 是开放字符串，来自编辑缓冲区，源码只在这里去掉尾部空白；`isSubmittingSlashCommand` 是布尔值，默认 `false`，它会影响建议列表是否拦截提交；纯空文本且图片数组为空时直接返回。有活动 subagent/teammate 且 `onAgentSubmit` 已提供时，输入发给该 Agent；否则调用 REPL 传入的 `onSubmitProp`。`onAgentSubmit` 可以是函数或 `undefined`，后者会让分支回落到 leader 提交。
 
 底层按键由项目内 Ink 的 `useInput()` 接收。`restored-src/src/ink/hooks/use-input.ts` 展示了它怎样把终端 raw input 接到 React effect：
@@ -198,11 +201,11 @@ const useInput = (inputHandler: Handler, options: Options = {}) => {
 }
 ```
 
+> 证据：`restored-src/src/ink/hooks/use-input.ts`（2.1.88 source map 还原源码）。
+
 `useInput()` 的 `inputHandler` 接收 `input`、解析后的 `key` 和原始 `InputEvent`；一次粘贴可能把多字符字符串作为一个 `input` 传入。`options.isActive` 可为 `true`、`false` 或 `undefined`：只有显式 `false` 才停用，`undefined` 走默认启用。`internal_eventEmitter` 可以不存在，所以注册和注销都使用可选链。`useLayoutEffect` 在 commit 阶段同步开启 raw mode，卸载或失活时恢复；这样按键不会先被终端自行回显一拍。
 
-快捷键如何在多个监听器之间排序、怎样切换 Vim 状态，不属于这个输入组件的基础职责，下一篇会沿这条线继续。
-
-## 提交以后，查询事件回到 React 状态
+### 提交以后，查询事件回到 React 状态
 
 普通 prompt 最终进入 REPL 的查询路径。`onQueryImpl()` 准备 system prompt、user context 和 `ToolUseContext`，再消费同一个 `query()` 异步生成器：
 
@@ -219,6 +222,8 @@ for await (const event of query({
   onQueryEvent(event)
 }
 ```
+
+> 证据：`restored-src/src/screens/REPL.tsx`（2.1.88 source map 还原源码），`onQueryImpl()` 消费 query 生成器。
 
 `query()` 的这些参数已经在前面章节展开过。对 UI 而言，关键是 `messagesIncludingNewMessages` 包含本轮输入后的会话，`canUseTool` 是权限回调，`querySource` 标记 REPL 来源，生成器每产出一个事件就交给 `onQueryEvent()`。终端绘制留在宿主层，因此 query loop 可以同时服务全屏、普通 scrollback 和其他宿主。
 
@@ -253,11 +258,13 @@ const onQueryEvent = useCallback((
 }, [/* ... */])
 ```
 
+> 证据：`restored-src/src/screens/REPL.tsx`（2.1.88 source map 还原源码），`onQueryEvent()` 的 progress 分支。
+
 `onQueryEvent()` 的 `event` 类型来自 `handleMessageFromStream` 的第一个参数，候选集合由流处理器定义。消息回调收到 `newMessage` 后，普通消息追加；只有 `isEphemeralToolProgress()` 认可的临时进度，且最后一条消息的 `parentToolUseID` 与 `data.type` 都相同，才替换末条。Sleep/Bash 这类按秒产生的进度因此会稳定占用一个末尾槽位。`agent_progress`、`hook_progress`、`skill_progress` 等携带历史语义的进度绕过替换分支，仍然追加。
 
-这也回答了“工具进度怎么和消息同时显示”：进度首先也是消息流的一部分，但 REPL 会根据它是否临时，决定保存一条最新快照还是完整轨迹；之后 `Messages` 和工具消息组件再通过 `toolUseID` / `parentToolUseID` 把它们关联起来。
+这也回答了"工具进度怎么和消息同时显示"：进度首先也是消息流的一部分，但 REPL 会根据它是否临时，决定保存一条最新快照还是完整轨迹；之后 `Messages` 和工具消息组件再通过 `toolUseID` / `parentToolUseID` 把它们关联起来。
 
-## messagesRef 解决执行时序，React state 负责显示
+### messagesRef 解决执行时序，React state 负责显示
 
 React state 更新会批处理，而查询回调有时需要在同一 tick 里立刻读到最新消息。如果只依赖下一次 render，多个流事件可能都基于旧数组计算。REPL 因此同时维护 `messagesRef` 与 React state：
 
@@ -275,11 +282,11 @@ const setMessages = useCallback((action: React.SetStateAction<MessageType[]>) =>
 }, [])
 ```
 
-`messages` 是渲染投影，`messagesRef.current` 是同步可读的最新数组。`initialMessages` 可以是消息数组，也可以是 `undefined`；后者回退为空数组。`action` 支持直接传新数组，也支持函数式 updater。包装函数先用 ref 计算并写回，再调用 `rawSetMessages()` 触发 React render，因此同一事件循环中的下一次写入不会看见旧状态。
+> 证据：`restored-src/src/screens/REPL.tsx`（2.1.88 source map 还原源码），`messagesRef` 双写路径。
 
-ref 解决命令式执行时序，state 负责让组件树更新。为防止两条写入路径产生双重真相，源码把消息写入统一收口到 `setMessages()`。
+`messages` 是渲染投影，`messagesRef.current` 是同步可读的最新数组。`initialMessages` 可以是消息数组，也可以是 `undefined`；后者回退为空数组。`action` 支持直接传新数组，也支持函数式 updater。包装函数先用 ref 计算并写回，再调用 `rawSetMessages()` 触发 React render，因此同一事件循环中的下一次写入不会看见旧状态。ref 解决命令式执行时序，state 负责让组件树更新；为防止两条写入路径产生双重真相，源码把消息写入统一收口到 `setMessages()`。
 
-## token 流和完整消息使用两条显示路径
+### token 流和完整消息使用两条显示路径
 
 如果每收到一个字符都把完整消息数组重新规范化、分组并重绘，长会话中的输入延迟会很明显。REPL 对流式文本做了一层单独预览：
 
@@ -293,13 +300,13 @@ const visibleStreamingText = streamingText && showStreamingText
   : null
 ```
 
+> 证据：`restored-src/src/screens/REPL.tsx`（2.1.88 source map 还原源码），流式预览状态。
+
 `streamingText` 为字符串时进入独立预览，为 `null` 时 `visibleStreamingText` 直接变成 `null`，`Messages` 只渲染正式消息。`prefersReducedMotion` 省略时通过 `?? false` 启用正常动画；显式为 `true` 或检测到特定终端光标问题时关闭预览。`visibleStreamingText` 只显示最后一个换行之前的完整行：尚未结束的当前行留在缓冲区，从而避免字符级抖动。
 
-当完整 assistant message 到达时，消息处理逻辑会清掉流式预览，`Messages` 转而显示正式消息。源码还使用 `useDeferredValue` 让重消息列表在流式阶段可以稍后更新，但在显示 streaming text 或加载结束时切回同步消息，避免 spinner 消失后答案还空一帧。
+当完整 assistant message 到达时，消息处理逻辑会清掉流式预览，`Messages` 转而显示正式消息。源码还使用 `useDeferredValue` 让重消息列表在流式阶段可以稍后更新，但在显示 streaming text 或加载结束时切回同步消息，避免 spinner 消失后答案还空一帧。屏幕上的流式回答和 transcript 中的已落盘消息处于两个阶段：前者暂存在流式状态，完成边界上再原子切换到正式消息模型。
 
-屏幕上的流式回答和 transcript 中的已落盘消息处于两个阶段：前者暂存在流式状态，完成边界上再原子切换到正式消息模型。
-
-## Messages 先整理语义，再渲染行
+### Messages 先整理语义，再渲染行
 
 `restored-src/src/components/Messages.tsx` 在遍历前先规范化 content blocks、过滤不可见 attachment、重排工具消息、合并同类工具组、折叠通知，并为长 transcript 选择虚拟列表：
 
@@ -340,11 +347,13 @@ const { collapsed: collapsed_0, lookups: lookups_0 } = useMemo(() => {
 }, [normalizedMessages, syntheticStreamingToolUseMessages, tools, verbose])
 ```
 
+> 证据：`restored-src/src/components/Messages.tsx`（2.1.88 source map 还原源码），规范化与折叠流水线节选。
+
 `normalizedMessages` 是规范化并过滤空项后的基础序列；`compactAwareMessages` 已处理压缩边界；`messagesToShowNotTruncated` 移除临时 progress 和空渲染 attachment，并加入 `syntheticStreamingToolUseMessages` 这类尚未落入正式数组的流式 `tool_use`。`applyGrouping()` 根据 `tools` 和 `verbose` 生成 `groupedMessages`，多层 collapse 得到最终 `collapsed`；`buildMessageLookups()` 同时使用规范化序列与展示序列，建立 tool use/result/progress 的关联查询。上面只摘录了实际流水线的一部分，完整源码还包含 brief 模式和 transcript 截断。
 
 这些变换被放进 `useMemo()`，依赖不变就复用结果。最终存在 `scrollRef` 且虚拟滚动未被关闭时使用 `VirtualMessageList`，否则有一个非虚拟化安全上限；这避免长会话把全部 React 行同时挂载。
 
-## React 更新如何变成终端上的几行差量
+### React 更新如何变成终端上的几行差量
 
 组件树更新后，Ink 的 `render()` 把业务节点包进终端 App，再交给 `react-reconciler`：
 
@@ -366,6 +375,8 @@ render(node: ReactNode): void {
 }
 ```
 
+> 证据：`restored-src/src/ink/ink.tsx`（2.1.88 source map 还原源码），Ink 根组件 render。
+
 这个 `render()` 位于 `restored-src/src/ink/ink.tsx`。`node` 是 REPL React tree；`stdin`、`stdout`、`stderr` 是 Node 流；`exitOnCtrlC` 是布尔值，决定未被应用接管的 Ctrl+C 是否退出。`updateContainerSync()` 更新 reconciler 容器，`flushSyncWork()` 提交这次 React 工作；字符写出随后由终端 renderer 完成。
 
 真正的帧绘制由 `onRender()` 完成。构造器把它限制在大约一帧 16ms：
@@ -381,13 +392,13 @@ this.scheduleRender = throttle(deferredRender, FRAME_INTERVAL_MS, {
 export const FRAME_INTERVAL_MS = 16
 ```
 
+> 证据：`restored-src/src/ink/ink.tsx` 与 `restored-src/src/ink/constants.ts`（2.1.88 source map 还原源码）。
+
 `deferredRender` 先进入 microtask，让 React 的 layout effects 完成后再读取光标等布局状态。`throttle()` 的 `leading: true` 让一轮密集更新的首帧立即排入，`trailing: true` 保证期间最后一次状态也会落成帧。`FRAME_INTERVAL_MS` 在该版本静态定义为 `16`，该值只约束调度间隔；真实显示器 FPS 和单帧耗时取决于运行环境。
 
-随后 renderer 生成新 `Screen`，对选择区和搜索高亮做覆盖，与前帧比较，再优化 patch。全屏模式还会固定物理光标并在 resize 后原子清屏重绘；普通稳定帧只比较 damage 区域。最后通过 `writeDiffToTerminal()` 写出差量，保留终端中未变化的区域。
+随后 renderer 生成新 `Screen`，对选择区和搜索高亮做覆盖，与前帧比较，再优化 patch。全屏模式还会固定物理光标并在 resize 后原子清屏重绘；普通稳定帧只比较 damage 区域。最后通过 `writeDiffToTerminal()` 写出差量，保留终端中未变化的区域。业务组件只声明"spinner 现在是什么、消息多了一条、输入内容是什么"，renderer 统一决定哪些终端 cell 真正改变。终端的光标、tmux、选择区和 ANSI 原子性则由 damage backstop、全屏锚点和 resize 分支专门处理。
 
-业务组件只声明“spinner 现在是什么、消息多了一条、输入内容是什么”，renderer 统一决定哪些终端 cell 真正改变。终端的光标、tmux、选择区和 ANSI 原子性则由 damage backstop、全屏锚点和 resize 分支专门处理。
-
-## 一轮交互的完整顺序
+### 一轮交互的完整顺序
 
 把前面的机制按执行顺序收拢，一轮普通输入会经历这些阶段：
 
@@ -402,20 +413,104 @@ export const FRAME_INTERVAL_MS = 16
 
 这里最重要的边界是：React render 只重新计算 UI 树。网络请求、工具调用和消息持久化由 effect、事件回调与查询内核控制；REPL 把动作集中在 `onSubmit`、`onQueryEvent`、permission callbacks 和 lifecycle effects，避免普通 render 重复触发副作用。
 
-## 小结
+## 源码映射表
 
-Claude Code 的交互式 REPL 可以用一句话概括：**Agent 产生事件，React 保存并投影状态，Ink 把投影变成终端差量。**
+路径前缀 `restored-src/` 表示 2.1.88 source map 还原源码，行号以当前仓库为准。
 
-REPL 提供长生命周期交互循环；React 让消息、进度、输入、弹窗和屏幕模式由同一份状态决定；Ink 用自定义 reconciler、Yoga、Screen buffer 和 diff 解决终端布局与刷新。流式文本使用独立预览，工具进度区分替换与追加，长消息列表通过 memo、稳定 key、截断和虚拟化控制成本。
+| 机制 | 关键符号 | 位置 | 证据状态 |
+| --- | --- | --- | --- |
+| 入口 | `isNonInteractiveSession` 分支 + `createRoot()` | `src/main.tsx` | 已确认 |
+| 装配 | `launchRepl()` App + REPL | `src/replLauncher.tsx` | 已确认 |
+| 组件树 | `mainReturn` JSX 分区（KeybindingSetup / FullscreenLayout / Messages / PromptInput） | `src/screens/REPL.tsx` | 已确认 |
+| 屏幕模式 | `Screen = 'prompt' \| 'transcript'` | `src/screens/REPL.tsx` | 已确认 |
+| 输入 | `PromptInput.onSubmit()` 路由（空输入/图片/Agent） | `src/components/PromptInput/PromptInput.tsx` | 已确认 |
+| 按键 | `useInput()` raw mode + eventEmitter | `src/ink/hooks/use-input.ts` | 已确认 |
+| 事件分流 | `onQueryEvent()` / `isEphemeralToolProgress()` 替换末条 | `src/screens/REPL.tsx` | 已确认 |
+| 时序 | `messagesRef` 双写 + `rawSetMessages` | `src/screens/REPL.tsx` | 已确认 |
+| 流式预览 | `streamingText` / `prefersReducedMotion` / `visibleStreamingText` | `src/screens/REPL.tsx` | 已确认 |
+| 消息整理 | `normalizeMessages` / `applyGrouping` / collapse 链 / `buildMessageLookups` | `src/components/Messages.tsx` | 已确认 |
+| 渲染器 | `render()` / `updateContainerSync` / `flushSyncWork` | `src/ink/ink.tsx` | 已确认 |
+| 帧节流 | `FRAME_INTERVAL_MS = 16` + throttle(leading/trailing) | `src/ink/constants.ts`, `src/ink/ink.tsx` | 已确认 |
 
-源码能够确认这些组件、状态分支、16ms 节流与屏幕 diff；实际帧率和交互延迟还取决于消息规模、终端模拟器、tmux、窗口尺寸与运行时开关。
+> 证据说明：流式预览、messagesRef 与进度替换是 REPL 高帧率路径的三个支柱；`FRAME_INTERVAL_MS` 只约束调度间隔，实际帧率取决于布局、diff、stdout 与终端吞吐（`constants.ts` 注释口径）。
+
+## 设计决策：为什么需要一棵组件树而不是直接写 stdout
+
+源码里找不到官方选型记录，下面的判断来自代码结构，属于解释而非官方声明。
+
+**第一，为什么把整个界面建成一棵 React 组件树？** 因为直接写 stdout 的模块会争夺光标所有权：消息列表追加文本、spinner 覆盖同一行、权限弹窗临时占屏、resize 要重排——每个模块都假设"屏幕归我管"，组合起来必然互相覆盖。React 把界面收敛成状态投影：每个组件只声明"当前应该长什么样"，Ink renderer 统一负责光标、布局和差量，冲突在渲染层解决而不是在每个回调里。
+
+**第二，为什么流式文本要单独预览？** 因为完整消息需要规范化、分组、折叠和虚拟列表，逐字符重跑整条流水线在长会话中不可接受。`streamingText` 只做"取完整行、截到最后一个换行"这种 O(1) 级操作，避免字符级抖动；完成边界上一次性切换到正式消息模型。这是"高频轻量路径"与"低频完整路径"的典型分工。
+
+**第三，为什么帧差而不是整屏重绘？** 终端带宽有限，重绘整屏在长会话或慢速终端（tmux、远程 SSH）上会明显卡顿。16ms 节流合并同一帧内的多次状态变化，diff 只写变化的 cell，全屏模式再特殊处理 resize 后的原子重绘——把"渲染成本"从状态数量解耦为"实际变化面积"。
+
+**第四，为什么 REPL 保留自己的局部状态而不是全部放进 AppState？** 31 篇说过 AppState 是共享数据平面；但 `inputValue`、`streamingText`、当前屏幕模式只被 REPL 自己的子树消费，放进全局 store 只会让无关组件承担 snapshot 变化。边界按"更新频率 × 共享范围"划分：高频且私有 → REPL 局部 state；跨消费者 → AppState。
+
+## 练习：在真实会话里观察渲染闭环
+
+1. **用 debug 模式观察事件与渲染节奏。** 运行 `claude --debug`，输入一个会流式生成长回答的 prompt。观察 debug 日志中的查询事件类型与消息处理回调；配合 `onFrame` 一类回调（如可用）估算实际帧率，比较它与 16ms 节流上限的差距。
+
+2. **对比流式预览与正式消息的切换点。** 在一个慢速模型回答中观察终端：流式阶段屏幕显示的是逐行推进的文本，回答结束后消息列表突然"定型"（分组、折叠、工具关联生效）。注意 `prefersReducedMotion` 设为 true 后流式预览消失，只显示最终消息。
+
+3. **测试 resize 与全屏重绘。** 在流式输出过程中拖动终端窗口宽度，观察长路径换行与重排；在 tmux 里重复同样的操作，比较刷新差异。这能让你直观理解"damage 区域 diff"与"resize 原子重绘"两条路径的区别。
+
+## 自测
+
+1. 为什么 `onQueryEvent()` 中的临时 progress 会"替换末条"而不是追加？
+2. `messagesRef` 与 `messages` state 是什么关系？为什么不能只用其中一个？
+3. `FRAME_INTERVAL_MS = 16` 意味着每帧保证在 16ms 内完成吗？
+
+<details>
+<summary>参考答案</summary>
+
+1. **因为临时进度是"当前状态"而不是"历史轨迹"。** `isEphemeralToolProgress()` 认可的进度（如 Sleep/Bash 的按秒更新）代表同一个 tool call 的最新快照；如果追加，一个 10 秒的 Bash 就会在消息列表里堆 10 条几乎相同的进度。只有 `parentToolUseID` 与 `data.type` 都相同的最后一条才替换；`agent_progress`、`hook_progress` 等携带历史语义的进度仍然追加。
+
+2. **ref 解决同一 tick 内的同步读取，state 解决渲染。** React 的 setState 是批处理的，多个流事件可能在同一次 render 前都基于旧数组计算；`messagesRef.current` 写入后立即可读，保证下一次 `setMessages` 的函数式 updater 拿到最新数组。只用 ref 不会触发重渲染，只用 state 会在高频事件里读到过期数组。
+
+3. **不能。** `FRAME_INTERVAL_MS` 是节流间隔（约 62.5fps 的上限），不是每帧耗时保证。如果布局、diff 或 stdout 写入耗时更长，实际帧率只会更低；真实帧率还取决于终端模拟器、tmux 和消息规模（`constants.ts` 只定义常量，不定义性能）。
+
+</details>
+
+## 回顾（折叠）：用户能把渲染节流调成 120Hz 吗
+
+<details>
+<summary>回答 31 留下的问题：Claude Code 当前以 16ms 为渲染节流间隔，用户能否把它调成 120Hz（约 8.33ms）？</summary>
+
+**用户配置不能调。** `restored-src/src/ink/constants.ts` 直接把 `FRAME_INTERVAL_MS` 写成 `16`；配置层没有为它留下入口。用户改 `/config`、`settings.json` 或环境变量，都不会把发布版 renderer 变成 120Hz。它被 `Ink` 构造函数用于：
+
+```ts
+this.scheduleRender = throttle(deferredRender, FRAME_INTERVAL_MS, {
+  leading: true,
+  trailing: true,
+})
+```
+
+> 证据：`restored-src/src/ink/constants.ts` 与 `restored-src/src/ink/ink.tsx`（2.1.88 source map 还原源码）。
+
+因此，16ms 表示的是"连续状态变化时，正常渲染最多大约每 16ms 排一帧"，上限约为 62.5fps，而不是保证每帧都能在 16ms 内完成。`leading: true` 让一串更新的第一帧立即执行，`trailing: true` 保证这一串更新的最后状态也会补渲染。
+
+维护自己的源码构建时，当然可以把常量改成 `8` 或 `8.33` 后重新打包；但这属于修改源码，不是用户配置，官方发布包更新后也会覆盖。更重要的是，这个常量不只控制 `scheduleRender`：`ClockProvider` 在终端获得焦点时也用它作为时钟间隔，失焦时使用 `FRAME_INTERVAL_MS * 2`。单独改一个数，实际上会同时改变一批订阅了这个时钟的动画与计时器。
+
+| 层次 | 2.1.88 中的节奏 | 把 `FRAME_INTERVAL_MS` 改成 8ms 后 |
+| --- | --- | --- |
+| Ink 外层渲染节流 | `throttle(..., 16)`，约 62.5fps 上限 | 只把这一层的上限提高到约 125fps |
+| `ClockProvider` | 聚焦 16ms，失焦 32ms | 聚焦 8ms，失焦 16ms |
+| `SpinnerAnimationRow` | `useAnimationFrame(..., 50)` | 仍然由显式的 50ms 间隔驱动 |
+| 菊花帧选择 | `Math.floor(time / 120)`，约每 120ms 换一帧 | 仍然约每 120ms 换一帧 |
+
+若目标是让菊花本身达到 120Hz，还要另改 `SpinnerAnimationRow` 的 50ms 动画间隔和 `SpinnerGlyph` 的 120ms 换帧逻辑；这会显著增加 React 更新、Yoga 布局、屏幕 diff 和终端写出的次数。上游 Ink 的 `maxFps` 文档也明确提醒更高值可能增加性能开销，Claude Code 2.1.88 的内置 renderer 并没有把这个上游选项暴露成自己的配置项。真正的瓶颈可能在 VS Code 集成终端、tmux 或 iTerm2 的终端吞吐——即使程序请求 120fps，终端也可能合并、延迟或来不及绘制这些 ANSI 更新。
+
+所以答案分三层：**用户配置不能调；自己维护源码可以改，但要连带检查所有时钟消费者；改完也只能提高上限，不能保证终端实际达到 120Hz。**
+
+</details>
 
 ## 留给下一篇的问题
 
 Claude Code 当前以 16ms 为渲染节流间隔，用户能否把它调成 120Hz（约 8.33ms）？
 
-## 参考资料
+## 相关链接
 
-- [Claude Code Interactive Mode](https://code.claude.com/docs/en/interactive-mode)
-
-- [Claude Code Terminal Configuration](https://code.claude.com/docs/en/terminal-config)
+- **上一篇**：[31 共享状态如何贯穿整个系统](./31-app-state-architecture.md)——REPL 屋顶之下的 AppState
+- **下一篇**：[33 终端编辑状态如何解析](./33-keybindings-and-vim-mode.md)——`useInput()` 之后的按键分流
+- **平行阅读**：[06 Agent 查询循环如何持续推进](./06-agent-query-loop.md)——`query()` 生成器的事件语义
+- **平行阅读**：[08 API 流式传输如何工作](./08-api-streaming.md)——token 增量如何成为 `streamingText`
