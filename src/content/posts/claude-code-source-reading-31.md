@@ -68,15 +68,17 @@ Native host 的运行路径也很直接：`runChromeNativeHost()` 启动 `Chrome
 
 下文引用的 AppState 行为均来自 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/`；代码块只保留共享状态、更新和订阅所需的字段。
 
-## YNM-9527 同时改变了哪些共享状态
+## 这张金额单位工单同时改变了哪些共享状态
 
-当用户一边处理事故，一边输入：
+工程师在终端里继续处理工单时，输入了一句看似简单、实际上会同时启动多条状态变化的要求：
 
-> 集成测试放到后台；出现权限询问时停下来等我，teammate 有结果就通知我。
+> 集成测试放到后台；出现权限询问时停下来等我，teammate 有结果就通知我；我还要能从远程控制页面看到当前进度。
+
+随后，后台测试从 `pending` 进入 `running`，权限请求出现在待处理队列，issue-tracker MCP 保持连接，三个 teammate 的结论经 mailbox 到达，输入框还保留着工程师尚未提交的补充。终端 spinner、远程控制页面和执行内核必须看到同一组事实；如果某个 React 组件单独保存“测试已完成”，就可能出现界面显示绿色而模型仍在等待结果的分叉。
 
 系统同时变化的有 Task 状态、权限请求、MCP 连接、Mailbox、输入队列和 spinner。AppState 保存跨模块必须共享的事实，UI 只订阅自己需要的切片；后台任务、工具和远程控制不会直接依赖某个 React 组件。
 
-下面从这组同时发生的状态变化开始，说明 AppState、store、provider 和 selector 如何贯穿 YNM-9527。
+下面从这组同时发生的状态变化开始，说明 AppState、store、provider 和 selector 如何贯穿这张金额单位工单。
 
 ## AppState 围绕“必须共享的状态”建立边界
 

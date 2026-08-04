@@ -49,15 +49,15 @@ isReadOnly() {
 
 这张图按副作用出现的先后排列各道门：名称解析、结构与语义校验、Hook、权限、`tool.call()`，最后才把结果写进 transcript。
 
-## 从 YNM-9527 的一次搜索开始
+## 从金额工单的一次搜索开始
 
-核心任务要求：
+你先要求 Claude Code 读取事故记录，再核对 Stripe 官方文档中的 `amount` 单位和舍入规则：
 
-> 通过 issue-tracker MCP 读取事故记录，必要时搜索 Stripe 官方文档，核对 amount 的单位和舍入规则。
+> 通过 issue-tracker MCP 读取金额单位工单，必要时搜索 Stripe 官方文档，核对 `amount` 的单位和舍入规则。
 
-用户看到的可能只是“正在搜索”，源码里却要先解析 tool_use 名称，检查 Schema 和 validateInput，运行 PreToolUse Hook，等待权限决定，才进入真正的 tool.call。执行进度、原始返回值、tool_result 和 transcript 又分别走不同通道；任一关卡失败，错误都在对应位置返回，而不是伪装成一篇完整的调查结果。
+用户看到的可能只是“正在搜索”，源码里却要先解析 `tool_use` 名称，检查 Schema 和 `validateInput`，运行 `PreToolUse` Hook，等待权限决定，才进入真正的 `tool.call`。执行进度、原始返回值、`tool_result` 和 transcript 又分别走不同通道；任一关卡失败，错误都在对应位置返回，而不是伪装成一篇完整的调查结果。
 
-下面沿一次搜索或 MCP 调用，从名称解析一直追到副作用、结果映射和持久化。
+下面沿一次搜索或 MCP 调用，从名称解析一直追到副作用、结果映射和持久化。你要查的是一个数字，运行时要守住的却是整条调用流水线。
 
 ## 先画出一条工具执行流水线
 

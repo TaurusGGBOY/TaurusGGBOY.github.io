@@ -95,13 +95,13 @@ const mergedBindings = [...defaultBindings, ...userParsed]
 
 这三个概念把本篇的读法固定下来：先区分界面与协议，再看消息怎样分帧，最后检查结果是否满足 schema。
 
-## YNM-9527 改用无头协议重放
+## 这张金额单位工单改用无头协议重放
 
-用户把同一份核心任务正文交给 headless CLI：
+第一次调查是在交互式终端完成的，但支付团队想把这个回归场景放进 CI，并让一个内部诊断面板实时显示“模型正在看什么、工具做了什么、测试是否结束”。工程师把同一份任务正文交给 headless CLI：
 
-> claude -p --output-format stream-json：请检查项目中的 YNM-9527，查清金额单位问题，修复并运行测试。
+> `claude -p --output-format stream-json`：请检查支付服务中的金额单位工单，查清结算页 99.90 元与回调 9991 分的差异；先给证据和计划，确认后修复并运行测试。
 
-稍后又由 SDK 提交同样的任务。前者把事件和终态写到 stdout，后者让宿主通过 Query 迭代器消费 assistant、tool、权限和 result；两者都跳过交互式 TUI，却共享查询、工具和权限内核。
+CI 进程消费 stdout 中的流式事件，诊断面板则按事件类型更新自己的状态；它不需要 Ink 输入框，也不能假设一定存在人工点击的权限弹窗。稍后，内部 Node 宿主又由 SDK 提交同样的任务：前者把事件和终态写到 stdout，后者让宿主通过 Query 迭代器消费 assistant、tool、权限和 result；两者都跳过交互式 TUI，却共享查询、工具和权限内核。
 
 下面从这次“同一任务、两种协议”的重放开始，区分 Headless、SDK 与 Structured IO 的输入输出边界。
 

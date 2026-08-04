@@ -65,13 +65,13 @@ export const call: LocalJSXCommandCall = async (onDone, context) => {
 
 这三个概念分别回答“走哪扇前门”“拿什么证明身份”“把别名解析成哪个部署名”。后文所有 provider 分支都围绕这三个问题展开。
 
-## YNM-9527 的同一请求可能走不同 provider
+## 这张金额单位工单的同一请求可能走不同 provider
 
-用户没有改事故内容，只改变运行配置后再次提交核心任务。
+支付团队的笔记本使用第一方登录，CI 则必须走企业的 Bedrock 区域；另一位同事在受限网络里使用 Vertex。工程师没有改调查内容，只改变运行配置后再次提交：
 
-> 请检查项目中的 YNM-9527，查清金额单位问题，修复并运行测试。
+> 请检查支付服务中的金额单位工单，查清结算页 99.90 元与回调 9991 分的差异；先给证据和计划，确认后修复并运行测试。
 
-Claude Code 会先从配置、模型名和环境中确定 provider 与真实 model ID，再选择认证材料、endpoint、区域和请求能力；同一句 prompt 在 Anthropic、Bedrock 或 Vertex 路径上可能拥有不同的请求骨架与失败边界。
+Claude Code 会先从配置、模型名和环境中确定 provider 与真实 model ID，再选择认证材料、endpoint、区域和请求能力。第一方路径可能读取用户会话凭据，Bedrock 需要区域和云端身份，Vertex 还要满足项目与凭据条件；同一句 prompt 在 Anthropic、Bedrock 或 Vertex 路径上可能拥有不同的请求骨架与失败边界。换 provider 不是换一个字符串那么简单，也不会改变这张工单的文件权限或工具规则。
 
 下面从这次“同一任务、不同 provider”开始，拆开模型路由、认证、client 和降级，而不是把 provider 当成模型名的别名。
 

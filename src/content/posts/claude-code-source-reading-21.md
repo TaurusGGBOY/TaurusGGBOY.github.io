@@ -68,13 +68,19 @@ type LocalJSXCommand = {
 
 这个联合类型集中定义后续分流。新增命令必须选择控制权属于模型、本地函数还是 UI；选择以后，运行时统一负责消息包装、错误处理和是否继续查询。
 
-## YNM-9527 的几条命令为什么走不同路径
+## 这张金额单位工单的几条命令为什么走不同路径
 
-这条固定剧本故意放入了多种命令：
+工程师没有一上来就把长 prompt 粘进终端，而是按调查阶段输入了几条命令：
 
-/config、/plan、/incident YNM-9527 ...、/branch integer-cents、/compact
+```text
+/config
+/plan
+/incident 金额单位工单：先读 CLAUDE.md、工单和支付服务代码，确认元/分转换链路后再给计划
+/branch integer-cents
+/compact
+```
 
-/config 和 /branch 需要本地交互界面，/compact 在进程内完成，/incident 把参数展开成新的 prompt，/plan 则切换计划状态。它们都长得像 /name args，但 handler 类型不同，只有 prompt 类型会进入 Query Loop。
+他在 `/config` 里确认当前权限和外部连接，在 `/plan` 中要求只读地整理证据；`/incident` 把工单标题和约束展开成新的 prompt；发现需要比较两种修复方向时，`/branch` 保留原会话并创建分支；工具结果过多后，`/compact` 在进程内重建上下文。几条输入都以 `/name args` 开头，但每一步的状态、权限和副作用都不同。
 
 这也解释了为什么不能把 slash command 当作普通长 prompt 的一部分：命令解析器必须先在输入边界识别它，下面就沿这些真实命令进入注册、解析和路由。
 

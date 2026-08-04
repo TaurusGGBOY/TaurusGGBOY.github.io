@@ -109,17 +109,19 @@ if (innerError instanceof FallbackTriggeredError && fallbackModel) {
 
 ![Claude Code 会话写入、恢复与分叉流程](/images/posts/claude-code-source-reading-20/20-session-history-resume-handdrawn.png)
 
-## YNM-9527 怎样分出另一条会话
+## 这张金额单位工单怎样分出另一条会话
 
-用户在当前事故会话里输入：
+午饭前，工程师已经确认回调层收到的是整数分，但还没有决定修复边界：方案 A 是让服务内部从头到尾使用整数分，方案 B 是在结算域保留 Decimal、只在支付网关边界转换。当前会话里已有真实回调、测试结果和团队讨论，他不想为了比较方案再把所有证据复制一遍，也不想让试验性的编辑污染原来的调查记录。
+
+于是他在当前会话里输入：
 
 > /branch integer-cents
 
-随后继续说明：
+随后补充：
 
-> 在这个会话分支里比较“全链路使用整数分”和“保留 Decimal”两种方案，不要覆盖原会话。
+> 在这个会话分支里比较“全链路使用整数分”和“保留 Decimal”两种方案，不要覆盖原会话；只在独立 worktree 里做实验。
 
-Claude Code 会复制可恢复的消息主链，生成新的 session ID 和 transcript 关系；原会话保留，新的分支从同一段调查历史继续。真正的文件副作用仍在工作区里，所以剧本同时要求独立 worktree。后续 /resume 恢复的是会话状态，不是把已经发出的网络请求重新执行一遍。
+Claude Code 会复制可恢复的消息主链，生成新的 session ID 和 transcript 关系；原会话保留，新的分支从同一段调查历史继续。真正的文件副作用仍在工作区里，所以剧本同时要求独立 worktree。后续 `/resume` 恢复的是会话状态，不是把已经发出的网络请求重新执行一遍。
 
 下面从这次可见的分支动作进入 JSONL、parentUuid、resume 和 fork。
 

@@ -69,13 +69,13 @@ Skill 的 Markdown 只是来源；`loadSkillsFromSkillsDir()` 先找到目录下
 
 图里的关键分界在 `skill_listing` 与 `expand full prompt` 之间。前者解决“Claude 如何知道有哪些能力”，后者解决“选中以后，完整指令怎样进入执行流”。
 
-## YNM-9527 的核心任务先经过一个 Skill
+## 这张金额单位工单的核心任务先经过一个 Skill
 
-用户输入：
+支付团队不希望每个值班工程师都临时编排一套调查步骤，于是在项目里放了一份 `incident` Skill：它要求先读 `CLAUDE.md` 和工单，再通过 issue-tracker MCP 取证，必要时查官方文档；输出必须先有证据和计划，写入动作要等确认。值班工程师看到结算页和回调金额不一致后，输入：
 
-> /incident YNM-9527：先读 CLAUDE.md、事故单和相关代码；通过 issue-tracker MCP 取证，必要时搜索官方文档；先给证据和计划，不要修改文件。
+> /incident 金额单位工单：先读 CLAUDE.md、工单和相关代码；通过 issue-tracker MCP 取证，必要时搜索官方文档；先给证据和计划，不要修改文件。
 
-命令提示里常驻的通常只是 incident 的名称、描述和参数提示；真正选中后，Claude Code 才读取 SKILL.md 正文，替换 YNM-9527 等参数并展开成 prompt。若 Skill 声明 fork，后续任务进入独立上下文；否则继续当前 Query Loop，且调用仍要经过权限判断。
+命令提示里常驻的通常只是 `incident` 的名称、描述和参数提示；真正选中后，Claude Code 才读取 `SKILL.md` 正文，把工单名称和约束填入模板并展开成 prompt。若 Skill 声明 fork，后续任务进入独立上下文；否则继续当前 Query Loop，且调用仍要经过权限判断。这里的 Skill 更像一张可发现的调查流程卡，而不是一个绕过权限的快捷键。
 
 下面沿“发现—解析—展开—执行”这条事故入口，说明一份 Skill 怎样从目录中的 Markdown 变成可执行能力。
 
