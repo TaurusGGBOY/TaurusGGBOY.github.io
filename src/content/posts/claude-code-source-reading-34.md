@@ -11,47 +11,47 @@ imagePosition: "left"
 ---
 ## 回答上一篇的问题
 
-上一篇留下的问题是：**如果想自定义 Claude Code 的快捷键，应该如何实现？**
+上一篇留下的问题是，**如果想自定义 Claude Code 的快捷键，应该如何实现？**
 
-先抓住写入边界：不要改发布包里的 `DEFAULT_BINDINGS`，运行 `/keybindings`，再编辑它创建或打开的 `~/.claude/keybindings.json`。2.1.88 的实现把文件 watcher、schema 校验、上下文过滤和事件拦截器接成热加载链；用户保存文件后，绑定才会在当前进程重新参与匹配。
+先抓住写入边界，不要改发布包里的 `DEFAULT_BINDINGS`，运行 `/keybindings`，再编辑它创建或打开的 `~/.claude/keybindings.json`。2.1.88 的实现把文件 watcher、schema 校验、上下文过滤和事件拦截器接成热加载链；用户保存文件后，绑定才会在当前进程重新参与匹配。
 
-## Key Takeaways
+## 介绍本章的一些概念
 
-- 交互模式与无头模式**共享同一 Agent 内核**：`-p`、SDK stdin 和 Remote URL 先被 `StructuredIO` 归一化成统一消息流，`runHeadlessStreaming()` 再把每轮输入交给同一个 `ask()`，工具选择、安全检查、上下文压缩和 transcript 都沿用同一实现。
-- 挂不挂 REPL 由**入口决定**：`main.tsx` 在完整初始化前用 `-p` / `--print` / `--init-only` / `--sdk-url` / `!process.stdout.isTTY` 判定 `isNonInteractive`——同一条命令有时挂 Ink、有时只输出一行 JSON，答案在入口而不在 `ask()`。
-- 三种输出格式只改变消费方式：`text` 只取成功 result 文本；`json` 输出单个最终 result 对象（`verbose` 时输出消息数组）；`stream-json` 逐条写出 NDJSON 事件。`--json-schema` 是另一层：注册合成输出工具，约束模型产出的 `structured_output` 形状。
-- `stream-json` 把 **stdout 变成机器协议通道**：`installStreamJsonStdoutGuard()` 替换 `process.stdout.write`，非 JSON 行转移到 stderr 并加 `STDOUT_GUARD_MARKER`，防止依赖库的 `console.log` 崩掉逐行解析器。
-- 非交互权限沿**三类宿主**分流，安全语义一致：普通 `-p` 把未获 allow 的 `ask` 生成错误 `tool_result`；SDK 用 `control_request` / `control_response` 把决定交给调用方（与 Hook 并行竞速）；`--permission-prompt-tool` 委托给 MCP 工具。宿主失联、取消或响应非法都不能变成 allow。
+- 交互模式与无头模式**共享同一 Agent 内核**，`-p`、SDK stdin 和 Remote URL 先被 `StructuredIO` 归一化成统一消息流，`runHeadlessStreaming()` 再把每轮输入交给同一个 `ask()`，工具选择、安全检查、上下文压缩和 transcript 都沿用同一实现。
+- 挂不挂 REPL 由**入口决定**，`main.tsx` 在完整初始化前用 `-p` / `--print` / `--init-only` / `--sdk-url` / `!process.stdout.isTTY` 判定 `isNonInteractive`，同一条命令有时挂 Ink、有时只输出一行 JSON，答案在入口而不在 `ask()`。
+- 三种输出格式只改变消费方式，`text` 只取成功 result 文本；`json` 输出单个最终 result 对象（`verbose` 时输出消息数组）；`stream-json` 逐条写出 NDJSON 事件。`--json-schema` 是另一层，注册合成输出工具，约束模型产出的 `structured_output` 形状。
+- `stream-json` 把 **stdout 变成机器协议通道**，`installStreamJsonStdoutGuard()` 替换 `process.stdout.write`，非 JSON 行转移到 stderr 并加 `STDOUT_GUARD_MARKER`，防止依赖库的 `console.log` 崩掉逐行解析器。
+- 非交互权限沿**三类宿主**分流，安全语义一致，普通 `-p` 把未获 allow 的 `ask` 生成错误 `tool_result`；SDK 用 `control_request` / `control_response` 把决定交给调用方（与 Hook 并行竞速）；`--permission-prompt-tool` 委托给 MCP 工具。宿主失联、取消或响应非法都不能变成 allow。
 
-> ⚠️ **证据边界**：本文所有代码来自 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` source map 还原源码。`restored-src/` 只用于定位证据，不等同于 Anthropic 内部仓库原始目录；代码块只保留证明控制流所需的字段，`// ...` 表示省略埋点、UI 消息与无关分支。
+> ⚠️ **证据边界**，本文所有代码来自 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` source map 还原源码。`restored-src/` 只用于定位证据，不等同于 Anthropic 内部仓库原始目录；代码块只保留证明控制流所需的字段，`// ...` 表示省略埋点、UI 消息与无关分支。
 
 ## 本篇新增机制
 
-32、33 解释了交互宿主的渲染与输入。本篇回答它的镜像问题：**没有终端时，Claude Code 怎样对外提供接口？** 答案是 Headless 模式与 Agent SDK——前者用协议替换交互界面，后者把协议封装成宿主 API。它们共享 06 的 queryLoop、12 的权限引擎与 11 的工具执行链，差别集中在宿主层。读懂这篇，"同一条任务在 CI 与交互终端里行为是否一致"就有了坐标。它是 35（配置分层）的必备前提——`--settings`、`--setting-sources` 与 permission mode 正是无头调用的主要参数面。
+32、33 解释了交互宿主的渲染与输入。本篇回答它的镜像问题，**没有终端时，Claude Code 怎样对外提供接口？** 答案是 Headless 模式与 Agent SDK，前者用协议替换交互界面，后者把协议封装成宿主 API。它们共享 06 的 queryLoop、12 的权限引擎与 11 的工具执行链，差别集中在宿主层。读懂这篇，"同一条任务在 CI 与交互终端里行为是否一致"就有了坐标。它是 35（配置分层）的必备前提，`--settings`、`--setting-sources` 与 permission mode 正是无头调用的主要参数面。
 
 ## 问题现场
 
-CI 进程没有终端、没有用户点击权限弹窗，却要消费"模型正在看什么、工具做了什么、测试是否结束"。若 headless 只是把交互界面静默掉，stdout 里就会混进模型 token、诊断信息和业务结果，脚本无从解析；若权限询问无人应答，任务就会永远卡在 ask。真正需要的是：**协议分帧（text/JSON/NDJSON 各用不同边界标记结果或事件）、stdout 纪律（stdout 只承载机器协议）、Schema-bound result（JSON Schema 约束模型输出形状）**。
+CI 进程没有终端、没有用户点击权限弹窗，却要消费"模型正在看什么、工具做了什么、测试是否结束"。若 headless 只是把交互界面静默掉，stdout 里就会混进模型 token、诊断信息和业务结果，脚本无从解析；若权限询问无人应答，任务就会永远卡在 ask。它需要三项协议约束，**协议分帧（text/JSON/NDJSON 各用不同边界标记结果或事件）、stdout 纪律（stdout 只承载机器协议）、Schema-bound result（JSON Schema 约束模型输出形状）**。
 
 ![Headless 模式的 text、JSON 与 stream-json 分帧](/images/posts/claude-code-source-reading-34/34-structured-io-framing-detail-handdrawn.png)
 
-这三个概念把本篇的读法固定下来：先区分界面与协议，再看消息怎样分帧，最后检查结果是否满足 schema。
+这三个概念把本篇的读法固定下来，先区分界面与协议，再看消息怎样分帧，最后检查结果是否满足 schema。
 
 ## 正文
 
 ### 这张金额单位工单改用无头协议重放
 
-第一次调查是在交互式终端完成的，但支付团队想把这个回归场景放进 CI，并让一个内部诊断面板实时显示"模型正在看什么、工具做了什么、测试是否结束"。工程师把同一份任务正文交给 headless CLI：
+第一次调查是在交互式终端完成的，但支付团队想把这个回归场景放进 CI，并让一个内部诊断面板实时显示"模型正在看什么、工具做了什么、测试是否结束"。工程师把同一份任务正文交给 headless CLI，
 
-> `claude -p --output-format stream-json`：请检查支付服务中的金额单位工单，查清结算页 99.90 元与回调 9991 分的差异；先给证据和计划，确认后修复并运行测试。
+> `claude -p --output-format stream-json`，请检查支付服务中的金额单位工单，查清结算页 99.90 元与回调 9991 分的差异；先给证据和计划，确认后修复并运行测试。
 
-CI 进程消费 stdout 中的流式事件，诊断面板则按事件类型更新自己的状态；它不需要 Ink 输入框，也不能假设一定存在人工点击的权限弹窗。稍后，内部 Node 宿主又由 SDK 提交同样的任务：前者把事件和终态写到 stdout，后者让宿主通过 Query 迭代器消费 assistant、tool、权限和 result；两者都跳过交互式 TUI，却共享查询、工具和权限内核。
+CI 进程消费 stdout 中的流式事件，诊断面板则按事件类型更新自己的状态；它不需要 Ink 输入框，也不能假设一定存在人工点击的权限弹窗。稍后，内部 Node 宿主又由 SDK 提交同样的任务，前者把事件和终态写到 stdout，后者让宿主通过 Query 迭代器消费 assistant、tool、权限和 result；两者都跳过交互式 TUI，却共享查询、工具和权限内核。
 
-### 先补三个概念：Headless、SDK 与 Structured IO
+### 先补三个概念｜Headless、SDK 与 Structured IO
 
-**Headless 用协议替换交互界面**：跳过 Ink renderer、消息列表、输入框、权限弹窗和快捷键这棵 React 树，仍保留会话状态、工具注册表、权限上下文、消息历史、MCP 连接和查询循环，并用输入输出协议承接原先由 UI 承担的交互。
+**Headless 用协议替换交互界面**，跳过 Ink renderer、消息列表、输入框、权限弹窗和快捷键这棵 React 树，仍保留会话状态、工具注册表、权限上下文、消息历史、MCP 连接和查询循环，并用输入输出协议承接原先由 UI 承担的交互。
 
-**SDK 以宿主 API 复用同一模型调用链**：业务代码用类型化 API 提交消息、异步遍历事件，并在需要时回传权限决定或控制指令。`restored-src/src/entrypoints/agentSdkTypes.ts` 暴露的入口把 prompt 定义为字符串或异步消息流：
+**SDK 以宿主 API 复用同一模型调用链**，业务代码用类型化 API 提交消息、异步遍历事件，并在需要时回传权限决定或控制指令。`restored-src/src/entrypoints/agentSdkTypes.ts` 暴露的入口把 prompt 定义为字符串或异步消息流，
 
 ```ts
 export function query(_params: {
@@ -64,15 +64,15 @@ export function query(_params: {
 }): Query
 ```
 
-> 证据：`restored-src/src/entrypoints/agentSdkTypes.ts`（2.1.88 source map 还原源码），SDK `query()` 类型入口。
+> 证据，`restored-src/src/entrypoints/agentSdkTypes.ts`（2.1.88 source map 还原源码），SDK `query()` 类型入口。
 
 `query()` 是 SDK 的类型入口。`prompt` 为 `string` 时适合一次性输入，为 `AsyncIterable<SDKUserMessage>` 时可以持续送入多轮 user message；`options` 可省略，公开 `Options` 与内部 `InternalOptions` 对应两个重载，静态类型保留了各自的运行时选项。返回的 `Query` / `InternalQuery` 供 SDK 宿主持续消费事件和终态。
 
-**Structured IO 是事件协议**：每一条消息提供可判别的 `type`，请求与响应通过 `request_id` 关联。`restored-src/src/entrypoints/sdk/coreSchemas.ts` 与 `controlSchemas.ts` 把 stdin、stdout 边界写得很明确：stdin 可以接收 user message、control request、control response、keep-alive 和环境变量更新；stdout 还会发送 assistant、system、result、stream event，以及控制请求与取消事件。`stream-json` 因此是一套带控制面的双向协议。
+**Structured IO 是事件协议**，每一条消息提供可判别的 `type`，请求与响应通过 `request_id` 关联。`restored-src/src/entrypoints/sdk/coreSchemas.ts` 与 `controlSchemas.ts` 把 stdin、stdout 边界写得很明确，stdin 可以接收 user message、control request、control response、keep-alive 和环境变量更新；stdout 还会发送 assistant、system、result、stream event，以及控制请求与取消事件。`stream-json` 因此是一套带控制面的双向协议。
 
 ### 入口先决定是否挂载 REPL
 
-同一条命令为什么有时挂 Ink、有时只输出一行 JSON？答案在入口，而不在 `ask()`：主入口先判断 stdout 是否可交互，再决定是否挂载 REPL。
+同一条命令为什么有时挂 Ink、有时只输出一行 JSON？答案在入口，而不在 `ask()`，主入口先判断 stdout 是否可交互，再决定是否挂载 REPL。
 
 ```ts
 const hasPrintFlag = cliArgs.includes('-p') || cliArgs.includes('--print')
@@ -85,11 +85,11 @@ setIsInteractive(!isNonInteractive)
 initializeEntrypoint(isNonInteractive)
 ```
 
-> 证据：`restored-src/src/main.tsx`（2.1.88 source map 还原源码），非交互判定。
+> 证据，`restored-src/src/main.tsx`（2.1.88 source map 还原源码），非交互判定。
 
 `hasPrintFlag` 同时识别短参数 `-p` 和长参数 `--print`；`hasInitOnlyFlag` 表示只执行初始化；`hasSdkUrl` 只要出现 `--sdk-url...` 就成立；stdout 为非 TTY 时也进入非交互状态。`setIsInteractive(false)` 让后续代码避开交互宿主；`initializeEntrypoint()` 只记录入口形态，Agent 执行由后续链路启动。
 
-进入无头分支后，主入口仍然创建完整状态，再加载 `runHeadless()`：
+进入无头分支后，主入口仍然创建完整状态，再加载 `runHeadless()`，
 
 ```ts
 if (isNonInteractiveSession) {
@@ -115,7 +115,7 @@ if (isNonInteractiveSession) {
 }
 ```
 
-> 证据：`restored-src/src/main.tsx`（2.1.88 source map 还原源码），headless 分支。
+> 证据，`restored-src/src/main.tsx`（2.1.88 source map 还原源码），headless 分支。
 
 `headlessStore` 以 `headlessInitialState` 为初始快照，并把有效变化交给 `onChangeAppState`。`runHeadless()` 的第一个参数 `inputPrompt` 是字符串或 `AsyncIterable<string>`；`getState` / `setState` 让查询循环继续读写 `AppState`；`commandsHeadless` 只保留允许非交互执行的命令；`tools` 与 `sdkMcpConfigs` 提供本地工具和 SDK MCP；`agents` 是本次可用 Agent。`options.outputFormat` 决定输出封装，`permissionPromptToolName` 选择权限宿主，`maxTurns` 提供可选轮数上限；其余字段继续承载预算、模型和 session 设置。
 
@@ -123,7 +123,7 @@ if (isNonInteractiveSession) {
 
 ### 输入先被统一成 SDK user message
 
-`-p` 的默认输入格式是 `text`。prompt 参数和管道 stdin 会被合并；如果输入格式是 `stream-json`，stdin 则直接作为异步字节流交给后面解析：
+`-p` 的默认输入格式是 `text`。prompt 参数和管道 stdin 会被合并；如果输入格式是 `stream-json`，stdin 则直接作为异步字节流交给后面解析，
 
 ```ts
 async function getInputPrompt(
@@ -152,11 +152,11 @@ async function getInputPrompt(
 }
 ```
 
-> 证据：`restored-src/src/cli/print.ts`（2.1.88 source map 还原源码），`getInputPrompt()`。
+> 证据，`restored-src/src/cli/print.ts`（2.1.88 source map 还原源码），`getInputPrompt()`。
 
 `getInputPrompt()` 的 `prompt` 是位置参数中的开放字符串；`inputFormat` 只有 `'text'` 与 `'stream-json'` 两个可选值。`text` 会等待并拼接普通 stdin，`stream-json` 不预先读完，而是返回 `process.stdin` 这个异步流。函数返回联合类型，正好把"一次性文本"和"持续协议输入"收敛到同一入口。
 
-`restored-src/src/cli/print.ts` 中的 `runHeadless()` 随后调用 `getStructuredIO()`。即使拿到的是普通字符串，也会先包装成一条 `SDKUserMessage`：
+`restored-src/src/cli/print.ts` 中的 `runHeadless()` 随后调用 `getStructuredIO()`。即使拿到的是普通字符串，也会先包装成一条 `SDKUserMessage`，
 
 ```ts
 function getStructuredIO(
@@ -187,17 +187,17 @@ function getStructuredIO(
 }
 ```
 
-> 证据：`restored-src/src/cli/print.ts`（2.1.88 source map 还原源码），`getStructuredIO()`。
+> 证据，`restored-src/src/cli/print.ts`（2.1.88 source map 还原源码），`getStructuredIO()`。
 
 `getStructuredIO()` 的 `inputPrompt` 接受字符串或字符串异步流；`options` 汇集 transport 选择与回放策略，其中 `sdkUrl` 为 URL 字符串时创建 `RemoteIO`，省略时创建本地 `StructuredIO`；`replayUserMessages: true` 会把收到的用户/控制消息重新发到输出端作为确认，省略或 `false` 时跳过回放。包装消息的 `type` 固定为 `'user'`，`message.role` 固定为 `'user'`，`content` 保存原 prompt；空 `session_id` 交给后续会话初始化补齐，`parent_tool_use_id: null` 表示这条输入属于顶层会话而非某个工具调用。空字符串会变成空流。
 
-这一步很关键：后面的循环不需要关心输入来自命令行参数、管道、SDK stdin 还是远端 transport。它只消费统一的 message。
+这一步很关键，后面的循环不需要关心输入来自命令行参数、管道、SDK stdin 还是远端 transport。它只消费统一的 message。
 
 ![Claude Code 无头模式、结构化 IO 与权限宿主手绘图](/images/posts/claude-code-source-reading-34/34-headless-sdk-structured-io-handdrawn.png)
 
 ### 中间仍是同一个 `ask()`
 
-`restored-src/src/cli/print.ts` 中的 `runHeadless()` 负责初始化和最终输出，持续运行的部分在 `runHeadlessStreaming()`。它从结构化输入中取出 command，然后把参数传给 `ask()`：
+`restored-src/src/cli/print.ts` 中的 `runHeadless()` 负责初始化和最终输出，持续运行的部分在 `runHeadlessStreaming()`。它从结构化输入中取出 command，然后把参数传给 `ask()`，
 
 ```ts
 for await (const message of ask({
@@ -221,7 +221,7 @@ for await (const message of ask({
 }
 ```
 
-> 证据：`restored-src/src/cli/print.ts`（2.1.88 source map 还原源码），`runHeadlessStreaming()` 的 ask 调用。
+> 证据，`restored-src/src/cli/print.ts`（2.1.88 source map 还原源码），`runHeadlessStreaming()` 的 ask 调用。
 
 `ask()` 的 `prompt` 是本轮字符串或内容块；`cwd` 由调用时的 `cwd()` 固定为当前工作目录，供路径解析、工具执行和上下文构造共用；`commands`、`tools` 是当时已装配的命令与工具；`canUseTool` 是权限宿主适配器；`maxTurns`、`maxBudgetUsd` 均可为 `undefined`，此时对应限制保持关闭；`mutableMessages` 是跨轮次复用的历史数组；`abortController` 承载中断；`includePartialMessages` 为真时才把模型原始增量映射进 SDK 输出，省略或假值时仍会得到完整消息与终态。
 
@@ -229,7 +229,7 @@ for await (const message of ask({
 
 ### 三种输出格式共享一套执行逻辑
 
-CLI 对 `--output-format` 给出的封闭选项是 `'text' | 'json' | 'stream-json'`。循环结束后，`runHeadless()` 只改变怎样消费已经产生的 SDK messages：
+CLI 对 `--output-format` 给出的封闭选项是 `'text' | 'json' | 'stream-json'`。循环结束后，`runHeadless()` 只改变怎样消费已经产生的 SDK messages，
 
 ```ts
 switch (options.outputFormat) {
@@ -254,21 +254,21 @@ switch (options.outputFormat) {
 }
 ```
 
-> 证据：`restored-src/src/cli/print.ts`（2.1.88 source map 还原源码），输出格式 switch。
+> 证据，`restored-src/src/cli/print.ts`（2.1.88 source map 还原源码），输出格式 switch。
 
 `options.outputFormat` 为 `undefined` 或 `'text'` 时走默认分支，只输出成功 result 的文本，错误 subtype 会转换成简短错误文本；`'json'` 默认输出单个最终 `result` 对象，配合 `verbose: true` 时输出收集到的消息数组；`'stream-json'` 在遍历过程中已经逐条写出，不会在结尾重复。源码还要求 print 模式的 `stream-json` 同时打开 `verbose`。
 
-主要事件可以用三个层次理解：
+主要事件可以用三个层次理解，
 
 - `system/init` 告诉宿主版本、cwd、模型、工具、MCP server、permission mode、skills 和 plugins。
 - `assistant`、`user`、可选的 `stream_event`、工具进度与 hook 事件描述执行过程。`stream_event` 只有 `includePartialMessages` 打开时才会包含模型原始增量。
 - `result` 是一轮的终态。成功 subtype 为 `success`；错误 subtype 可以是 `error_during_execution`、`error_max_turns`、`error_max_budget_usd` 或 `error_max_structured_output_retries`。成功消息还带 duration、turn 数、cost、usage、permission denials 与可选 `structured_output`。
 
-结构化结果和结构化传输位于两层：`--output-format=json` 决定外层怎样封装运行结果；`--json-schema` 注册合成输出工具，要求模型产出符合业务 schema 的 `structured_output`。前者解决机器读取，后者解决结果形状约束，两者可以组合。
+结构化结果和结构化传输位于两层，`--output-format=json` 决定外层怎样封装运行结果；`--json-schema` 注册合成输出工具，要求模型产出符合业务 schema 的 `structured_output`。前者解决机器读取，后者解决结果形状约束，两者可以组合。
 
 ### 为什么 `stream-json` 必须保护 stdout
 
-NDJSON 的边界是一行一个 JSON。某个依赖库随手 `console.log('connected')`，就足以让 SDK 的逐行解析器崩掉。因此 `restored-src/src/utils/streamJsonStdoutGuard.ts` 在第一次结构化写出前替换了 `process.stdout.write`：
+NDJSON 的边界是一行一个 JSON。某个依赖库随手 `console.log('connected')`，就足以让 SDK 的逐行解析器崩掉。因此 `restored-src/src/utils/streamJsonStdoutGuard.ts` 在第一次结构化写出前替换了 `process.stdout.write`，
 
 ```ts
 if (options.outputFormat === 'stream-json') {
@@ -283,9 +283,9 @@ if (isJsonLine(line)) {
 }
 ```
 
-> 证据：`restored-src/src/utils/streamJsonStdoutGuard.ts`（2.1.88 source map 还原源码）。
+> 证据，`restored-src/src/utils/streamJsonStdoutGuard.ts`（2.1.88 source map 还原源码）。
 
-`installStreamJsonStdoutGuard()` 接受零个参数并返回 `void`；重复调用会直接返回。它缓冲到换行后再判断完整行：合法 JSON 留在 stdout，非 JSON 被转移到 stderr；进程清理时还会处理未换行的残片并恢复原始 writer。stdout 在 SDK 模式中由此成为只承载协议消息的通道。
+`installStreamJsonStdoutGuard()` 接受零个参数并返回 `void`；重复调用会直接返回。它缓冲到换行后再判断完整行，合法 JSON 留在 stdout，非 JSON 被转移到 stderr；进程清理时还会处理未换行的残片并恢复原始 writer。stdout 在 SDK 模式中由此成为只承载协议消息的通道。
 
 `StructuredIO` 还把普通 SDK event 和内部 `sendRequest()` 产生的 control message 放进同一个 `outbound` FIFO。permission request 会排在已经入队的模型增量之后，事件顺序因此可被宿主解释。
 
@@ -293,7 +293,7 @@ if (isJsonLine(line)) {
 
 工具自己的 `checkPermissions()`、allow/ask/deny 规则、permission mode、Hook 与安全检查仍然执行。对外可见的 mode 包括 `default`、`acceptEdits`、`bypassPermissions`、`plan`、`dontAsk`，以及受功能开关约束的 `auto`；它们改变规则怎样处理，确认动作则由无头宿主承接。`restored-src/src/cli/print.ts` 的 `getCanUseToolFn()` 把"需要询问"分成三条路。
 
-**第一条：普通 `-p` 使用规则终态。** 省略 permission prompt tool 时，适配器直接返回权限引擎的结果：
+**第一条，普通 `-p` 使用规则终态。** 省略 permission prompt tool 时，适配器直接返回权限引擎的结果，
 
 ```ts
 if (!permissionPromptToolName) {
@@ -316,11 +316,11 @@ if (!permissionPromptToolName) {
 }
 ```
 
-> 证据：`restored-src/src/cli/print.ts`（2.1.88 source map 还原源码），普通 `-p` 权限分支。
+> 证据，`restored-src/src/cli/print.ts`（2.1.88 source map 还原源码），普通 `-p` 权限分支。
 
 `permissionPromptToolName` 省略时进入此分支。`forceDecision` 若存在，优先使用；否则调用 `hasPermissionsToUseTool()`。`toolUseId` 用于把决定关联到原始 `tool_use`，`assistantMessage` 与 `toolUseContext` 提供消息和运行状态。该分支保留 `ask` 原值，也不从 stdin 读取 yes/no。
 
-`restored-src/src/services/tools/toolExecution.ts` 只执行 `behavior === 'allow'`，其他行为都生成错误结果：
+`restored-src/src/services/tools/toolExecution.ts` 只执行 `behavior === 'allow'`，其他行为都生成错误结果，
 
 ```ts
 if (permissionDecision.behavior !== 'allow') {
@@ -337,13 +337,13 @@ if (permissionDecision.behavior !== 'allow') {
 }
 ```
 
-> 证据：`restored-src/src/services/tools/toolExecution.ts`（2.1.88 source map 还原源码），非 allow 分支。
+> 证据，`restored-src/src/services/tools/toolExecution.ts`（2.1.88 source map 还原源码），非 allow 分支。
 
-这里的 `permissionDecision.behavior` 可见值包括 `allow`、`ask` 和 `deny`；只有 `allow` 越过分支。其余值创建一条 `user` 消息：`permissionDecision.message` 被复制到 `tool_result.content`，作为模型可见的权限决定文本；`tool_use_id` 精确关联原调用，`is_error: true` 告诉模型工具未执行。于是普通 `-p` 中的 `ask` 作为未获许可结果回到模型。
+这里的 `permissionDecision.behavior` 可见值包括 `allow`、`ask` 和 `deny`；只有 `allow` 越过分支。其余值创建一条 `user` 消息，`permissionDecision.message` 被复制到 `tool_result.content`，作为模型可见的权限决定文本；`tool_use_id` 精确关联原调用，`is_error: true` 告诉模型工具未执行。于是普通 `-p` 中的 `ask` 作为未获许可结果回到模型。
 
-这意味着脚本要提前把权限写清楚：用精确 allow 规则或 `--allowed-tools` 放行必要操作，用 deny 规则收紧边界，或选择合适 permission mode。`--dangerously-skip-permissions` 会绕过检查；源码帮助文本将它标为危险选项，并建议只在无网络的隔离沙箱使用。
+这意味着脚本要提前把权限写清楚，用精确 allow 规则或 `--allowed-tools` 放行必要操作，用 deny 规则收紧边界，或选择合适 permission mode。`--dangerously-skip-permissions` 会绕过检查；源码帮助文本将它标为危险选项，并建议只在无网络的隔离沙箱使用。
 
-**第二条：SDK 通过 stdio 请求宿主决定。** 当 `permissionPromptToolName === 'stdio'`，`getCanUseToolFn()` 返回 `restored-src/src/cli/structuredIO.ts` 的 `structuredIO.createCanUseTool()`。启用这类权限回调的 SDK 会使用该控制协议；`--sdk-url` 还会强制把有效 prompt tool 设为 `'stdio'`，因此远端 SDK 也进入同一协议分支。权限引擎先跑；只有结果仍是 `ask`，才创建控制请求：
+**第二条，SDK 通过 stdio 请求宿主决定。** 当 `permissionPromptToolName === 'stdio'`，`getCanUseToolFn()` 返回 `restored-src/src/cli/structuredIO.ts` 的 `structuredIO.createCanUseTool()`。启用这类权限回调的 SDK 会使用该控制协议；`--sdk-url` 还会强制把有效 prompt tool 设为 `'stdio'`，因此远端 SDK 也进入同一协议分支。权限引擎先跑；只有结果仍是 `ask`，才创建控制请求，
 
 ```ts
 const sdkPromise = this.sendRequest<PermissionToolOutput>(
@@ -362,13 +362,13 @@ const sdkPromise = this.sendRequest<PermissionToolOutput>(
 const winner = await Promise.race([hookPromise, sdkPromise])
 ```
 
-> 证据：`restored-src/src/cli/structuredIO.ts`（2.1.88 source map 还原源码），SDK 权限竞速。
+> 证据，`restored-src/src/cli/structuredIO.ts`（2.1.88 source map 还原源码），SDK 权限竞速。
 
 `sendRequest()` 的 request subtype 是 `'can_use_tool'`；`tool_name`、`input`、`tool_use_id` 告诉宿主正在批准什么；`permission_suggestions` 可为 `undefined`，或包含"始终允许"等可持久化建议；schema 校验宿主返回值；`AbortSignal` 在查询取消或 Hook 先决定时中止等待；`requestId` 把异步 response 与这一次请求配对。
 
-这里还有一个容易漏掉的细节：PermissionRequest Hook 和 SDK 弹窗并行竞速。Hook 先返回 allow/deny，就取消未完成的 SDK request；Hook 返回中性结果时继续等待 SDK；SDK 先返回，则采用宿主结果。输入流关闭、响应不合法或请求异常时，catch 分支统一转换成 deny。SDK 相比普通 `-p` 多出一个可编程、可取消、能返回结构化权限决定的宿主。
+这里还有一个容易漏掉的细节，PermissionRequest Hook 和 SDK 弹窗并行竞速。Hook 先返回 allow/deny，就取消未完成的 SDK request；Hook 返回中性结果时继续等待 SDK；SDK 先返回，则采用宿主结果。输入流关闭、响应不合法或请求异常时，catch 分支统一转换成 deny。SDK 相比普通 `-p` 多出一个可编程、可取消、能返回结构化权限决定的宿主。
 
-**第三条：`-p` 把询问委托给 MCP 工具。** `--permission-prompt-tool <tool>` 提供另一种宿主。Claude Code 在 MCP 工具列表中按名字找到它，把当前 `tool_name`、`input` 和 `tool_use_id` 作为一次工具调用发送，再把返回文本解析成 permission decision。
+**第三条，`-p` 把询问委托给 MCP 工具。** `--permission-prompt-tool <tool>` 提供另一种宿主。Claude Code 在 MCP 工具列表中按名字找到它，把当前 `tool_name`、`input` 和 `tool_use_id` 作为一次工具调用发送，再把返回文本解析成 permission decision。
 
 ```ts
 const toolCallPromise = permissionPromptTool.call(
@@ -388,31 +388,31 @@ return permissionPromptToolResultToPermissionDecision(
 )
 ```
 
-> 证据：`restored-src/src/cli/print.ts`（2.1.88 source map 还原源码），permission-prompt-tool 分支。
+> 证据，`restored-src/src/cli/print.ts`（2.1.88 source map 还原源码），permission-prompt-tool 分支。
 
-`permissionPromptTool.call()` 的输入对象含 `tool_name`、`input`、`tool_use_id`：前两项描述待审批动作，后者关联原始调用；后续参数提供工具上下文、递归权限回调与原 assistant message。`toolCallPromise` 与 abort signal 竞速；返回内容必须是单个 text block，并通过 permission output schema，取消时则转换为 deny。被选作 prompt host 的 MCP 工具会从普通可用工具列表中移除，避免模型把它当业务工具直接调用。
+`permissionPromptTool.call()` 的输入对象含 `tool_name`、`input`、`tool_use_id`，前两项描述待审批动作，后者关联原始调用；后续参数提供工具上下文、递归权限回调与原 assistant message。`toolCallPromise` 与 abort signal 竞速；返回内容必须是单个 text block，并通过 permission output schema，取消时则转换为 deny。被选作 prompt host 的 MCP 工具会从普通可用工具列表中移除，避免模型把它当业务工具直接调用。
 
-因此三条路的安全语义是一致的：规则能直接决定就直接返回；确实需要 ask 时，必须有明确宿主；宿主失联、取消或响应非法都不能变成 allow。
+因此三条路的安全语义是一致的，规则能直接决定就直接返回；确实需要 ask 时，必须有明确宿主；宿主失联、取消或响应非法都不能变成 allow。
 
 ### `claude -p` 与 SDK 到底怎么选
 
 如果你的代码需要结合 Claude Code，可以先看你需要的是"一个命令的结果"，还是"一个可控制的会话"。
 
-适合直接用 `claude -p` 的场景：
+适合直接用 `claude -p` 的场景，
 
 - Shell、Makefile、CI job 里的一次性任务，输入已经是一段文本，结束后只关心 stdout 和退出状态。
 - 权限集合可以在启动前确定，不需要执行途中弹出自定义确认 UI。
 - 只需要最终文本，或一个 `json` result；业务对象有固定形状时，再叠加 `--json-schema`。
 - 你愿意自己管理子进程、超时、stderr、版本和 session 参数。
 
-适合使用 Agent SDK 的场景：
+适合使用 Agent SDK 的场景，
 
 - 应用要持续接收 assistant、tool progress、partial message、system status 和最终 result。
 - 执行途中需要 `canUseTool` 之类的权限回调，由 IDE、网页或业务审批逻辑决定 allow/deny。
 - 需要主动 interrupt、切换模型或 permission mode、管理 MCP、恢复多轮 session，或把 user message 持续送入同一协议。
 - 希望用 SDK 类型屏蔽 NDJSON、`request_id`、取消和消息兼容细节。
 
-两者之间还有一条实用的中间路线：先用 `claude -p --output-format stream-json --verbose` 验证协议和自动化流程；当你开始手写 pending-request map、事件类型分发、取消传播与权限回调时，就说明这段 glue code 已经接近 SDK 的职责，应该迁移到 SDK。反过来，如果代码只是每天跑一次"检查仓库并输出符合 schema 的报告"，引入完整 SDK 会增加生命周期管理，却未必增加业务价值。`-p` 更小，也更容易从命令行复现。
+两者之间还有一条实用的中间路线，先用 `claude -p --output-format stream-json --verbose` 验证协议和自动化流程；当你开始手写 pending-request map、事件类型分发、取消传播与权限回调时，就说明这段 glue code 已经接近 SDK 的职责，应该迁移到 SDK。反过来，如果代码只是每天跑一次"检查仓库并输出符合 schema 的报告"，引入完整 SDK 会增加生命周期管理，却未必增加业务价值。`-p` 更小，也更容易从命令行复现。
 
 ### 无头运行把安全责任交给调用方
 
@@ -440,23 +440,23 @@ return permissionPromptToolResultToPermissionDecision(
 | 权限宿主 3 | `permissionPromptTool.call()` + schema parse | `src/cli/print.ts` | 已确认 |
 | 协议 schema | `coreSchemas.ts` / `controlSchemas.ts` | `src/entrypoints/sdk/` | 已确认 |
 
-> 证据说明：三条权限宿主共享"非 allow 即失败"的安全语义（`toolExecution.ts` 的 `behavior !== 'allow'` 分支）；`stream-json` 的 stdout guard 与 outbound FIFO 保证协议行不被污染、事件顺序可解释（`streamJsonStdoutGuard.ts`、`structuredIO.ts`）。
+> 证据说明，三条权限宿主共享"非 allow 即失败"的安全语义（`toolExecution.ts` 的 `behavior !== 'allow'` 分支）；`stream-json` 的 stdout guard 与 outbound FIFO 保证协议行不被污染、事件顺序可解释（`streamJsonStdoutGuard.ts`、`structuredIO.ts`）。
 
-## 设计决策：为什么无头模式保留 AppState，而不是全局变量
+## 设计决策｜为什么无头模式保留 AppState，而不是全局变量
 
 源码里找不到官方选型记录，下面的判断来自代码结构，属于解释而非官方声明。
 
-**第一，为什么 headless 也要 `createStore(headlessInitialState, onChangeAppState)`？** 因为一次 `-p` 调用也可能连接 MCP、切换权限模式、运行后台任务、恢复历史或更新文件读取缓存。把这些状态塞回全局变量，会让交互和无头两条路径逐渐分叉——同一份 `onChangeAppState`（31 篇的字段级 diff）同时服务两边的持久化，这正是共享内核的体现。
+**第一，为什么 headless 也要 `createStore(headlessInitialState, onChangeAppState)`？** 因为一次 `-p` 调用也可能连接 MCP、切换权限模式、运行后台任务、恢复历史或更新文件读取缓存。把这些状态塞回全局变量，会让交互和无头两条路径逐渐分叉，同一份 `onChangeAppState`（31 篇的字段级 diff）同时服务两边的持久化，这正是共享内核的体现。
 
 **第二，为什么输出格式与执行逻辑完全分离？** `ask()` 产生同一种 SDK message 流，`runHeadless()` 只在循环结束后决定怎么消费它。这让 `text`、`json`、`stream-json` 的差异收敛为"最后一个 switch"，而不是三套执行路径；`--json-schema` 又以"合成输出工具"的形式叠加在模型调用层，与传输层正交。格式是视图，执行是模型。
 
-**第三，为什么权限决定必须走"非 allow 即失败"？** 无头模式没有人工点击，任何"默认放行"的猜测都可能让自动化系统在不可信目录里执行工具。三条宿主（规则终态、SDK 回调、MCP 工具）共享同一语义：只有明确的 allow 才执行，宿主失联、取消、非法响应统统收敛为 deny/error tool_result。安全语义是协议的一部分，而不是每个宿主自己实现。
+**第三，为什么权限决定必须走"非 allow 即失败"？** 无头模式没有人工点击，任何"默认放行"的猜测都可能让自动化系统在不可信目录里执行工具。三条宿主（规则终态、SDK 回调、MCP 工具）共享同一语义，只有明确的 allow 才执行，宿主失联、取消、非法响应统统收敛为 deny/error tool_result。安全语义是协议的一部分，而不是每个宿主自己实现。
 
 **第四，为什么 SDK 权限与 Hook 并行竞速？** PermissionRequest Hook 是本地可配置的确定性决策（先到先得、成本最低），SDK 宿主是可编程的外部决策（适合 IDE/Web 审批流）。两者并行意味着"本地规则能决定就不打扰宿主"与"本地规则中性时由宿主决定"可以无缝衔接，取消路径（abort signal）统一由外层控制。
 
-## 练习：在真实会话里观察无头协议
+## 练习｜在真实会话里观察无头协议
 
-1. **重放一次 CI 任务。** 用 `claude -p --output-format stream-json --verbose` 执行一个简单的文件搜索任务，把 stdout 存成文件，然后用 `jq` 按 `type` 分组统计：出现了哪些事件类型？`system/init` 里有哪些字段？最后的 `result` 携带了哪些 usage/cost 信息？
+1. **重放一次 CI 任务。** 用 `claude -p --output-format stream-json --verbose` 执行一个简单的文件搜索任务，把 stdout 存成文件，然后用 `jq` 按 `type` 分组统计，出现了哪些事件类型？`system/init` 里有哪些字段？最后的 `result` 携带了哪些 usage/cost 信息？
 
 2. **故意污染 stdout。** 在一个使用 `claude -p` 的脚本里让某个前置命令向 stdout 输出一行非 JSON 文本，观察 `stream-json` 模式下它被转移到 stderr 并带上 `STDOUT_GUARD_MARKER`；再对比 `text` 模式下同样的输出会怎样混入结果。
 
@@ -472,24 +472,24 @@ return permissionPromptToolResultToPermissionDecision(
 <details>
 <summary>参考答案</summary>
 
-1. **因为 NDJSON 的边界是一行一个 JSON。** 任何非 JSON 行都会让逐行解析器崩溃。`installStreamJsonStdoutGuard()` 缓冲到换行后判断：合法 JSON 留在 stdout，非 JSON 转移到 stderr 并加 `STDOUT_GUARD_MARKER`；进程清理时处理残片并恢复原始 writer。stdout 由此成为只承载协议消息的通道（`streamJsonStdoutGuard.ts`）。
+1. **因为 NDJSON 的边界是一行一个 JSON。** 任何非 JSON 行都会让逐行解析器崩溃。`installStreamJsonStdoutGuard()` 缓冲到换行后判断，合法 JSON 留在 stdout，非 JSON 转移到 stderr 并加 `STDOUT_GUARD_MARKER`；进程清理时处理残片并恢复原始 writer。stdout 由此成为只承载协议消息的通道（`streamJsonStdoutGuard.ts`）。
 
 2. **生成一条 `is_error: true` 的 `tool_result` 回到模型。** `toolExecution.ts` 只执行 `behavior === 'allow'`；`ask`/`deny` 都会创建一条 user 消息，把 `permissionDecision.message` 写入 `tool_result.content`，`tool_use_id` 关联原调用，`is_error: true` 告诉模型工具未执行。所以普通 `-p` 中无人应答的 ask 会作为失败结果回到模型，而不是卡死。
 
-3. **不是同一层。** `--output-format=json` 决定外层怎样封装运行结果（机器读取）；`--json-schema` 注册合成输出工具，要求模型产出符合业务 schema 的 `structured_output`（结果形状约束）。两者可以组合：JSON 封装 + schema 约束。
+3. **不是同一层。** `--output-format=json` 决定外层怎样封装运行结果（机器读取）；`--json-schema` 注册合成输出工具，要求模型产出符合业务 schema 的 `structured_output`（结果形状约束）。两者可以组合，JSON 封装 + schema 约束。
 
-4. **并行竞速关系。** PermissionRequest Hook 与 SDK 弹窗同时发起：Hook 先返回 allow/deny 就取消 SDK 请求；Hook 返回中性结果时继续等待 SDK；SDK 先返回则采用宿主结果。输入流关闭、响应不合法或请求异常时，catch 分支统一转换成 deny（`structuredIO.ts` 的 `Promise.race`）。
+4. **并行竞速关系。** PermissionRequest Hook 与 SDK 弹窗同时发起，Hook 先返回 allow/deny 就取消 SDK 请求；Hook 返回中性结果时继续等待 SDK；SDK 先返回则采用宿主结果。输入流关闭、响应不合法或请求异常时，catch 分支统一转换成 deny（`structuredIO.ts` 的 `Promise.race`）。
 
 </details>
 
-## 回顾（折叠）：想自定义快捷键应该怎么做
+## 回顾（折叠）｜想自定义快捷键应该怎么做
 
 <details>
-<summary>回答 33 留下的问题：如果想自定义 Claude Code 的快捷键，应该如何实现？</summary>
+<summary>回答 33 留下的问题，如果想自定义 Claude Code 的快捷键，应该如何实现？</summary>
 
 **不要改发布包里的 `DEFAULT_BINDINGS`**，运行 `/keybindings`，再编辑它创建或打开的 `~/.claude/keybindings.json`。2.1.88 的实现把文件 watcher、schema 校验、上下文过滤和事件拦截器接成热加载链；用户保存文件后，绑定才会在当前进程重新参与匹配。
 
-命令实现位于 `restored-src/src/commands/keybindings/keybindings.ts`。`call()` 先检查 `isKeybindingCustomizationEnabled()`；功能开关关闭时，它会明确返回"Keybinding customization is not enabled"，这不是 JSON 写错，而是该版本构建尚未获得功能 rollout。开关开启时，命令调用 `getKeybindingsPath()` 解析出 `keybindings.json`，用独占创建避免覆盖已有文件，然后交给编辑器打开。模板由 `generateKeybindingsTemplate()` 生成，包含 `$schema`、`$docs` 和 `bindings` 三个字段，并过滤不能重绑定的快捷键。最小可用配置可以这样写：
+命令实现位于 `restored-src/src/commands/keybindings/keybindings.ts`。`call()` 先检查 `isKeybindingCustomizationEnabled()`；功能开关关闭时，它会明确返回"Keybinding customization is not enabled"，表示该版本构建尚未获得功能 rollout。开关开启时，命令调用 `getKeybindingsPath()` 解析出 `keybindings.json`，用独占创建避免覆盖已有文件，然后交给编辑器打开。模板由 `generateKeybindingsTemplate()` 生成，包含 `$schema`、`$docs` 和 `bindings` 三个字段，并过滤不能重绑定的快捷键。最小可用配置可以这样写，
 
 ```json
 {
@@ -514,17 +514,17 @@ return permissionPromptToolResultToPermissionDecision(
 }
 ```
 
-> 证据：`restored-src/src/commands/keybindings/keybindings.ts`（2.1.88 source map 还原源码），配置模板示例。
+> 证据，`restored-src/src/commands/keybindings/keybindings.ts`（2.1.88 source map 还原源码），配置模板示例。
 
-这里有三种不同意图：把 `ctrl+e` 映射到内置 action，把两步 chord `ctrl+k ctrl+c` 映射到 `/compact`，以及用 `null` 解除一个默认绑定。`command:<name>` 不是任意 action 字符串：源码校验它只能由字母、数字、冒号、连字符和下划线组成，而且 command binding 必须放在 `Chat` context 中。
+这里有三种不同意图，把 `ctrl+e` 映射到内置 action，把两步 chord `ctrl+k ctrl+c` 映射到 `/compact`，以及用 `null` 解除一个默认绑定。`command:<name>` 不是任意 action 字符串，源码校验它只能由字母、数字、冒号、连字符和下划线组成，而且 command binding 必须放在 `Chat` context 中。
 
-动作值有三类：枚举 action（`chat:*`、`app:*`，可用列表由 schema 静态定义）、`command:<name>`（在 Chat 上下文执行 slash command）、`null`（在该 context 解除默认绑定）。按键字符串先由 `parseChord()` 按空格切成多个步骤，再由 `parseKeystroke()` 按 `+` 解析修饰键；单独的空格会被识别成 Space，而不是 chord 分隔符。加载顺序是 `[...defaultBindings, ...userParsed]`，用户绑定覆盖默认；`null` 则让默认 action 不再被调用。`ChordInterceptor` 会把当前注册的 handler context、组件激活 context 和 `Global` 组合起来再调用 `resolveKeyWithChordState()`：前缀匹配进入 pending，完整匹配触发 handler，失配或取消才把事件继续交给输入组件。
+动作值有三类，枚举 action（`chat:*`、`app:*`，可用列表由 schema 静态定义）、`command:<name>`（在 Chat 上下文执行 slash command）、`null`（在该 context 解除默认绑定）。按键字符串先由 `parseChord()` 按空格切成多个步骤，再由 `parseKeystroke()` 按 `+` 解析修饰键；单独的空格会被识别成 Space，而不是 chord 分隔符。加载顺序是 `[...defaultBindings, ...userParsed]`，用户绑定覆盖默认；`null` 则让默认 action 不再被调用。`ChordInterceptor` 会把当前注册的 handler context、组件激活 context 和 `Global` 组合起来再调用 `resolveKeyWithChordState()`，前缀匹配进入 pending，完整匹配触发 handler，失配或取消才把事件继续交给输入组件。
 
-保存后不用重启：`KeybindingSetup` 在 effect 中启动 `initializeKeybindingWatcher()`，用 chokidar 监听同一个文件，写入稳定后重新读取；热更新结果替换 React context 中的 bindings。文件不存在时继续使用默认绑定；JSON 结构错误、未知 context、非法 action、重复绑定或保留快捷键冲突，则回退默认绑定并记录警告，可运行 `/doctor` 集中查看。
+保存后不用重启，`KeybindingSetup` 在 effect 中启动 `initializeKeybindingWatcher()`，用 chokidar 监听同一个文件，写入稳定后重新读取；热更新结果替换 React context 中的 bindings。文件不存在时继续使用默认绑定；JSON 结构错误、未知 context、非法 action、重复绑定或保留快捷键冲突，则回退默认绑定并记录警告，可运行 `/doctor` 集中查看。
 
-三个常见陷阱：**把快捷键写进 `settings.json`**（这条路径读的是独立 `keybindings.json`）；**把 `/compact` 直接当 action**（slash command 需要写成 `command:compact` 并放在 `Chat` context）；**忽略终端和 Vim**（Ctrl+C、Ctrl+D 等硬编码或终端保留快捷键不能可靠重绑定；tmux、screen 可能先截获 Ctrl+B、Ctrl+A；Vim 模式下 Esc 先负责切换模式，不会被当成普通的 `chat:cancel`）。
+三个常见陷阱，**把快捷键写进 `settings.json`**（这条路径读的是独立 `keybindings.json`）；**把 `/compact` 直接当 action**（slash command 需要写成 `command:compact` 并放在 `Chat` context）；**忽略终端和 Vim**（Ctrl+C、Ctrl+D 等硬编码或终端保留快捷键不能可靠重绑定；tmux、screen 可能先截获 Ctrl+B、Ctrl+A；Vim 模式下 Esc 先负责切换模式，不会被当成普通的 `chat:cancel`）。
 
-实际实现步骤就是：运行 `/keybindings` → 选择正确 context 和 action → 用显式修饰键写 chord → 保存 → 看热更新提示 → 必要时用 `/doctor` 修复 warning。这个机制让用户只替换绑定数据，快捷键解析、优先级和事件传播仍由 Claude Code 的统一运行时负责。
+实际实现步骤就是，运行 `/keybindings` → 选择正确 context 和 action → 用显式修饰键写 chord → 保存 → 看热更新提示 → 必要时用 `/doctor` 修复 warning。这个机制让用户只替换绑定数据，快捷键解析、优先级和事件传播仍由 Claude Code 的统一运行时负责。
 
 </details>
 
@@ -534,7 +534,7 @@ return permissionPromptToolResultToPermissionDecision(
 
 ## 相关链接
 
-- **上一篇**：[33 终端编辑状态如何解析](./33-keybindings-and-vim-mode.md)——被无头模式绕开的终端输入层
-- **下一篇**：[35 配置如何分层、同步与裁剪](./35-settings-config-and-feature-flags.md)——无头调用的参数面与来源优先级
-- **平行阅读**：[06 Agent 查询循环如何持续推进](./06-agent-query-loop.md)——`ask()` 与 queryLoop 的关系
-- **平行阅读**：[12 权限引擎如何工作](./12-permission-engine.md)——三类权限宿主背后的规则
+- **上一篇**，[33 终端编辑状态如何解析](./33-keybindings-and-vim-mode.md)，被无头模式绕开的终端输入层
+- **下一篇**，[35 配置如何分层、同步与裁剪](./35-settings-config-and-feature-flags.md)，无头调用的参数面与来源优先级
+- **平行阅读**，[06 Agent 查询循环如何持续推进](./06-agent-query-loop.md)，`ask()` 与 queryLoop 的关系
+- **平行阅读**，[12 权限引擎如何工作](./12-permission-engine.md)，三类权限宿主背后的规则
