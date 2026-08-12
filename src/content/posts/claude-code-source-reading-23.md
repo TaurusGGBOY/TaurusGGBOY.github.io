@@ -427,6 +427,12 @@ export async function stopTask(taskId: string, context: StopTaskContext) {
 - `TaskStop → getTaskByType → kill` 拥有统一取消入口；
 - `notified + terminal status` 共同决定何时可以回收。
 
+### Task prompt 规定的是状态推进协议
+
+`TodoWriteTool/prompt.ts` 先给当前 coding session 一个轻量任务表：任务达到三步、存在明显复杂度、用户明确要求分解或有多个独立任务时才使用；开始执行后立刻把一个任务标成 `in_progress`，完成后改成 `completed`，其余保持 `pending`。字段也有写作约束，`content` 用祈使式，`activeForm` 用现在进行时。它与 Plan mode、记忆文件分别解决短期执行视图、审批前计划和长期事实沉淀。
+
+V2 的 `TaskCreate/Get/List/Update/Stop` prompt 把同一协议扩展到持久任务：Create 负责描述任务和团队分配，Get 读取完整描述与依赖，List 只展示可用的 pending、未拥有且未阻塞任务，Update 只在真正完成或删除时收束状态，Stop 按任务 ID 取消后台执行。prompt 规定模型什么时候改变状态；`Task`、AppState、output file 和终态通知才是实际持久化与回收边界。
+
 ## 源码映射
 
 | 主题 | 关键文件（`restored-src/src/`） | 关键函数 / 符号 | 证据 |

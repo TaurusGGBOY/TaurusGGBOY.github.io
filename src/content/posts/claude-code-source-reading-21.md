@@ -442,6 +442,12 @@ Claude Code 的 Command 系统是一层 REPL 内部路由。输入层先决定�
 
 这套分层让显式用户动作、能力扩展和 Agent 循环各自拥有清楚的职责。下一篇继续追踪其中最容易混淆的一支，一个 prompt 型 Command 怎样进一步成为可发现、可按需加载的 Skill。
 
+### processTextPrompt 是输入归一化与可观测性边界
+
+`restored-src/src/utils/processUserInput/processTextPrompt.ts` 里的 prompt 不是给模型看的行为指令，而是把不同宿主的输入变成统一消息。它同时接受字符串和 `ContentBlockParam[]`：首个文本块用于 interaction span、负向关键词和 keep-going 判断；最后一个文本块用于 `user_prompt` OTEL 事件，因为 IDE 的选区或附件可能排在真正用户问题之前。函数每次生成 prompt id，并对事件中的文本执行配置允许的脱敏。
+
+有图片时，文本与图片被组合成一个用户消息，再把 attachment messages 接在后面；没有图片时直接把原始字符串或内容块交给 `createUserMessage()`。无论输入形状如何，返回的 `shouldQuery` 都是 `true`。因此输入 prompt 的职责是“归一化、标记、可观测、送入 Query Loop”，不是在这里决定命令、Skill 或工具路由；后续路由才能在统一的消息形状上工作。
+
 ## 源码映射表
 
 路径前缀 `restored-src/` 表示 2.1.88 source map 还原源码。行号以当前仓库为准。

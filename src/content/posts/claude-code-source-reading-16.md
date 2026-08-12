@@ -461,6 +461,12 @@ async function getNestedMemoryAttachments(
 
 第三，**最终请求受运行时装配影响**。feature flag、构建裁剪、provider 缓存作用域、MCP 连接、Agent 定义、custom/append prompt 和压缩结果都会改变最终请求。本文能够证明的是默认控制流、优先级和回退值；具体机器上的请求仍需结合运行时配置验证。
 
+### 最终 system prompt 不是简单拼接，而是有优先级的选择器
+
+`restored-src/src/utils/systemPrompt.ts` 的 `buildEffectiveSystemPrompt()` 把最终 system prompt 的决策写成一条优先级链。最先处理 `overrideSystemPrompt`，它替换全部内容；没有 override 时，coordinator feature/环境与主线程 Agent 定义缺失的组合可以选择 coordinator prompt；再往下是 Agent 自带的 system prompt，proactive/KAIROS 路径会把它追加到默认 prompt，普通路径则由 Agent prompt 替代默认 prompt；然后才轮到 `customSystemPrompt`，最后回退到 `defaultSystemPrompt`。单独传入的 `appendSystemPrompt` 会在 override 之外追加到结果末尾。
+
+这个函数的参数也揭示了边界：`mainThreadAgentDefinition` 和 `toolUseContext` 决定运行时角色，`customSystemPrompt`、`defaultSystemPrompt`、`appendSystemPrompt` 是不同语义的输入，`overrideSystemPrompt` 则是替换开关。因而“system prompt 变了”至少要先问是替换、角色覆盖、默认回退还是末尾追加，不能只看最终字符串。
+
 ## 源码映射表
 
 路径前缀 `restored-src/` 表示 2.1.88 source map 还原源码。行号以当前仓库为准。

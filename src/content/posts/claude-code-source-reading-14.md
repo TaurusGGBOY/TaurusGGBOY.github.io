@@ -568,6 +568,12 @@ Edit 和 Write 都通过 `checkWritePermissionForTool` 检查写权限，Noteboo
 
 这里采用“冲突后停止并重新 Read”策略，而非自动三方合并；历史恢复遇到冲突时按目标备份覆盖，用户后来修改的语义不会参与合并。前者保护写入前的新鲜度，后者只保证恢复目标明确，二者都不提供跨文件事务。
 
+### prompt.ts 把“先读再写”变成模型级前置条件
+
+文件工具的 prompt 先给模型建立工作顺序，再由运行时做最后校验。Read 约束绝对路径、文件而非目录、`offset` 与 `limit` 的读取范围，单次最多展示 2000 行；图片、PDF 和 notebook 还要走各自的内容路径。Edit 明确要求先 Read 一次，保留行号前缀之后的精确缩进，`old_string` 默认必须唯一，只有显式 `replace_all` 才允许多处替换。Write 同样要求先 Read，已有文件优先 Edit，并避免未经请求创建文档。
+
+NotebookEdit 则把输入契约换成 notebook 绝对路径、0 起始的 `cell_number`，以及 replace、insert、delete 三种细胞操作。它们共同表达一个边界：模型不能凭记忆直接改文件，必须先建立当前内容与文件状态凭据；但 prompt 不是并发保护本身，`readFileState`、权限校验、原子写入和快照仍然决定最后能否落盘。
+
 ## 源码映射
 
 | 主题 | 关键文件（`restored-src/src/`） | 关键函数 / 符号 | 证据 |

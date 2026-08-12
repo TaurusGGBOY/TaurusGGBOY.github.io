@@ -494,6 +494,12 @@ macOS 使用对应的沙箱运行时和日志监控实现。Linux、WSL2 的依�
 
 同一个配置，在不同平台上可能落到不同的执行边界。平台分支本身就是安全模型的一部分。
 
+### Bash 与 PowerShell 的 prompt 也会把宿主状态翻译给模型
+
+`restored-src/src/tools/BashTool/prompt.ts` 不是一段固定的命令使用说明。它会把默认/最大 timeout、后台任务开关、git 场景、sandbox 配置和当前用户的临时目录拼进 prompt；若 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` 存在，后台说明就不会出现。它还要求独立调用尽量并行、存在依赖时才顺序执行，文件读写和搜索优先走专用工具；即使提示允许 unsandboxed，也要求有明确意图或证据，并按命令分别判断。真正的放行仍由 Permission 与 SandboxManager 完成，prompt 只是把可用边界提前暴露给模型。
+
+`PowerShellTool/prompt.ts` 又根据 desktop、PowerShell Core 或未知版本调整语法警告。desktop/未知环境会提醒不要依赖 `&&`、`||`、三元表达式、`??`、`?.` 和原生 stderr 重定向，并提示默认编码与 JSON 行为；Core 才允许相应现代语法。它同时明确要求终端操作才用 PowerShell，文件读取、编辑、写入、Glob、Grep 应交给专用工具。这里的有趣之处是，prompt 先做一次“平台编译”，但安全判定仍在模型之外保留最终否决权。
+
 ## 源码映射
 
 | 主题 | 关键文件（`restored-src/src/`） | 关键函数 / 符号 | 证据 |

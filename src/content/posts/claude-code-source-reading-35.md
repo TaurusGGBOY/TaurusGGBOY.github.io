@@ -428,6 +428,12 @@ export function getFeatureValue_CACHED_MAY_BE_STALE<T>(
 
 这张表也给出了静态分析的边界。我们可以从源码证明候选值、先后顺序、缓存失效和调用关系；无法仅凭 source map 证明具体发布构建、企业策略内容、远端实验分桶、网络刷新结果，以及某个长生命周期对象在真实会话里何时被重新创建。
 
+### ConfigTool 的 prompt 是从配置注册表实时生成的
+
+`ConfigTool/prompt.ts` 的 `generatePrompt()` 不维护一份手写的设置说明，而是遍历 `SUPPORTED_SETTINGS`，按 global/project 分类输出字段、布尔值 `true/false` 和可选值。model 单独走 `generateModelSection()`；语音设置只有在 VOICE_MODE 开启且 GrowthBook gate 允许时才出现，模型选项获取失败则走源码中的 fallback。
+
+因此同一个 Config 工具在不同构建、feature flag 和模型列表下，模型看到的帮助可能不同。prompt 只负责把当前 registry 翻译成可选参数，真正的读写仍受 setting source、权限和持久化逻辑控制；不能把 prompt 中出现的选项当成静态版本承诺。
+
 ## 源码映射表
 
 路径前缀 `restored-src/` 表示 2.1.88 source map 还原源码，行号以当前仓库为准。

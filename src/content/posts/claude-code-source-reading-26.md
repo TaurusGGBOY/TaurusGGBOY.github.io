@@ -514,6 +514,12 @@ z.strictObject({
 
 这里有一个很实用的判断标准，任务如果只是"并行阅读"，通常不需要 worktree；任务如果要写文件，worktree 才提供真正的目录隔离。类似地，一个一行 typo 未必值得进入复杂 Plan mode；但跨模块改造、权限变更或多个 Agent 协作时，先计划再执行可以让审批点和失败边界更清楚。
 
+### Plan 与 Worktree 的 prompt 都把用户意图放在副作用之前
+
+`EnterPlanModeTool/prompt.ts` 在外部会话里覆盖非平凡任务、需求不清、架构选择和风险较高修改等场景；ant 路径更窄，只在真正存在歧义时进入。两条路径都把 `AskUserQuestion` 作为澄清入口，并要求在计划完成前解决关键选择。进入计划不是“多写几段文字”，而是改变之后哪些工具调用仍可发生。
+
+`ExitPlanModeTool/prompt.ts` 只读取已经写入的 plan file，不要求把计划正文再塞进工具参数；有未解决问题时先问用户，也不要反问“plan ready?”。Worktree prompt 则要求只有用户明确提到 worktree 时才创建目录；退出当前 session 时由用户在保留与移除之间选择，目录有脏改动时还必须明确 `discard_changes`。这些是模型侧的意图门槛，权限状态、文件系统和清理函数仍是最终强制边界。
+
 ## 源码映射表
 
 路径前缀 `restored-src/` 表示 2.1.88 source map 还原源码。本篇所有证据均为静态源码可直接确认。

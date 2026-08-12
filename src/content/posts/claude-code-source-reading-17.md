@@ -697,6 +697,12 @@ const isMainThreadCompact =
 
 如果传统压缩失败，`compactConversation()` 对手动压缩添加错误通知，对自动压缩只抛出错误；`autoCompactIfNeeded()` 捕获后递增 `consecutiveFailures`，连续三次失败后停止继续尝试。旧消息不会因为一个失败的摘要请求被当成已成功重建。
 
+### compact.ts 的 prompt 其实是“无工具摘要协议”
+
+`restored-src/src/services/compact/prompt.ts` 给 compact agent 的第一条护栏是 `NO_TOOLS_PREAMBLE`：摘要阶段不提供工具，模型只能分析与总结，任何工具调用都只会浪费这一轮。部分压缩 prompt 还区分 `from` 与 `up_to` 两个方向，省略时按 `from` 回退；自定义说明只有非空时才追加，末尾会再次提醒当前没有工具。
+
+返回文本还要经过一次格式化协议。`formatCompactSummary()` 会剥离 `<analysis>`，把 `<summary>` 换成 `Summary:`，并折叠多余空白。`getCompactUserSummaryMessage()` 再根据 `suppressFollowUpQuestions`、`transcriptPath` 和 `recentMessagesPreserved` 决定是否要求继续、是否附带完整 transcript 路径、以及是否提醒模型最近消息仍在窗口中。压缩不是“模型写一段摘要就结束”，而是由无工具约束、方向参数、输出清洗和恢复提示共同组成的消息协议。
+
 ### Token 估算与预算追踪｜谁的数字可信
 
 压缩链路上有两类 token 数字，来源不同、新鲜度不同，

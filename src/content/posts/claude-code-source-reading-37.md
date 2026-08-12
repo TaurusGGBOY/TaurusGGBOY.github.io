@@ -489,6 +489,12 @@ private handleClose(closeCode: number): void {
 
 这四条共同说明，Bridge 只建立协议边界。输入、输出和控制可以跨机器流动，但 `cwd` 所属、workspace trust、transport 认证、session 关联和工具权限仍要逐层成立。
 
+### RemoteTrigger prompt 暴露的是另一条控制平面
+
+`RemoteTriggerTool/prompt.ts` 面向 claude.ai CCR 的 scheduled remote agents，允许模型在同一个工具契约下执行 list、get、create、update、run 等动作，并以原始 JSON 传递对应输入。OAuth token 在进程内使用，prompt 明确不允许把它通过 shell 暴露给用户或子进程。
+
+这条链路和本文前面讲的 Bridge WebSocket 数据平面不是同一个问题：Bridge 负责会话消息、环境和远端执行连接，RemoteTrigger 负责远程 Agent 的控制 API。二者都可能叫 remote，但 prompt 已经把受众、认证边界和动作集合分开；上线时仍要分别检查 feature gate、网络、权限与服务端状态。
+
 ## 源码映射表
 
 路径前缀 `restored-src/` 表示 2.1.88 source map 还原源码，行号以当前仓库为准。

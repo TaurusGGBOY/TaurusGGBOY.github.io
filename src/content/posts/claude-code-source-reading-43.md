@@ -451,6 +451,12 @@ export async function fetchOlderEvents(
 
 第六，**功能可见性由多层 gate 共同决定**。`KAIROS`、`PROACTIVE`、`AGENT_TRIGGERS` 是构建边界，`tengu_kairos`、`tengu_kairos_cron`、`tengu_kairos_brief` 等是运行时边界，目录信任、OAuth、remote bridge、auto memory 和本地环境变量还会继续裁剪能力。本文只说明 2.1.88 可见源码的组合逻辑。
 
+### Sleep 的 prompt 是“把等待交给调度器”
+
+`SleepTool/prompt.ts` 要求在用户明确说 sleep/rest、当前没有工作、等待外部事件或收到 `<tick>` 时使用 Sleep，而不是通过 Bash 执行 `sleep`、轮询或制造无意义的调用。Sleep 可以和其他工作并发等待；每次醒来仍然需要一次 API 调用，且 prompt cache 可能在五分钟后过期，所以等待时要权衡是否值得保持上下文。
+
+这把“暂时没有动作”从忙循环变成了可观察状态。模型让出控制权，调度器负责唤醒，醒来后再由 Query Loop 判断是否继续、汇报或结束；因此 KAIROS 的主动能力不只靠 Cron 和通知，也靠一个明确的等待协议。
+
 ## 源码映射表
 
 路径前缀 `restored-src/` 表示 2.1.88 source map 还原源码。**MISSING** 表示实现不在 source map 中。

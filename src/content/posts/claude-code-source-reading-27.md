@@ -512,6 +512,12 @@ mapToolResultToToolResultBlockParam(content, toolUseID) {
 
 这就是 MCP 集成最重要的实现取舍，把不稳定的外部连接收口在适配层里，把命名、权限、消息关联和 Agent 循环保留在本地统一契约里。
 
+### MCP prompt 有一个容易误读的“空壳”
+
+`MCPTool/prompt.ts` 的静态 prompt 与 description 都是空的；注释和实际工具说明由 `mcpClient.ts` 在拿到 server 返回的工具信息后覆盖。这意味着不能从一个空字符串推断 MCP 工具没有说明，只能确认说明的来源在运行时连接层，而非这个静态文件。
+
+`ListMcpResourcesTool/prompt.ts` 规定列出资源时可选 `server`，结果包含资源 URI、名称与描述等字段；`ReadMcpResourceTool/prompt.ts` 则要求同时给出 `server` 和 `uri`。资源因此不是被静态塞进 system prompt，而是先通过列表定位，再用明确的 server/URI 读取，最后和普通 tool result 一样回到 Query Loop。
+
 ## 源码映射表
 
 路径前缀 `restored-src/` 表示 2.1.88 source map 还原源码。本篇所有证据均为静态源码可直接确认；`list_changed` 通知缺失时的刷新时点属于静态边界之外的推断。

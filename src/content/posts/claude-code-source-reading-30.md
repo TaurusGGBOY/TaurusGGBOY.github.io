@@ -454,6 +454,12 @@ export const McpServerConfigSchema = lazySchema(() =>
 
 连接成功只表示通道可用；外部事件仍要经过校验、归一化、权限和状态更新，才能成为本轮执行的一部分。
 
+### Chrome prompt 是宿主边界的操作手册
+
+`restored-src/src/utils/claudeInChrome/prompt.ts` 的 `getChromeSystemPrompt()` 不只是告诉模型“浏览网页”。它要求先获取 tab context、不要复用过期 tab ID、除非用户明确指定否则新建 tab，并对对话框、控制台错误和录制 GIF 的步骤给出专门处理规则；同时区分用户真实 Chrome 与 WebBrowser 开发环境，避免把两种宿主的能力混为一谈。
+
+这类说明很难放进通用 Tool Schema，因为它描述的是宿主操作顺序和失败预防：先确认当前窗口，再进行点击/输入；遇到 dialog 先处理；需要演示时遵循录制约束。IDE 和 Chrome 都通过 MCP/RPC 接入，但 prompt 让模型知道“外部环境怎样被安全地使用”，协议本身只负责传输结构化消息。
+
 ## 源码映射表
 
 | 接入线 | 关键文件（`restored-src/src/`） | 关键函数 / 符号 | 证据 | 要点 |

@@ -83,6 +83,36 @@ CLAUDE.md 的加载层级也是 Prompt Engineering 的一部分。从最低到�
 
 问「怎么说」 → Prompt Engineering。问「知道什么」 → 下一层。
 
+### 42 个 `*prompt.ts` 文件对应哪篇文章
+
+这次按大小写不敏感的 `*prompt.ts` 文件名匹配，共得到 42 个文件。它们不是 42 套互相独立的“大 prompt”，而是分散在工具契约、输入路由、上下文压缩、协作协议和宿主适配边界上的小型行为协议。下面按本系列主文章归档；同一工具在运行时可能被另一篇文章再次引用，但只列一个主归属，避免重复解释。
+
+| 主文章 | 对应的 `prompt.ts` | 这组 prompt 补上的源码证据 |
+|---|---|---|
+| 09 工具契约与注册表 | `src/tools/ToolSearchTool/prompt.ts` | deferred tool 目录、`select:<name>` 选择语法与二级 Schema 装配 |
+| 13 沙箱与 Bash 安全 | `src/tools/BashTool/prompt.ts`、`src/tools/PowerShellTool/prompt.ts` | timeout、后台任务、sandbox、git、PowerShell edition 与专用工具路由 |
+| 14 文件工具与回滚 | `src/tools/FileReadTool/prompt.ts`、`FileEditTool/prompt.ts`、`FileWriteTool/prompt.ts`、`NotebookEditTool/prompt.ts` | Read-before-Write、2000 行读取上限、唯一替换与 notebook cell 操作 |
+| 15 搜索与检索工具 | `src/tools/GlobTool/prompt.ts`、`GrepTool/prompt.ts`、`WebFetchTool/prompt.ts`、`WebSearchTool/prompt.ts` | 本地搜索分工、Sources 链接、15 分钟缓存与 125 字符引文边界 |
+| 16 System Prompt 与项目上下文 | `src/utils/systemPrompt.ts` | override、coordinator、agent、custom、default、append 的最终优先级 |
+| 17 上下文压缩 | `src/services/compact/prompt.ts` | 无工具摘要、`from/up_to` 方向、摘要清洗与 transcript 恢复提示 |
+| 21 命令系统 | `src/utils/processUserInput/processTextPrompt.ts` | 字符串/内容块归一化、图片拼接、prompt id 与 OTEL 观测 |
+| 22 Skill 系统 | `src/tools/SkillTool/prompt.ts` | 1% 上下文预算、250 字符描述上限、bundled 与非 bundled 渐进披露 |
+| 23 Task Runtime | `src/tools/TodoWriteTool/prompt.ts`、`TaskCreateTool/prompt.ts`、`TaskGetTool/prompt.ts`、`TaskListTool/prompt.ts`、`TaskStopTool/prompt.ts`、`TaskUpdateTool/prompt.ts` | 任务状态、依赖、所有权、完成与后台停止的模型侧协议 |
+| 24 Subagent 委派 | `src/tools/AgentTool/prompt.ts` | agent allow/deny 交集、列表 attachment、fork 上下文和 cache 边界 |
+| 25 Agent Teams 与 Coordinator | `src/tools/TeamCreateTool/prompt.ts`、`TeamDeleteTool/prompt.ts`、`SendMessageTool/prompt.ts` | 团队创建/清理、成员命名、广播与结构化协作消息 |
+| 26 Plan Mode 与 Worktree | `src/tools/AskUserQuestionTool/prompt.ts`、`EnterPlanModeTool/prompt.ts`、`ExitPlanModeTool/prompt.ts`、`EnterWorktreeTool/prompt.ts`、`ExitWorktreeTool/prompt.ts` | 澄清、计划审批、显式 worktree 意图与脏目录清理 |
+| 27 MCP 集成 | `src/tools/MCPTool/prompt.ts`、`ListMcpResourcesTool/prompt.ts`、`ReadMcpResourceTool/prompt.ts` | 静态空壳、运行时覆盖、server/URI 资源读取 |
+| 29 LSP 集成 | `src/tools/LSPTool/prompt.ts` | 九种语言服务操作与 1 起始坐标契约 |
+| 30 Browser、IDE 与外部工具 | `src/utils/claudeInChrome/prompt.ts` | tab context、旧 ID、dialog、console、录制和真实 Chrome 宿主规则 |
+| 35 Settings、Config 与 Feature Flags | `src/tools/ConfigTool/prompt.ts` | 从 `SUPPORTED_SETTINGS`、GrowthBook 和模型列表动态生成帮助 |
+| 37 Bridge、Remote 与 Server | `src/tools/RemoteTriggerTool/prompt.ts` | CCR remote agent 控制动作与进程内 OAuth 边界 |
+| 42 AutoDream | `src/services/autoDream/consolidationPrompt.ts` | Orient、Gather、Consolidate、Prune/index 四阶段记忆整合 |
+| 43 Assistant/KAIROS | `src/tools/BriefTool/prompt.ts`、`ScheduleCronTool/prompt.ts`、`SleepTool/prompt.ts` | proactive 出口、未来 prompt、调度式等待 |
+| 44 Buddy Experience | `src/buddy/prompt.ts` | 一次性 companion attachment 与主 Agent 发言限制 |
+| 47 Notifications、Mailbox 与 Output Styles | `SendMessageTool/prompt.ts`、`BriefTool/prompt.ts`（跨章节复用） | 消息可见性、normal/proactive 出口与受众路由 |
+
+因此，查看某个 prompt 文件时，先按上表进入主文章，再沿着 prompt.ts 的调用方追到执行器。另有一个相邻但不计入本次匹配的文件：src/memdir/teamMemPrompts.ts 文件名是复数，它属于第 41 篇的团队记忆协议，不能因为不匹配单数 *prompt.ts 就漏掉。
+
 ### 第二层 Context Engineering｜控制「模型知道什么」
 
 一句话定位，**策划和维护最优 token 集，决定什么内容该进、该砍、何时注入。**

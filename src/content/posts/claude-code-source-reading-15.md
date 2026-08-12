@@ -339,6 +339,12 @@ return {
 
 主模型拿到 `tool_result` 后，可以缩小 pattern、翻到下一页、读取另一个范围、改用其他来源，或者向用户说明当前边界。这里才是分层搜索真正闭环的地方，工具负责产生可解释的观察，query loop 负责决定下一步。
 
+### 检索 prompt 还规定了证据怎样返回
+
+`GlobTool/prompt.ts` 把 Glob 定位成文件名/路径匹配器，结果按修改时间排序；`GrepTool/prompt.ts` 则要求使用专用 Grep，而不是通过 Bash 绕过 regex、glob/type、内容/文件名/count 输出模式和多轮检索边界。两者都在 prompt 层把“查找路径”和“读取内容”分开，降低模型用一条大命令吞掉上下文的倾向。
+
+网络检索的 prompt 更像证据协议。`WebSearchTool/prompt.ts` 动态写入当前月份和年份，并要求回答末尾有带 Markdown 链接的 Sources 区域，域名过滤也由参数控制。`WebFetchTool/prompt.ts` 把 URL 抓取限定为只读操作，优先 MCP fetch，结果有 15 分钟缓存；GitHub 地址优先走 `gh`。交给二次模型摘要时，预批准与非预批准 host 走不同提示分支，精确引文上限为 125 个字符，并额外处理引文与歌词限制。也就是说，工具 prompt 不只告诉模型“去哪里找”，还约束“找到之后怎样留下可复核证据”。
+
 ## 源码映射
 
 | 主题 | 关键文件（`restored-src/src/`） | 关键函数 / 符号 | 证据 |

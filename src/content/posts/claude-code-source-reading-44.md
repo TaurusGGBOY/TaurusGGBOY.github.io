@@ -344,6 +344,10 @@ Buddy 至少有三道不同的门，
 
 Buddy 的可见路径只消费消息和配置、写入临时 reaction、再把字符串画出来；它未接收 `ToolUseContext`、`canUseTool` 或 permission mode，也未注册自己的 query loop。
 
+### companionIntroText 还限制了 Buddy 的发言风格
+
+除了 attachment 的“一次性”门控，`buddy/prompt.ts` 的 `companionIntroText(name, species)` 还要求主 Agent 把 Buddy 当作独立 watcher：用户直接叫到 Buddy 名字时，主 Agent 最多回应一行，只回答相关部分，不解释 Buddy 的机制，也不替它叙述反应。这样做不是为了让主 Agent 变得沉默，而是把角色分工写进 prompt，避免旁观者气泡与主回答互相复述。
+
 ## 源码映射表
 
 路径前缀 `restored-src/` 表示 2.1.88 source map 还原源码。**MISSING** 表示实现不在 source map 中。

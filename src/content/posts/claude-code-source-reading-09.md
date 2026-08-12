@@ -455,6 +455,12 @@ export type ToolUseContext = {
 
 还有两个现实运行边界，一是当前用户最终能看到哪些工具，环境变量、构建特性、权限规则、MCP 连接和插件启用状态都会改变工具池，单看 `getAllBaseTools()` 不能还原某次真实会话；二是外部工具声明是否可信，Claude Code 会清理 MCP 返回的数据并把它适配到内部契约，但工具描述、JSON Schema 和只读注解仍来自外部 server。
 
+### ToolSearch 的 prompt：Schema 也可以延迟到需要时才出现
+
+`restored-src/src/tools/ToolSearchTool/prompt.ts` 说明，工具注册表还有一层“按需目录”。`getPrompt()` 会根据 `tengu_glacier_2xr` 或 ant 路径选择提示容器（`<system-reminder>` 或 `<available-deferred-tools>`），再给出 `select:<name>`、关键词和 `+` 前缀的精确选择语法。模型先看到的是可搜索的工具描述，不是所有 deferred tool 的完整 Schema。
+
+这个列表不是简单的静态黑名单。`isDeferredTool()` 会保留 `alwaysLoad` 工具，把 MCP 工具默认放入 deferred 集合，排除 ToolSearch 自己；fork sub-agent、KAIROS 的 Brief 与 bridge 下的 SendUserFile 还有各自的例外。选中之后，运行时才把工具 Schema 放回当前工具池。因此一次调用可能跨过两次查找：先在 prompt 目录里选能力，再在注册表里按名称找到可执行对象。工具描述也因此成为上下文预算和 prompt cache 的一部分，而不是只有 `Tool` 类型才需要关心的元数据。
+
 ### 全局工具清单矩阵（GLOBAL TOOL INVENTORY）
 
 下表列出 `restored-src/src/tools/` 中可确认的内置工具及 MCP 适配工具，每行回答六个问题。取值规则，`isReadOnly` / `isConcurrencySafe` / `isEnabled` 来自各工具文件的实现；“默认”指沿用 `buildTool` 的 `TOOL_DEFAULTS`；“，” 表示该文件内未静态确认。`maxResultSizeChars` 是“结果超过该字符数即持久化到文件、模型收到带路径预览”的阈值（`src/Tool.ts` 契约字段）。

@@ -588,6 +588,12 @@ Claude Code 的 Skill 系统复用 Command 与 Query Loop 执行内核。它把�
 
 它把"团队经验"变成一种声明式扩展，但执行能力仍来自 Claude Code 已有的 Query Loop、工具注册表、权限引擎和 Agent 运行时。下一篇就沿 fork 背后的公共设施继续往下看，Claude Code 怎样把一次长时间工作变成可创建、可观察、可取消并最终收束的 Task。
 
+### SkillTool 的 prompt 自己也有一个预算
+
+`restored-src/src/tools/SkillTool/prompt.ts` 把 Skill 发现做成渐进披露，而不是把所有 Markdown 全塞进上下文。默认清单预算按上下文窗口字符数的 1% 计算，源码常量是 `SKILL_BUDGET_CONTEXT_PERCENT = .01`、`CHARS_PER_TOKEN = 4`，默认至少 8000 字符；`SLASH_COMMAND_TOOL_CHAR_BUDGET` 可以覆盖它，单条非 bundled 描述还受 250 字符上限约束。Bundled prompt skill 不截断，非 bundled skill 则保留名称，或在预算内均匀截短描述。
+
+调用入口的 prompt 还明确要求：遇到对应任务必须先调用 Skill，不能把 Skill 当成一个无需展开的 CLI 别名。清单和生成结果会被 memoize，避免每轮重复计算。因此 Skill 系统有两次控制：先用小预算暴露“有哪些能力”，再按需加载正文；目录本身也是被管理的上下文资源。
+
 ## 源码映射表
 
 路径前缀 `restored-src/` 表示 2.1.88 source map 还原源码。行号以当前仓库为准。

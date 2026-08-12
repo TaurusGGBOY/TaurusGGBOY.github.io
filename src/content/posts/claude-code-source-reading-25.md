@@ -397,6 +397,12 @@ Coordinator mode 与 Agent Teams 使用独立开关。`isCoordinatorMode()` 同�
 
 这条边界很有价值，**共享工作闭合、成员生命周期处理完成、控制面可以安全回收，三者共同构成团队完成条件。**
 
+### Team prompt 把协作变成命名协议
+
+`TeamCreateTool/prompt.ts` 鼓励在用户明确要求 team/swarm/collaboration，或任务确实适合并行拆分时建立团队；Team 本身等同于一份带身份与所有权的 TaskList，成员类型要按工具能力选择。`TeamDeleteTool/prompt.ts` 则要求所有成员先 shutdown，再清理 `~/.claude/teams/{name}` 下的 team 与任务目录；仍有活跃成员时清理应失败，而不是静默删除状态。
+
+`SendMessageTool/prompt.ts` 把地址写成成员名或 `*` 广播，并提醒广播具有线性成本；普通字符串输出只有走 SendMessage 才会被 teammate 看见，控制协议还要使用结构化消息。启用 UDS inbox 时，地址也可能路由到 bridge/外部 peer。于是团队 prompt 的关键不是“让多个 Agent 聊天”，而是先规定受众、所有权、可见性和收束顺序。
+
 ## 源码映射
 
 | 主题 | 关键文件（`restored-src/src/`） | 关键函数 / 符号 | 证据 |

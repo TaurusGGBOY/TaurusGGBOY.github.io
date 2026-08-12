@@ -606,6 +606,12 @@ npx skills add TaurusGGBOY/agent-notification
 
 启动桌面端后，在 Claude Code 中运行 `/agent-notify-discovery`，让它发现通知服务并配置任务开始/结束事件。它不替代 mailbox 的可靠投递，也不把完整回答塞进弹窗；它只负责把「值得你回头看一眼」的信号送到桌面。项目地址仍是 [github.com/TaurusGGBOY/agent-notification](https://github.com/TaurusGGBOY/agent-notification)，欢迎试用、提 issue 或贡献适配。
 
+### SendMessage prompt 先规定可见性，再决定传输
+
+`SendMessageTool/prompt.ts` 的模型侧规则很短，却补上了 Mailbox 结构之外的一层语义：`to` 可以是 teammate 名称或 `*`，后者是线性成本的广播；普通文本不经过 SendMessage 就不会被 teammate 看见，控制类响应要走结构化消息。启用 UDS inbox 时，地址还可能落到 bridge/外部 peer。
+
+这解释了为什么“工具返回成功”不等于“对方已经收到并理解”。prompt 规定受众和消息形状，SendMessage 的路由决定进入哪个 mailbox，目标 Agent 的唤醒与消费则由任务状态、进程内队列或磁盘 inbox 完成。
+
 ## 源码映射表
 
 路径前缀 `restored-src/` 表示 2.1.88 source map 还原源码。**MISSING** 表示实现不在 source map 中。

@@ -639,6 +639,12 @@ enqueuePendingNotification({
 
 取消通过 task 的 `AbortController` 中止 query，状态进入 `killed`；普通异常进入 `failed`；成功结果由 `finalizeAgentTool()` 提取后进入 `completed`。无论哪种终态，清理路径都会关闭 Agent 专属 MCP、移除 hooks、释放文件缓存、清掉 todo，并终止它遗留的后台 shell task。
 
+### Agent prompt 还控制工具清单与上下文缓存边界
+
+`AgentTool/prompt.ts` 先对 agent 定义做 allowlist/denylist 交集，再把结果格式化成“类型、何时使用、可用工具”的行。完整 agent 列表可以直接放入 prompt，也可以作为 attachment 注入；`shouldInjectAgentListInMessages()` 受环境变量和 GrowthBook 控制，attachment 的目的之一是让相对稳定的工具描述不污染主 prompt cache。Coordinator 看到的是更瘦的共享说明，普通 agent 才收到完整的委派规则。
+
+Fork 路径还有一组非常具体的 prompt 边界：省略 `subagent_type` 表示沿用当前 agent，不能指定 model；共享缓存但不共享完整对话；不要偷看输出文件、竞争式读取或编造结果；要用指令式 prompt 提供新 agent 所需上下文，并只使用允许的工具。这里的 prompt 不是权限替代品，最终工具集合仍要经过 agent 配置、权限模式和运行时校验。
+
 ## 源码映射
 
 | 主题 | 关键文件（`restored-src/src/`） | 关键函数 / 符号 | 证据 |

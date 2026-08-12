@@ -515,6 +515,12 @@ async function getLSPDiagnosticAttachments(
 
 因此，LSP 最合理的位置是语义反馈层，比字符串搜索更懂语言，比真实 build/test 更轻、更快，但最终修改仍要回到文件工具、权限链、编译与测试验证。
 
+### LSP prompt 是一个固定的坐标与操作契约
+
+`LSPTool/prompt.ts` 把模型可调用的语言服务操作收敛为九类：`goToDefinition`、`findReferences`、`hover`、`documentSymbol`、`workspaceSymbol`、`goToImplementation`、`prepareCallHierarchy`、`incomingCalls` 和 `outgoingCalls`。需要位置的操作统一使用 `filePath`、`line`、`character`，源码约定 line/character 从 1 开始；调用层再把它们转换成协议需要的坐标。
+
+提示还明确了一个运行时前提：只有已配置并成功启动的语言服务器才有能力，未配置时应返回错误而不是假装文本搜索结果。因而 LSP prompt 的价值不在于列出所有语言特性，而在于把“操作名、坐标系、server 前置条件”固定成模型不会随意发挥的输入契约。
+
 ## 源码映射表
 
 | 层 | 关键文件（`restored-src/src/`） | 关键函数 / 符号 | 证据 | 要点 |
