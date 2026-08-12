@@ -1,6 +1,6 @@
 ---
 title: "Agent主题对比06｜配置、Provider、远程与运维"
-published: 2026-08-12T10:00:00+08:00
+published: 2026-08-12T10:03:00+08:00
 updated: 2026-08-12
 description: "比较三个 Agent 的配置分层、模型路由、认证、远程控制、观测、成本与迁移。"
 tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi"]

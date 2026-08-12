@@ -1,6 +1,6 @@
 ---
 title: "Agent主题对比07｜记忆与后台智能"
-published: 2026-08-12T10:00:00+08:00
+published: 2026-08-12T10:02:00+08:00
 updated: 2026-08-12
 description: "比较三个 Agent 的 session memory、团队记忆、压缩摘要与后台 Agent 边界。"
 tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi"]

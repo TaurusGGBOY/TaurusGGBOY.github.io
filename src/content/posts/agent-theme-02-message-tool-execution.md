@@ -1,6 +1,6 @@
 ---
 title: "Agent主题对比02｜消息、工具与副作用"
-published: 2026-08-12T10:00:00+08:00
+published: 2026-08-12T10:07:00+08:00
 updated: 2026-08-12
 description: "比较三个 Agent 的消息协议、工具注册、调度、权限、沙箱、回滚与检索闭环，覆盖 07 到 15。"
 tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi"]

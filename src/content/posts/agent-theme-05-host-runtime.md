@@ -1,6 +1,6 @@
 ---
 title: "Agent主题对比05｜宿主、状态与结构化 IO"
-published: 2026-08-12T10:00:00+08:00
+published: 2026-08-12T10:04:00+08:00
 updated: 2026-08-12
 description: "比较三个 Agent 的共享状态、TUI、键盘交互、SDK、App Server 与结构化输入输出。"
 tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi"]
