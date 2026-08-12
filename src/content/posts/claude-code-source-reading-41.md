@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读41：Memdir 与团队记忆如何检索和同步 🔬"
 published: 2026-07-24T16:47:28+08:00
-updated: 2026-08-04
+updated: 2026-08-12
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -256,6 +256,34 @@ return null
 combined prompt 把记忆限制为四类，`user`、`feedback`、`project`、`reference`。其中 `user` 始终 private；`feedback` 默认 private，只有明确的项目级约定才进入 team；`project` 可以二选一但强烈倾向 team；`reference` 通常 team。`parseMemoryType(raw)` 对非字符串、缺失值和未知字符串都返回 `undefined`，因此旧文件不会因为少一个 `type` 字段而完全失效。
 
 `buildCombinedMemoryPrompt(extraGuidelines?, skipIndex = false)` 位于 `restored-src/src/memdir/teamMemPrompts.ts`。`extraGuidelines` 省略时不追加宿主策略；`skipIndex` 为 `false` 时要求「写主题文件，再更新同目录 `MEMORY.md`」两步保存，为 `true` 时只写独立主题文件。
+
+### Prompt 里藏着一份小型存储协议
+
+如果只把 `buildCombinedMemoryPrompt()` 当成给模型看的说明文案，会漏掉它最有意思的一层：它是在运行时把宿主状态编译成模型的写入协议。函数先把 private/team 两个目录的真实路径和「目录已经存在」的前提写进 prompt，再按 `skipIndex` 选择保存步骤，最后叠加读取、过期校验和其他持久化边界。模型拿到的不是笼统的「你可以保存记忆」，而是「应该以什么格式、写到哪个作用域、是否还要更新索引」。
+
+`skipIndex` 这个参数尤其值得看。它的静态默认值是 `false`，`loadMemoryPrompt()` 再把 `tengu_moth_copse` 的运行时值传进来；同一个开关也被记忆提取 agent 使用。因此它不是少读一次文件的微优化，而是改变了模型维护目录的协议，
+
+| `skipIndex` | 提示词要求 | 直接后果 |
+| --- | --- | --- |
+| `false` | 先写带 frontmatter 的主题文件，再在同目录 `MEMORY.md` 写一行指针；索引不能放 frontmatter 或正文 | private 与 team 各有自己的入口索引，索引超过 200 行后会被截断 |
+| `true` | 只写主题文件，仍要维护 `name`、`description`、`type`，检查重复并更新过时记忆 | 不再要求这次写入同步维护 `MEMORY.md`，详细内容继续以独立 Markdown 文件存在 |
+
+这也解释了为什么索引条目被要求保持很短：它不是第二份正文，而是启动时加载的导航层。`MEMORY.md` 的行数上限是 200，字节上限是 25,000；主题文件则承担真正的细节。一个模型如果把完整结论直接塞进索引，即使信息没有丢失，也会把后续条目挤出启动上下文。
+
+用户指令在这里也不是简单的「说了记住就无条件落盘」。源码同时编码了几种容易被忽略的优先级，
+
+| 用户说法 | Prompt 规定的行为 |
+| --- | --- |
+| 「记住这个」 | 立即选择合适的类型和作用域，但仍受 `What NOT to save` 的排除项约束 |
+| 「忘掉这个」 | 找到对应条目并删除 |
+| 「不要使用记忆」 | 把 `MEMORY.md` 当作空文件；不应用、不引用、不比较，也不提及记忆内容 |
+| 「把当前任务计划存下来」 | 当前会话的计划和任务应使用 Plan/Tasks，不应污染长期 memory |
+
+所以「显式保存」只是跳过了普通的相关性判断，并没有给代码模式、Git 历史、调试步骤、`CLAUDE.md` 已有内容或临时任务状态开绿灯。甚至用户要求保存一份 PR 列表或活动摘要时，prompt 还要求追问其中真正反常、非显然、值得跨会话保留的部分。相反，「ignore memory」也不是先读出来再口头说一句“我不采纳”，而是要求模型在行为上把它当成不存在；这是一个很少见但很明确的隐私语义。
+
+还有一个可插拔的最后一公里：`loadMemoryPrompt()` 只在 `CLAUDE_COWORK_MEMORY_EXTRA_GUIDELINES` 非空且去掉首尾空白后仍有内容时，把它包装成 `extraGuidelines` 传入；`buildCombinedMemoryPrompt()` 会把这些字符串追加在内置的 memory/Plan/Tasks 规则之后、过去上下文搜索说明之前。也就是说，静态源码能确认「宿主可以追加策略」，却不能枚举某个运行环境实际注入了什么文本。读源码时，不能把 `teamMemPrompts.ts` 看到的内容误认为最终 system prompt 的全部。
+
+> 证据，`restored-src/src/memdir/teamMemPrompts.ts` 的 `buildCombinedMemoryPrompt()`；`restored-src/src/memdir/memdir.ts` 的 `loadMemoryPrompt()`；`restored-src/src/memdir/memoryTypes.ts` 的 `WHAT_NOT_TO_SAVE_SECTION`、`MEMORY_DRIFT_CAVEAT` 与 `TRUSTING_RECALL_SECTION`。`skipIndex` 的默认值、`tengu_moth_copse` 的传递、`extraGuidelines` 的环境变量来源和插入位置都能由源码确认；运行时最终是否存在某条宿主规则，则取决于外部环境。
 
 ### 注入通过索引与相关记忆两条路径限流
 
