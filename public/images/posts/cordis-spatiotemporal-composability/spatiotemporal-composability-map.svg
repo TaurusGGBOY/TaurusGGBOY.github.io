@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">Spatiotemporal composability mapped to Cordis and DeepSeek Harness</title>
+  <desc id="desc">A white technical diagram showing temporal composability through reversible effects, spatial composability through reactive dependencies, and their application in Cordis and DeepSeek Harness.</desc>
+  <defs>
+    <linearGradient id="blue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#eaf4ff"/>
+      <stop offset="1" stop-color="#d9edff"/>
+    </linearGradient>
+    <linearGradient id="green" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#eafbf4"/>
+      <stop offset="1" stop-color="#d8f6e8"/>
+    </linearGradient>
+    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f3efff"/>
+      <stop offset="1" stop-color="#e8e1ff"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#1f2937" flood-opacity="0.08"/>
+    </filter>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2878c8"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#15966a"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7456c8"/>
+    </marker>
+    <style>
+      .sans { font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .mono { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .title { font-size: 42px; font-weight: 800; letter-spacing: -0.02em; fill: #122033; }
+      .subtitle { font-size: 20px; fill: #516174; }
+      .section { font-size: 17px; font-weight: 800; letter-spacing: 0.13em; }
+      .section-small { font-size: 15px; font-weight: 800; letter-spacing: 0.1em; }
+      .node-title { font-size: 19px; font-weight: 750; fill: #15243a; }
+      .node-copy { font-size: 15px; fill: #536274; }
+      .code { font-size: 16px; font-weight: 700; fill: #334155; }
+      .note { font-size: 14px; fill: #68778a; }
+      .pill { font-size: 14px; font-weight: 750; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="980" fill="#ffffff"/>
+  <rect x="38" y="34" width="1524" height="912" rx="28" fill="#ffffff" stroke="#e2e8f0" stroke-width="2"/>
+
+  <text x="82" y="100" class="sans title">A Programming Paradigm for Spatiotemporal Composability</text>
+  <text x="84" y="137" class="sans subtitle">把动态插件系统拆成两个问题：副作用怎样撤回，依赖变化怎样驱动组件生命周期。</text>
+  <rect x="1275" y="76" width="224" height="38" rx="19" fill="#122033"/>
+  <text x="1387" y="101" text-anchor="middle" class="sans pill" fill="#ffffff">CORDIS → DSH</text>
+
+  <line x1="82" y1="169" x2="1518" y2="169" stroke="#e5eaf0" stroke-width="2"/>
+
+  <!-- Temporal panel -->
+  <rect x="82" y="198" width="694" height="406" rx="22" fill="url(#blue)" stroke="#b9daf7" stroke-width="2" filter="url(#shadow)"/>
+  <text x="116" y="244" class="sans section" fill="#2166a6">01  TEMPORAL COMPOSABILITY</text>
+  <text x="116" y="274" class="sans node-copy">组件离开时，能否只撤回自己安装的效果？</text>
+
+  <rect x="116" y="313" width="166" height="102" rx="16" fill="#ffffff" stroke="#a9d1f3"/>
+  <text x="199" y="348" text-anchor="middle" class="sans node-title">组件加载</text>
+  <text x="199" y="378" text-anchor="middle" class="mono code">effect(ctx)</text>
+  <text x="199" y="399" text-anchor="middle" class="sans note">执行 + 返回 inverse</text>
+
+  <line x1="288" y1="364" x2="323" y2="364" stroke="#2878c8" stroke-width="3" marker-end="url(#arrow-blue)"/>
+
+  <rect x="331" y="313" width="183" height="102" rx="16" fill="#ffffff" stroke="#a9d1f3"/>
+  <text x="422" y="348" text-anchor="middle" class="sans node-title">效果账本</text>
+  <text x="422" y="378" text-anchor="middle" class="mono code">g₁ ∘ g₂ ∘ …</text>
+  <text x="422" y="399" text-anchor="middle" class="sans note">按 LIFO 组合撤销</text>
+
+  <line x1="520" y1="364" x2="555" y2="364" stroke="#2878c8" stroke-width="3" marker-end="url(#arrow-blue)"/>
+
+  <rect x="563" y="313" width="178" height="102" rx="16" fill="#ffffff" stroke="#a9d1f3"/>
+  <text x="652" y="348" text-anchor="middle" class="sans node-title">组件卸载</text>
+  <text x="652" y="378" text-anchor="middle" class="mono code">dispose()</text>
+  <text x="652" y="399" text-anchor="middle" class="sans note">恢复自己的贡献</text>
+
+  <path d="M652 426 C652 492 490 512 422 443" fill="none" stroke="#2878c8" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow-blue)"/>
+  <text x="526" y="510" class="sans note" fill="#2166a6">逆序恢复；外部 emission 不自动回滚</text>
+  <rect x="116" y="463" width="625" height="91" rx="15" fill="#f7fbff" stroke="#c7e1f7"/>
+  <text x="139" y="495" class="sans code">形式化要求</text>
+  <text x="139" y="522" class="sans note">每个原子操作提供可信 inverse；跨组件效果满足独立性/可交换条件，</text>
+  <text x="139" y="544" class="sans note">否则只能按依赖顺序或受控协议撤回。</text>
+
+  <!-- Spatial panel -->
+  <rect x="824" y="198" width="694" height="406" rx="22" fill="url(#green)" stroke="#b8e8d3" stroke-width="2" filter="url(#shadow)"/>
+  <text x="858" y="244" class="sans section" fill="#137b59">02  SPATIAL COMPOSABILITY</text>
+  <text x="858" y="274" class="sans node-copy">依赖出现、消失或换 provider 时，组件怎样自动响应？</text>
+
+  <rect x="858" y="313" width="174" height="102" rx="16" fill="#ffffff" stroke="#b1e2cc"/>
+  <text x="945" y="348" text-anchor="middle" class="sans node-title">声明依赖</text>
+  <text x="945" y="378" text-anchor="middle" class="mono code">inject = { llm }</text>
+  <text x="945" y="399" text-anchor="middle" class="sans note">需求不是隐式全局变量</text>
+
+  <line x1="1038" y1="364" x2="1073" y2="364" stroke="#15966a" stroke-width="3" marker-end="url(#arrow-green)"/>
+
+  <rect x="1081" y="313" width="174" height="102" rx="16" fill="#ffffff" stroke="#b1e2cc"/>
+  <text x="1168" y="348" text-anchor="middle" class="sans node-title">上下文 provider</text>
+  <text x="1168" y="378" text-anchor="middle" class="mono code">key → fiber.uid</text>
+  <text x="1168" y="399" text-anchor="middle" class="sans note">记录 committed view</text>
+
+  <line x1="1261" y1="364" x2="1296" y2="364" stroke="#15966a" stroke-width="3" marker-end="url(#arrow-green)"/>
+
+  <rect x="1304" y="313" width="180" height="102" rx="16" fill="#ffffff" stroke="#b1e2cc"/>
+  <text x="1394" y="348" text-anchor="middle" class="sans node-title">通知与刷新</text>
+  <text x="1394" y="378" text-anchor="middle" class="mono code">notify → refresh</text>
+  <text x="1394" y="399" text-anchor="middle" class="sans note">激活 / 中性 / 卸载</text>
+
+  <path d="M1394 426 C1394 491 1220 513 1168 443" fill="none" stroke="#15966a" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow-green)"/>
+  <text x="1190" y="510" class="sans note" fill="#137b59">provider 先停止提供，consumer 排空后再撤回</text>
+  <rect x="858" y="463" width="626" height="91" rx="15" fill="#f7fdf9" stroke="#c4ecd7"/>
+  <text x="881" y="495" class="sans code">额外能力</text>
+  <text x="881" y="522" class="sans note">isolate 改变同一 key 的解析域；intercept 改变访问方式；</text>
+  <text x="881" y="544" class="sans note">两者都不等同于“把不可信代码装进安全沙箱”。</text>
+
+  <!-- Unified context -->
+  <rect x="82" y="636" width="1436" height="216" rx="22" fill="url(#violet)" stroke="#d0c4fa" stroke-width="2" filter="url(#shadow)"/>
+  <text x="116" y="681" class="sans section" fill="#6044b1">03  UNIFIED CONTEXT → APPLICATION</text>
+  <text x="116" y="711" class="sans node-copy">同一个 context 同时承载“我安装了什么”和“我需要什么”，fiber 负责生命周期与作用域。</text>
+
+  <rect x="116" y="742" width="228" height="77" rx="14" fill="#ffffff" stroke="#d3c9fa"/>
+  <text x="230" y="773" text-anchor="middle" class="mono code">ctx.effect / ctx.use</text>
+  <text x="230" y="798" text-anchor="middle" class="sans note">Cordis runtime</text>
+
+  <line x1="352" y1="781" x2="389" y2="781" stroke="#7456c8" stroke-width="3" marker-end="url(#arrow-violet)"/>
+
+  <rect x="397" y="742" width="228" height="77" rx="14" fill="#ffffff" stroke="#d3c9fa"/>
+  <text x="511" y="773" text-anchor="middle" class="mono code">scope + committed view</text>
+  <text x="511" y="798" text-anchor="middle" class="sans note">Agent / provider boundary</text>
+
+  <line x1="633" y1="781" x2="670" y2="781" stroke="#7456c8" stroke-width="3" marker-end="url(#arrow-violet)"/>
+
+  <rect x="678" y="742" width="228" height="77" rx="14" fill="#ffffff" stroke="#d3c9fa"/>
+  <text x="792" y="773" text-anchor="middle" class="mono code">LlmRuntime + tools</text>
+  <text x="792" y="798" text-anchor="middle" class="sans note">可替换 capability seams</text>
+
+  <line x1="914" y1="781" x2="951" y2="781" stroke="#7456c8" stroke-width="3" marker-end="url(#arrow-violet)"/>
+
+  <rect x="959" y="742" width="228" height="77" rx="14" fill="#ffffff" stroke="#d3c9fa"/>
+  <text x="1073" y="773" text-anchor="middle" class="mono code">turn / step / event log</text>
+  <text x="1073" y="798" text-anchor="middle" class="sans note">模型可见信息可重建</text>
+
+  <line x1="1195" y1="781" x2="1232" y2="781" stroke="#7456c8" stroke-width="3" marker-end="url(#arrow-violet)"/>
+
+  <rect x="1240" y="742" width="244" height="77" rx="14" fill="#ffffff" stroke="#d3c9fa"/>
+  <text x="1362" y="773" text-anchor="middle" class="sans node-title">可恢复的动态组合</text>
+  <text x="1362" y="798" text-anchor="middle" class="sans note">不是“任意副作用的回滚”</text>
+
+  <text x="116" y="894" class="sans note">保证前提：可信 inverse · 组件效果独立或有序 · 依赖图无环 · 生命周期最终 quiescent · 明确系统边界</text>
+  <text x="1484" y="894" text-anchor="end" class="sans section-small" fill="#6044b1">PAPER × SOURCE</text>
+</svg>
