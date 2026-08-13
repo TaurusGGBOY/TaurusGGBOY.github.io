@@ -1,6 +1,6 @@
 ---
 title: "Agent主题对比08｜体验层、反馈通道与系列收束"
-published: 2026-08-12T10:01:00+08:00
+published: 2026-08-12T10:08:00+08:00
 updated: 2026-08-12
 description: "比较三个 Agent 的 Buddy、语音、提示建议、通知、mailbox、输出风格与最终能力地图。"
 tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi"]

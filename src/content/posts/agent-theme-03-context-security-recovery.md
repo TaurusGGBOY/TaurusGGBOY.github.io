@@ -1,6 +1,6 @@
 ---
 title: "Agent主题对比03｜上下文、安全、恢复与会话"
-published: 2026-08-12T10:06:00+08:00
+published: 2026-08-12T10:03:00+08:00
 updated: 2026-08-12
 description: "比较 Claude Code、Codex CLI 与 Pi 的项目上下文、压缩、Hook、错误恢复和会话分支。"
 tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi"]

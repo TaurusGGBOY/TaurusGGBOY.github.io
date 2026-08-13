@@ -1,6 +1,6 @@
 ---
 title: "Agent主题对比04｜扩展、委派与多 Agent"
-published: 2026-08-12T10:05:00+08:00
+published: 2026-08-12T10:04:00+08:00
 updated: 2026-08-12
 description: "比较三个 Agent 的 commands、skills、tasks、subagents、teams、MCP、plugins、LSP 与宿主扩展。"
 tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi"]

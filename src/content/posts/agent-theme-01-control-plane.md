@@ -1,6 +1,6 @@
 ---
 title: "Agent主题对比01｜控制平面与主循环"
-published: 2026-08-12T10:08:00+08:00
+published: 2026-08-12T10:01:00+08:00
 updated: 2026-08-12
 description: "比较 Claude Code、Codex CLI 与 Pi 的控制平面、harness 和主循环，覆盖 00-a 到 06 的源码证据。"
 tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi"]
