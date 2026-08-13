@@ -15,8 +15,6 @@ imagePosition: "center"
 
 我在本地阅读了仓库当前源码，并对照了项目的 [README](https://github.com/deepseek-ai/deepseek-harness/blob/master/README.md) 和 [架构文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)。截至 2026 年 8 月 13 日，官方把它描述为 DeepSeek AI 开发的开源 Agent harness，当前仍处于 developer preview，存在兼容性破坏式变更。下面不把它写成“万能 Agent”，而是沿着源码说明它已经搭出了哪些骨架，以及这些骨架把什么问题留给了使用者。
 
-![DeepSeek Harness 产品与模块总览：插件装配、会话日志、模型适配器、工具执行和工作流。](/images/posts/deepseek-harness/deepseek-harness-overview.png)
-
 ## 先看结论：它不是一个更大的聊天循环
 
 DeepSeek Harness 的关键判断是：**Agent 的可扩展性不应该靠不断向主循环里塞条件分支，而应该靠插件、事件和可替换的能力提供者来完成。**
@@ -76,7 +74,7 @@ turn/end
 
 下面这张图把这条调用链和“哪些信息要落盘”放在一起看。它不是 UI 截图，而是按源码里的事件名称重新画的生命周期图。
 
-![DeepSeek Harness 一次 turn 的数据流：从 inbox、prompt 和 tool schema 到模型流、工具执行与 session log。](/images/posts/deepseek-harness/deepseek-harness-turn-flow.svg)
+![DeepSeek Harness 一次 turn 的数据流：从 inbox、prompt 和 tool schema 到模型流、工具执行与 session log。](/images/posts/deepseek-harness/deepseek-harness-turn-flow.png)
 
 这里有一个比普通聊天记录更严格的约束：**model-visible means logged。** 任何进入模型请求的内容，都必须能从 session log 重建。`deriveMessages()` 从事件日志投影模型历史，原始的 `assistant/chunk` 则保留流式回放和 UI 展示所需要的细粒度信息。fork、resume、transcript、telemetry 和持久化都围绕这条事件流展开。
 
