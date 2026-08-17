@@ -6,6 +6,8 @@ description: "梳理 A2A 的概念前身、协议演进与当前生态，并对�
 tags: ["agent-theme-comparison", "ai-agent", "a2a", "claude-code", "codex-cli", "pi", "deepseek-harness"]
 category: "AI / Architecture"
 draft: false
+image: "/images/posts/agent-theme-09-a2a-interoperability/a2a-cover.webp"
+imagePosition: "center"
 slug: "agent-theme-09-a2a-interoperability"
 series: "agent-theme-comparison"
 order: 9
@@ -40,6 +42,8 @@ verified_at: "2026-08-17"
 先把判断放在前面：A2A 是跨边界的 Agent 互操作协议，不是所有多 Agent 架构的底座。一个 CLI 内部的子 Agent、同一进程里的函数调用、文件 mailbox、thread tree、stdin/stdout RPC，都可能解决协作问题，却不因此变成 A2A。多数项目应该先把自己的内部运行时做好，再在真正需要跨产品协作的边界上增加 A2A adapter 或 gateway。
 
 ## 一、A2A 的前身：不是一条单线继承史
+
+![A2A 从早期 Agent 通信思想走向开放协议的演进示意图](/images/posts/agent-theme-09-a2a-interoperability/a2a-history.webp)
 
 ### 1. 早期 Agent 通信标准：KQML 与 FIPA
 
@@ -86,6 +90,8 @@ Google 的大规模 Agent 经验
 
 ## 二、A2A 到底标准化了什么
 
+![A2A 的 Agent Card、Task、Message、Artifact 与事件交付关系](/images/posts/agent-theme-09-a2a-interoperability/a2a-protocol-model.webp)
+
 ### 1. 面向“内部实现不可见”的 Agent
 
 A2A 的关键假设是：调用方不需要知道对方使用什么模型、什么 prompt、什么工具、什么 memory，甚至不需要知道对方内部是否还有其他子 Agent。它们通过公开能力和任务边界协作，而不是共享内部状态。
@@ -125,6 +131,8 @@ A2A 的关键假设是：调用方不需要知道对方使用什么模型、什�
 ## 三、现在已经有哪些项目用上了 A2A
 
 “用了 A2A”至少有四种含义：实现了 A2A server、实现了 A2A client、通过适配器接入、在样例或产品路线中提到 A2A。把它们混成一个列表，会高估生态成熟度。
+
+![A2A 生态中的协议 SDK、框架、产品客户端和网关](/images/posts/agent-theme-09-a2a-interoperability/a2a-ecosystem.webp)
 
 ### 1. 官方协议实现与工具链
 
@@ -168,6 +176,8 @@ Salesforce 的公开资料呈现出更谨慎的成熟度信号：2025 年的 [Ag
 ## 四、Claude Code、Codex、Pi、DeepSeek harness：有 A2A 吗
 
 下面的判断采用一个严格口径：如果没有看到 Agent Card、标准 Task/Message/Artifact、A2A binding 和跨边界发现/认证，就不把“相似机制”写成 A2A。四个项目的代码快照与版本会变化，以下结论以 2026 年 8 月 17 日可见的公开资料和源码对照为准；“未发现”不等于证明项目内部不存在未公开实验。
+
+![四个 Agent 项目的内部协作机制与外部 A2A 边界对照](/images/posts/agent-theme-09-a2a-interoperability/a2a-four-projects.webp)
 
 ### 1. Claude Code：Agent Teams 是内部协作，不是公开 A2A
 
@@ -231,6 +241,8 @@ DeepSeek harness 因为已有 provider、session、inbox、continuation 和 adap
 共同点是：四个项目都已经实现了 A2A 的一部分“形状”——消息、任务、状态、取消、长任务或进程边界。差异在于它们把这些语义绑定在自己的运行时里，而 A2A 要求把它们提升成跨实现可互操作的外部契约。
 
 ## 五、Agent 项目是否需要完整实现 A2A
+
+![从外部 Agent 到 A2A gateway，再到内部 runtime、模型、工具和数据的分层决策架构](/images/posts/agent-theme-09-a2a-interoperability/a2a-decision.webp)
 
 ### 1. 先问边界，不要先问协议
 
