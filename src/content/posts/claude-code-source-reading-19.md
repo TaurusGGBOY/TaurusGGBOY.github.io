@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读19：如何重试、降级并恢复执行"
 published: 2026-07-24T16:47:06+08:00
-updated: 2026-08-04
+updated: 2026-08-24
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -48,7 +48,7 @@ imagePosition: "left"
 ## 介绍本章的一些概念
 
 - 错误恢复是**分层的控制流**，API 层负责退避和换模型，流层负责决定能否降级，工具层把失败回填为 `tool_result`，query loop 最后决定继续还是结束。
-- `shouldRetry()` 不是"一律重试"，**401 会刷新凭证后重试，429 对普通订阅用户默认不重试（Enterprise 可重试），400 等 4xx 不重试**，是否值得重放取决于凭证是否会刷新、连接是否会重建。
+- `shouldRetry()` 不是"一律重试"，**连接错误、408/409、5xx 进入退避；401 会刷新凭证并重建 client 后再试；429 对普通订阅用户默认不重试（Enterprise / persistent 模式可重试）；400 等 4xx 通常直接结束**，是否值得重放取决于凭证是否会刷新、连接是否会重建。
 - 连续 529 计数达到 **`MAX_529_RETRIES = 3`** 且配置了 `fallbackModel` 时触发换模；换模前必须**清空失败轮的 assistant 消息与 tool 暂存**，否则会产生孤儿 `tool_result` 甚至重复执行工具。
 - 工具失败**不盲目重做副作用**，构造 `is_error: true` 且与 `tool_use_id` 配对的 `tool_result` 交回模型，让模型检查现场、换参数或向用户说明。
 - 流式请求可降级为非流式，但源码保留**关闭开关**（`CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` / `tengu_disable_streaming_to_non_streaming_fallback`），因为部分流可能已经启动了工具，重做采样可能造成重复副作用。
@@ -137,27 +137,31 @@ export function classifyAPIError(error: unknown): string {
 
 这里要特别注意，这一步只生成**诊断分类**。比如 401 会被标成认证类错误，但某些路径会刷新凭证后重试；429 会被标成 rate limit，但订阅用户、企业用户和无人值守模式的处理会分流。标签负责把错误说清楚，重试控制流由 `shouldRetry()` 和外层上下文决定。
 
-### 错误类型 → 恢复动作矩阵
+### 先给结论｜直接错误、自动重试与降级
 
-[inference] 本文把分散在源码各层的错误分类、恢复动作、重试上限与最终呈现汇成一张矩阵。错误类型与恢复动作来自 [source]；"重试上限"中未直接列出的数值（如 `maxRetries` 默认 10）已在文中对应小节确认；运行时开关行为属于 [runtime]。
+[inference] 本文把分散在源码各层的错误分类、恢复动作、重试上限与最终呈现汇成一张矩阵。错误类型与恢复动作来自 [source]；"重试上限"中未直接列出的数值（如 `maxRetries` 默认 10）已在文中对应小节确认；订阅类型、`querySource`、功能开关和服务端 header 属于 [runtime]。
 
-| 错误类型 | 分类标签 | 恢复动作 | 重试上限 | 最终呈现 |
+| 返回/错误形状 | 分级 | 源码动作 | 重试或降级边界 | 最终呈现 |
 | --- | --- | --- | --- | --- |
-| 用户取消（`AbortError` / `APIUserAbortError`） | `aborted` | 清理资源，跳过一切重试 | 0 | `reason: aborted_streaming` / `aborted_tools` |
-| 连接错误（`APIConnectionError`、`ECONNRESET`、`EPIPE`） | `connection_error` | 重建 client；必要时禁用 keep-alive 重连 | `maxRetries + 1`（默认共 11 次尝试） | 最终 assistant error |
-| API 超时 | `api_timeout` | 退避后重试；流式可降非流式 | 同 `maxRetries + 1` | `api_retry` system message |
-| 429 限流 | `rate_limit` | 订阅用户默认不重试；Enterprise / persistent / `x-should-retry: true` 可重试 | 取决于 `shouldRetry()` 与订阅类型 | synthetic assistant message |
-| 529 过载 | `server_overload` | 指数退避；连续 3 次后 `fallbackModel` 换模 | `MAX_529_RETRIES = 3` | warning，`Switched to ... due to high demand` |
-| 5xx | `server_error` | 退避重试 | `maxRetries + 1` | assistant error `server_error` |
-| 401 / OAuth token revoked | 认证类 | 刷新凭证 / 清缓存后重试 | 每次重发前重新判断 | ， |
-| 400 等其他 4xx | `client_error` | 不重试 | 0 | 交给用户修复输入 |
-| prompt too long | `prompt_too_long` | withheld → drain collapse → reactive compact → 重建消息重试 | `hasAttemptedReactiveCompact` 防死循环 | `transition.reason = 'reactive_compact_retry'` |
-| max_output_tokens | `max_output_tokens` | 输出上限升到 64K；仍截断则追加 meta message 从中断处继续 | `MAX_OUTPUT_TOKENS_RECOVERY_LIMIT` | 达到上限才显示被 withheld 的错误 |
-| 工具异常 | ， | 回填 `is_error: true` 且配对 `tool_use_id` 的 `tool_result` | 不自动重试 | 下一轮模型决定修正或解释 |
-| Hook 非零退出 | `non_blocking_error` / `blocking` | 退出码 2 → blocking feedback；其他非零 → attachment | ， | 模型可见反馈或用户可见附件 |
-| 流中断 / 不完整块 | ， | 降级 `executeNonStreamingRequest()` | 1 次（可被 `disableFallback` 关闭） | 非流式结果或原错误 |
+| 用户取消（`AbortError` / `APIUserAbortError`） | 直接结束 | 清理流和上下文，不生成 assistant API error | 0 | `reason: aborted_streaming` / `aborted_tools` |
+| `refusal` 停止原因 | 直接结束 | 这是模型的完整响应，不进入 API 重试 | 0 | Usage Policy refusal message；交互式 CLI 会提示编辑或换会话 |
+| 400、404、无效模型、账单/余额错误 | 直接错误 | 不重放原请求；提示用户修复输入、权限、模型或账单 | 0（专门恢复分支除外） | `invalid_request` / `billing_error` |
+| 通用 403 | 直接错误 | 通常要求重新登录或切换配置；OAuth revoked 与 CCR 是例外 | 例外路径才重试 | `authentication_failed` |
+| 401 / OAuth token revoked | 自动重试 | 清缓存、刷新 OAuth token、重建 client 后再次调用；耗尽后转终态消息 | 受 `maxRetries` 限制，默认最多 11 次尝试 | `authentication_failed` |
+| 连接错误、408/409、5xx | 自动重试 | 重建陈旧 client，按 `Retry-After` 或指数退避 + jitter 等待 | `maxRetries + 1`，默认 11 次尝试 | 等待中 `api_retry`，耗尽后 `unknown` / `server_error` |
+| 429 | 条件重试 | 普通 Claude 订阅默认不重试；Enterprise、非订阅、persistent 或允许的 header 才进入重试 | 由订阅、模式和 header 决定 | `rate_limit` |
+| 529 / `overloaded_error` | 重试后降级 | 前台先重试；连续 3 次且满足模型条件、配置 `fallbackModel` 时换模；后台 source 可跳过重试 | `MAX_529_RETRIES = 3` 是换模门槛，不是总 API 重试上限 | warning：`Switched to ... due to high demand`，否则 `server_overload` |
+| `prompt too long` / 可由上下文恢复的 413 | 降级为修复输入 | withholding → context collapse / reactive compact → 重建消息再试；失败后才显示错误 | `hasAttemptedReactiveCompact` 防循环 | `transition.reason = 'reactive_compact_retry'`，最终 `prompt_too_long` |
+| `max_tokens` / `model_context_window_exceeded` | 降级为续写 | 先尝试 64K 上限；仍截断就注入 meta user message，让模型从中断处继续 | `MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3` | 耗尽后显示 `max_output_tokens` |
+| 流中断 / 不完整块 / idle watchdog | 降级传输方式 | 先切到非流式请求一次；切换后的请求仍走 `withRetry()` 的 API 重试策略 | 可用开关关闭；已启动的工具可能造成重复副作用 | 非流式结果或原错误 |
+| 工具异常 | 回填给模型 | `is_error: true` 且配对 `tool_use_id` 的 `tool_result`，不由执行器自动重做 | 0；下一轮由模型决定 | 下一轮模型检查现场、改参数或解释 |
+| Hook 非零退出 | 归并 outcome | 退出码 2 / `decision: 'block'` 形成 blocking feedback；其他非零通常是 attachment | 不走 API 重试 | 模型可见反馈或用户可见附件 |
 
-矩阵中每一行都可以在正文对应小节找到源码证据。记住三件事，**401/429/529 这三类最容易混淆**（一个刷新凭证、一个看订阅、一个看连续计数）；**工具与 Hook 失败不走 API 重试**（前者回填给模型，后者归并 outcome）；**模型输入类错误先改状态再重试**（压缩、升上限），指数退避不会让同一份过长输入变短。
+矩阵中每一行都可以在正文对应小节找到源码证据。记住四件事，**401/429/529 这三类最容易混淆**（一个刷新凭证、一个看订阅、一个看连续计数）；**`refusal` 和 `max_tokens` 是模型已经返回了完整响应，不是网络异常**；**工具与 Hook 失败不走 API 重试**（前者回填给模型，后者归并 outcome）；**流式降级不是无成本重放**，因为失败流可能已经越过工具副作用边界。
+
+这里还要把两个“看起来像错误”的模型返回单独拎出来。`getErrorMessageIfRefusal(stopReason, model)` 只在 `stopReason === 'refusal'` 时生成 Usage Policy 提示；它不是 `APIError`，所以不会经过 `shouldRetry()`。`stop_reason === 'max_tokens'` 和 `stop_reason === 'model_context_window_exceeded'` 也来自一个已经完成协议收口的模型响应，`claude.ts` 把它们标成 `max_output_tokens`，交给 `queryLoop()` 的续写恢复分支，而不是重新走网络退避。这里的“重试”其实是改变状态后的下一轮模型调用。
+
+相反，`413` 不能一概而论：源码只对能识别为 prompt/context overflow 的形状进入压缩恢复；请求体过大、PDF 页数超限、图片尺寸超限等分支会直接生成 `invalid_request`，不会因为指数退避而变小。
 
 ### API 重试｜每次重发前都重新判断环境
 
@@ -368,7 +372,7 @@ const result = yield* executeNonStreamingRequest(
 
 > 证据，[source] `restored-src/src/services/api/claude.ts` 的 `queryModelWithStreaming()` 错误分支（2.1.88 source map 还原源码）。
 
-函数说明，这段来自 `queryModelWithStreaming()` 的错误分支。默认可从失败的 streaming 请求降到 non-streaming 请求；环境变量或远端开关启用时，则把原错误交回 `withRetry()`，不做中途降级。流式错误本身若是 529，会以初值 1 进入后续连续 529 计数。
+函数说明，这段来自 `queryModelWithStreaming()` 的错误分支。默认可从失败的 streaming 请求降到 non-streaming 请求；环境变量或远端开关启用时，则把原错误交回 `withRetry()`，不做中途降级。流式错误本身若是 529，会以初值 1 进入后续连续 529 计数。切换到非流式只是改变传输方式，非流式请求内部仍由 `withRetry()` 按 API 错误规则决定是否继续重试。
 
 参数说明，`CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` 使用 truthy 环境变量解析；远端开关的静态默认值是 `false`。`onStreamingFallback` 可以是 `undefined`，省略回调仍可降级。`signal` 是同一个 `AbortSignal`，取消仍能中断非流式请求。`querySource` 和 `fallbackModel` 都可为 `undefined`，分别影响 529 重试策略与是否允许最终换模。
 
