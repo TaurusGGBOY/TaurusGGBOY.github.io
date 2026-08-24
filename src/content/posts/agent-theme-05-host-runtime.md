@@ -35,9 +35,9 @@ verified_at: "2026-08-12"
 ---
 
 
-> Agent 的“产品体验”不是模型回答外面套一层颜色，而是把执行状态、输入焦点、取消、进度和结构化结果可靠地翻译给人或另一个程序。
+> Agent 的“产品体验”是把执行状态、输入焦点、取消、进度和结构化结果可靠地翻译给人或另一个程序。
 
-本篇覆盖 Claude Code 源码解读 31–34：共享 AppState、Ink TUI/REPL、键绑定/Vim mode、headless SDK 与 structured IO。四章看似属于 UI，实际上都在回答一个运行时问题：谁能观察和改变 agent 的状态，状态如何跨宿主边界流动。
+本篇覆盖 Claude Code 源码解读 31–34：共享 AppState、Ink TUI/REPL、键绑定/Vim mode、headless SDK 与 structured IO。它们共同回答一个运行时问题：谁能观察和改变 agent 的状态，状态如何跨宿主边界流动。
 
 ![Agent 宿主、共享状态与结构化 IO](/images/posts/agent-theme-05-host-runtime/agent-theme-05-host-runtime-handdrawn.png)
 

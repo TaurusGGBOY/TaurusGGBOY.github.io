@@ -13,7 +13,7 @@ imagePosition: "left"
 
 上一篇留下的问题是，**如果任务要求识别一张其内容超过当前上下文容量的图片，这次 `tool_use` 会不会失败、又会在哪一层失败？**
 
-答案先放在前面，**不一定，而且即使最终失败，也不一定是这次 `tool_use` 本身失败。要先区分 Read 的单图预算、图片硬限制和整段对话的上下文窗口。**
+本篇先划清三个失败边界：Read 的单图预算、图片硬限制和整段对话的上下文窗口。即使最终失败，也不一定是这次 `tool_use` 本身失败。
 
 当模型调用 `Read` 读取图片时，`FileReadTool.validateInput` 并不检查图片能否装进当前上下文。Schema、`validateInput`、PreToolUse 和权限都通过以后，程序才在 `tool.call` 内进入 `readImageWithTokenBudget()`，
 

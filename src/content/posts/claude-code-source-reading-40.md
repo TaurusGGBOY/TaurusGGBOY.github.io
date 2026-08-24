@@ -13,7 +13,7 @@ imagePosition: "left"
 
 上一篇留下的问题是，**普通用户能把 Claude Code 更新到内部版本或测试版本（即非 `stable`、`latest` 渠道的版本）吗？**
 
-答案先放在前面，**普通用户不能仅靠修改本地配置获得内部版本或测试版本；只有当目标版本的二进制或 npm 包本来就对外发布时，才可能通过公开安装流程安装它。** 源码里“能解析这个版本号”“能找到这个版本的下载物”“当前用户有权限访问下载源”是三件不同的事。
+**普通用户不能仅靠修改本地配置获得内部版本或测试版本；只有当目标版本的二进制或 npm 包本来就对外发布时，才可能通过公开安装流程安装它。** 源码里“能解析这个版本号”“能找到这个版本的下载物”“当前用户有权限访问下载源”是三件不同的事。
 
 ### `claude update` 只更新渠道，不选择任意版本
 
@@ -25,7 +25,7 @@ imagePosition: "left"
 
 随后真正下载时，`downloadVersion()` 按 `USER_TYPE` 分流，内部用户走 Anthropic 的 Artifactory，外部用户走公开的 GCS 二进制仓库。外部路径会请求 `<version>/manifest.json`，再根据平台下载并校验二进制。如果某个内部版本没有同步到公开仓库，普通用户即使输入了正确的版本号，也只会在 manifest 或平台文件下载处失败。
 
-因此，普通用户实际可以这样理解，
+对普通用户而言，分界是：
 
 ```text
 claude install 2.1.88       # 目标版本已公开时，可以安装
@@ -52,7 +52,7 @@ npm view @anthropic-ai/claude-code versions --json
 
 但 npm 的版本列表只代表公共 registry 能看到的发布物。内部 Artifactory 中存在的包、未发布的 nightly 或 CI 测试夹具，不会因为把版本号写进命令就自动出现在公共 registry；下载权限和平台包仍然是硬边界。
 
-因此准确答案是，**普通用户不能通过修改本地配置更新到内部或测试版本；`claude update` 只支持 `latest` / `stable`。如果某个非渠道版本被明确公开到二进制仓库或 npm，普通用户可以用 `claude install <version>` 或 npm 安装它；否则就需要内部构建、私有下载源和相应权限。**
+结论是，**普通用户不能通过修改本地配置更新到内部或测试版本；`claude update` 只支持 `latest` / `stable`。如果某个非渠道版本被明确公开到二进制仓库或 npm，普通用户可以用 `claude install <version>` 或 npm 安装它；否则就需要内部构建、私有下载源和相应权限。**
 
 ## 介绍本章的一些概念
 
@@ -80,7 +80,7 @@ npm view @anthropic-ai/claude-code versions --json
 
 上一篇（39）的问题是，**普通用户能把 Claude Code 更新到内部版本或测试版本（即非 `stable`、`latest` 渠道的版本）吗？**
 
-答案先放在前面，**普通用户不能仅靠修改本地配置获得内部版本或测试版本；只有当目标版本的二进制或 npm 包本来就对外发布时，才可能通过公开安装流程安装它。** 源码里「能解析这个版本号」「能找到这个版本的下载物」「当前用户有权限访问下载源」是三件不同的事。
+**普通用户不能仅靠修改本地配置获得内部版本或测试版本；只有当目标版本的二进制或 npm 包本来就对外发布时，才可能通过公开安装流程安装它。** 源码里「能解析这个版本号」「能找到这个版本的下载物」「当前用户有权限访问下载源」是三件不同的事。
 
 ### `claude update` 只更新渠道，不选择任意版本
 
@@ -92,7 +92,7 @@ npm view @anthropic-ai/claude-code versions --json
 
 随后真正下载时，`downloadVersion()` 按 `USER_TYPE` 分流，内部用户走 Anthropic 的 Artifactory，外部用户走公开的 GCS 二进制仓库。外部路径会请求 `<version>/manifest.json`，再根据平台下载并校验二进制。如果某个内部版本没有同步到公开仓库，普通用户即使输入了正确的版本号，也只会在 manifest 或平台文件下载处失败。
 
-因此，普通用户实际可以这样理解，
+对普通用户而言，分界是：
 
 ```text
 claude install 2.1.88       # 目标版本已公开时，可以安装
@@ -119,7 +119,7 @@ npm view @anthropic-ai/claude-code versions --json
 
 但 npm 的版本列表只代表公共 registry 能看到的发布物。内部 Artifactory 中存在的包、未发布的 nightly 或 CI 测试夹具，不会因为把版本号写进命令就自动出现在公共 registry；下载权限和平台包仍然是硬边界。
 
-因此准确答案是，**普通用户不能通过修改本地配置更新到内部或测试版本；`claude update` 只支持 `latest` / `stable`。如果某个非渠道版本被明确公开到二进制仓库或 npm，普通用户可以用 `claude install <version>` 或 npm 安装它；否则就需要内部构建、私有下载源和相应权限。**
+结论是，**普通用户不能通过修改本地配置更新到内部或测试版本；`claude update` 只支持 `latest` / `stable`。如果某个非渠道版本被明确公开到二进制仓库或 npm，普通用户可以用 `claude install <version>` 或 npm 安装它；否则就需要内部构建、私有下载源和相应权限。**
 
 ## 正文
 

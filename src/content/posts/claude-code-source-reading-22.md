@@ -48,7 +48,7 @@ function hasCommandWithArguments(
 
 如果要修源码，不能简单地把“有空格就不提示”这一保护删掉，它原本是为了避免用户已经输入命令参数时，Tab/Enter 又选中另一条命令。更准确的修复是以 `cursorOffset` 切出光标处的 `/token`，只对 token 做匹配，并把光标后的原文作为 suffix 保留；这也解释了为什么当前实现会在用户“回到开头”时暴露问题。
 
-下文的控制流都以 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 为证据；代码块只保留真实源码中与 Skill 路由有关的字段。
+本篇的控制流以 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 为证据；代码块只保留真实源码中与 Skill 路由有关的字段。
 
 ## 介绍本章的一些概念
 

@@ -13,9 +13,7 @@ imagePosition: "left"
 
 上一篇留下的问题是，**如果用户刚发完一条消息，却马上发现有问题并打断（例如按 `Esc` / `Ctrl+C`），这条消息还会出现在后面的对话里吗？**
 
-答案先放在前面，在 **transcript（持久会话日志）**里，这条用户消息通常会先被落盘；在 **当前会话视图**里，REPL 可能会把它回滚成“未发送”，所以你看到的可能是看起来没记住这条消息。
-
-关键点在于两层行为不同。
+这条消息在两层中的命运不同：在 **transcript（持久会话日志）**里通常会先被落盘；在 **当前会话视图**里，REPL 可能会把它回滚成“未发送”，所以页面看起来可能没有记住它。
 
 先是持久化层，`QueryEngine.submitMessage()` 在调用模型前就持久化用户输入。源码里是先 `this.mutableMessages.push(...messagesFromUserInput)`，再在 `persistSession && messagesFromUserInput.length > 0` 分支里执行 `recordTranscript(messages)`。注释明确写了原因，如果进程在 API 返回前被中断，transcript 也能保存用户消息，`--resume` 才不会拿不到会话。
 

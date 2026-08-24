@@ -36,9 +36,9 @@ verified_at: "2026-08-12"
 ---
 
 
-> 长会话真正难的不是把 token 塞进窗口，而是在删掉、摘要、重试和恢复之后，模型仍然知道哪些约束有效、哪些副作用已经发生。
+> 长会话的核心问题不是把 token 塞进窗口，而是在删掉、摘要、重试和恢复之后，模型仍然知道哪些约束有效、哪些副作用已经发生。
 
-本篇覆盖 Claude Code 源码解读 16–20：项目上下文、四层压缩、Hook 生命周期、错误恢复、session/resume/branch。前两篇讨论了控制循环和工具副作用；这里讨论它们的“时间维度”：一次请求如何继承过去，失败之后如何继续，重启之后如何不越过权限边界。
+本篇覆盖 Claude Code 源码解读 16–20：项目上下文、四层压缩、Hook 生命周期、错误恢复、session/resume/branch。前两篇讨论控制循环和工具副作用；这里把它们放进时间维度，追踪一次请求如何继承过去、失败后如何继续、重启后如何重建权限边界。
 
 ![Agent 上下文、安全、恢复与会话](/images/posts/agent-theme-03-context-security-recovery/agent-theme-03-context-security-recovery-handdrawn.png)
 

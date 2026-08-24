@@ -13,7 +13,7 @@ imagePosition: "left"
 
 上一篇的问题是，**Session Memory 的 `summary.md` 会在什么时机被创建、更新和读取？**
 
-先把两个容易混淆的文件分开，`summary.md` 是当前 session 的 Session Memory，位于项目和 `sessionId` 对应的 `session-memory/` 目录；项目级 auto memory 使用的是 `MEMORY.md`。官方文档所说的“启动时加载记忆”主要指后者，不能据此推断 `summary.md` 每次启动都会被读入上下文。
+源码区分两类文件：`summary.md` 是当前 session 的 Session Memory，位于项目和 `sessionId` 对应的 `session-memory/` 目录；项目级 auto memory 使用的是 `MEMORY.md`。官方文档所说的“启动时加载记忆”主要指后者，不能据此推断 `summary.md` 每次启动都会被读入上下文。
 
 在 2.1.88 中，`summary.md` 是一个按需生成、增量维护、由几个明确消费者读取的文件，
 
@@ -78,7 +78,7 @@ imagePosition: "left"
 
 上一篇（40）的问题是，**Session Memory 的 `summary.md` 会在什么时机被创建、更新和读取？**
 
-先把两个容易混淆的文件分开，`summary.md` 是当前 session 的 Session Memory，位于项目和 `sessionId` 对应的 `session-memory/` 目录；项目级 auto memory 使用的是 `MEMORY.md`。官方文档所说的「启动时加载记忆」主要指后者，不能据此推断 `summary.md` 每次启动都会被读入上下文。
+源码区分两类文件：`summary.md` 是当前 session 的 Session Memory，位于项目和 `sessionId` 对应的 `session-memory/` 目录；项目级 auto memory 使用的是 `MEMORY.md`。官方文档所说的「启动时加载记忆」主要指后者，不能据此推断 `summary.md` 每次启动都会被读入上下文。
 
 在 2.1.88 中，`summary.md` 是一个按需生成、增量维护、由几个明确消费者读取的文件，
 

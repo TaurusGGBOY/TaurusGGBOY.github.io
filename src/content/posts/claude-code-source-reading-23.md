@@ -67,7 +67,7 @@ context: fork
 
 如果 frontmatter 写了 `context: fork`，`SkillTool.call()` 会改走 `executeForkedSkill()`，源码创建新的 `agentId`，调用 `runAgent()`，收集子 Agent 的消息和进度，最后只把提取出的结果文本返回父会话。也就是说，自定义 slash 命令的实现工作止于“定义 Skill”；上下文隔离、任务状态、输出回收和取消，交给后面的 Task 运行时处理。
 
-命令名来源、frontmatter 默认值和 `Command` 包装方式均以仓库从 `@anthropic-ai/claude-code@2.1.88` 还原的 `restored-src/` 为准；外部资料只用于对照推荐写法。
+命令名来源、frontmatter 默认值和 `Command` 包装方式以仓库从 `@anthropic-ai/claude-code@2.1.88` 还原的 `restored-src/` 为准；外部资料只承担推荐写法的对照角色。
 
 ## 介绍本章的一些概念
 
@@ -128,7 +128,7 @@ context: fork
 | 终态 | `completed`、`failed`、`killed` | `completed` |
 | 是否直接控制进程 | 是，由具体 Task 实现负责 | 否 |
 
-本文只讨论运行时 Task；subagent 的上下文与结果回流留给下一篇。
+本篇把运行时 Task 作为主线；subagent 的上下文与结果回流在下一篇展开。
 
 ### 一张图看懂任务的两条轴
 

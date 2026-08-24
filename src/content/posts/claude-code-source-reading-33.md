@@ -13,7 +13,7 @@ imagePosition: "left"
 
 上一篇留下的问题是，**Claude Code 当前以 16ms 为渲染节流间隔，用户能否把它调成 120Hz（约 8.33ms）？**
 
-先看代码边界。`@anthropic-ai/claude-code@2.1.88` 的 `restored-src/src/ink/constants.ts` 直接把 `FRAME_INTERVAL_MS` 写成 `16`；配置层没有为它留下入口。因此用户改 `/config`、`settings.json` 或环境变量，都不会把发布版 renderer 变成 120Hz。
+`@anthropic-ai/claude-code@2.1.88` 的 `restored-src/src/ink/constants.ts` 直接把 `FRAME_INTERVAL_MS` 写成 `16`；配置层没有为它留下入口。因此用户改 `/config`、`settings.json` 或环境变量，都不会把发布版 renderer 变成 120Hz。
 
 ```ts
 export const FRAME_INTERVAL_MS = 16
@@ -45,7 +45,7 @@ this.scheduleRender = throttle(deferredRender, FRAME_INTERVAL_MS, {
 
 也就是说，若目标是让菊花本身达到 120Hz，还要另改 `SpinnerAnimationRow` 的 50ms 动画间隔和 `SpinnerGlyph` 的 120ms 换帧逻辑；这会显著增加 React 更新、Yoga 布局、屏幕 diff 和终端写出的次数，已经不是“把显示器切到 120Hz”这么简单。
 
-这也解释了为什么不能只看显示器规格。上游 Ink 的文档把 `maxFps` 描述成渲染更新的上限，并明确提醒更高值可能增加性能开销；Claude Code 2.1.88 的内置 renderer 并没有把这个上游选项暴露成自己的配置项。Claude Code 的全屏渲染文档也指出，真正的瓶颈可能在 VS Code 集成终端、tmux 或 iTerm2 的终端吞吐；即使程序请求 120fps，终端也可能合并、延迟或来不及绘制这些 ANSI 更新。JavaScript 定时器同样只是“至少等待指定延迟”，事件循环繁忙时回调会晚于目标时间。
+实际效果还取决于终端吞吐，而不只是显示器规格。上游 Ink 的文档把 `maxFps` 描述成渲染更新的上限，并明确提醒更高值可能增加性能开销；Claude Code 2.1.88 的内置 renderer 并没有把这个上游选项暴露成自己的配置项。Claude Code 的全屏渲染文档也指出，真正的瓶颈可能在 VS Code 集成终端、tmux 或 iTerm2 的终端吞吐；即使程序请求 120fps，终端也可能合并、延迟或来不及绘制这些 ANSI 更新。JavaScript 定时器同样只是“至少等待指定延迟”，事件循环繁忙时回调会晚于目标时间。
 
 所以答案分三层，**用户配置不能调；自己维护源码可以改，但要连带检查所有时钟消费者；改完也只能提高上限，不能保证终端实际达到 120Hz。**
 
@@ -77,7 +77,7 @@ this.scheduleRender = throttle(deferredRender, FRAME_INTERVAL_MS, {
 
 ### 这张金额单位工单为什么能用一个 chord 触发 compact
 
-调查到 11，26 时，工程师发现终端提示上下文接近上限。手边还有一条后台测试和一份尚未整理的回调日志，他不想在输入框里重新输入 `/compact`，也不想误触发送半截说明，于是先输入 `/keybindings`，然后在配置界面里把 `ctrl+k ctrl+c` 绑定到 `command:compact`，保存后回到金额单位工单，先按 `Ctrl-K`，再按 `Ctrl-C`。第一个按键到来时程序不能立刻把它当成普通字符，也不能立刻结束当前输入；它要等第二个按键确认这是一个完整 chord。
+调查到 11，26 时，终端提示上下文接近上限；这张金额单位工单需要用 chord 触发 `/compact`，于是先输入 `/keybindings`，再在配置界面里把 `ctrl+k ctrl+c` 绑定到 `command:compact`，保存后回到工单，先按 `Ctrl-K`，再按 `Ctrl-C`。第一个按键到来时，程序不能立刻把它当成普通字符，也不能立刻结束当前输入；它要等第二个按键确认这是一个完整 chord。
 
 Claude Code 先把终端事件解析成 keystroke 和 chord，按当前 context、Vim 模式和全局绑定寻找动作；完整匹配后触发 `/compact`，未完成的前缀则进入 pending 状态。这个输入来自配置文件热加载到按键拦截器的独立路径，不会先进入普通 prompt。
 

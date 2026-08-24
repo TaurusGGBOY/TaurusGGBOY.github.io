@@ -438,7 +438,7 @@ Claude Code 的做法是把需要跨消费者一致的引用汇到 AppState，�
 
 ## 设计决策｜为什么是外部 store 而不是全部 Context
 
-源码里找不到官方选型记录，下面的判断来自代码结构，属于解释而非官方声明。
+下面的判断按代码结构组织，是对源码的解释，不是官方选型记录。
 
 **第一，为什么用 external store + `useSyncExternalStore` 而不是把所有状态放 Context？** 因为 Context 的 value 变化会触发**所有**消费者重渲染。AppState 里有每秒都在变的 spinner、任务和权限状态，如果整棵树都订阅同一份 Context value，一次任务更新就会让消息列表、输入框和 footer 一起重建。把快照留在 store 内部、由 selector 决定订阅范围后，更新粒度从"整棵树"降级为"引用变化的切片"。
 

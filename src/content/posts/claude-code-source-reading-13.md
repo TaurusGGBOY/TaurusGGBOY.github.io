@@ -11,7 +11,7 @@ imagePosition: "left"
 ---
 ## 回答上一篇的问题
 
-上一篇问了一个很容易被说大的问题。permission mode 为 `auto` 时，究竟是谁在替用户按下“允许”？
+上一篇的问题是，permission mode 为 `auto` 时，究竟是谁在替用户按下“允许”？
 
 答案不在 `tool.call()` 里。`auto` 只接管权限链中原本会返回 `ask` 的那一小段。已经得到 `deny` 或 `allow` 的调用不会重新绕回这里；只有 `hasPermissionsToUseToolInner()` 返回 `ask`，外层 `hasPermissionsToUseTool()` 才会继续检查 auto 路径。
 

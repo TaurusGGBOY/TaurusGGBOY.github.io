@@ -9,11 +9,9 @@ image: "/images/posts/deepseek-harness/deepseek-harness-overview.png"
 imagePosition: "center"
 ---
 
-如果 Agent 只负责回答问题，模型调用、上下文拼接和一段聊天记录就够用了。但当任务变成“读代码、改文件、运行命令、搜索资料、等待用户审批，失败后还能继续”时，模型只是其中一个环节。
+当任务变成“读代码、改文件、运行命令、搜索资料、等待用户审批，失败后还能继续”时，模型只是执行链中的一个环节。DeepSeek Harness 的主要贡献在于把这条链组织成可替换的插件树：插件负责装配能力，turn/step/event log 记录推进过程，会话数据平面承接恢复，provider 则把模型、工具和多 Agent 后端接入同一运行时。
 
-真正难的是把不稳定的模型输出接到一个有状态的执行世界里：请求要能取消，工具要有权限边界，中间结果要能恢复，换一个模型或沙盒后，其他能力不能跟着复制一套。**DeepSeek Harness 解决的主要问题，就是这条从模型到执行环境的连接。**
-
-我在本地阅读了仓库当前源码，并对照了项目的 [README](https://github.com/deepseek-ai/deepseek-harness/blob/master/README.md) 和 [架构文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)。截至 2026 年 8 月 13 日，官方把它描述为 DeepSeek AI 开发的开源 Agent harness，当前仍处于 developer preview，存在兼容性破坏式变更。下面不把它写成“万能 Agent”，而是沿着源码说明它已经搭出了哪些骨架，以及这些骨架把什么问题留给了使用者。
+本文依据仓库当前源码，并对照项目的 [README](https://github.com/deepseek-ai/deepseek-harness/blob/master/README.md) 和 [架构文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)。截至 2026 年 8 月 13 日，官方把它描述为 DeepSeek AI 开发的开源 Agent harness，当前仍处于 developer preview，存在兼容性破坏式变更。下文只说明源码和文档能支持的骨架，以及仍由使用者负责的边界。
 
 ## 先看结论：它不是一个更大的聊天循环
 

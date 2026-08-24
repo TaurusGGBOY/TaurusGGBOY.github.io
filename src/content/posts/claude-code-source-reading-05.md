@@ -13,7 +13,7 @@ updated: 2026-08-04
 
 上一篇的问题是，当代码需要结合 Claude Code 时，到底应该直接调用 `claude -p`，还是使用 Claude Agent SDK；分别在什么场景下使用它们？
 
-答案先放在前面，**如果你的程序只需要“提交任务，等待结果”，优先使用 `claude -p`；如果还要在运行过程中持续观察、控制并维持会话，使用 Claude Agent SDK。**
+选型分界在宿主是否需要持续参与：**只提交任务并等待结果，优先使用 `claude -p`；还要持续观察、控制并维持会话，则使用 Claude Agent SDK。**
 
 这里的 SDK 指 Claude Agent SDK，也就是把 Claude Code 作为 Agent 运行时接入程序的 SDK。`@anthropic-ai/sdk` 位于更底层，只提供模型 API 客户端；项目上下文、内置工具和权限系统由 Claude Code 运行时提供。
 
@@ -37,7 +37,7 @@ updated: 2026-08-04
 
 一个实用的迁移顺序是，先用 `claude -p --output-format json` 验证流程；当业务代码开始大量处理流式 JSON、请求 ID、权限响应匹配、会话 ID 和中断时，再换成 Agent SDK。迁移点不由 prompt 长短决定，而由调用方已经承担了多少“宿主职责”决定。
 
-回答完选型问题，我们正好可以进入本篇的核心，无论输入来自 `claude -p` 还是 SDK，Claude Code 为什么还需要一个 `QueryEngine`，把宿主配置、会话状态、Agent 事件和最终结果收进同一个边界？
+这个分界把问题引向本篇核心：无论输入来自 `claude -p` 还是 SDK，Claude Code 为什么还需要一个 `QueryEngine`，把宿主配置、会话状态、Agent 事件和最终结果收进同一个边界？
 
 ## 介绍本章的一些概念
 

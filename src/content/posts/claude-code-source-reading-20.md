@@ -92,7 +92,7 @@ if (innerError instanceof FallbackTriggeredError && fallbackModel) {
 
 把两套机制放在一起看，结论就清楚了，Anthropic 的 Fable 5 → Opus 4.8 安全 fallback 更像“服务端分类器决定重试目标”；Claude Code 这份源码里的 fallback 更像“客户端为请求准备备用模型，在连续 529 后通过异常信号跳出重试层，再由 queryLoop 重建一次干净请求”。如果未来版本把 Fable 的分类器响应也接入客户端，最自然的接入点会是 `getErrorMessageIfRefusal()` 或 `queryModelWithStreaming()` 的响应处理处；当前还原代码尚未这样做。
 
-本文后续仍以 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的源码块只保留证明当前结论所需的部分，省略日志、遥测和无关 provider 分支；还原路径只用于定位本文引用的源码。
+本篇的源码边界是 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码。下面的源码块只保留证明当前结论所需的部分，省略日志、遥测和无关 provider 分支；还原路径只用于定位引用的源码。
 
 ## 介绍本章的一些概念
 
@@ -193,7 +193,7 @@ export function switchSession(
 **函数说明，** `switchSession()` 位于 `restored-src/src/bootstrap/state.ts`。先清理旧 session 的 plan slug 缓存，再同时更新 ID 与 transcript 目录，最后通知监听者。
 **参数说明，** `sessionId` 是经过项目类型约束的 `SessionId`。`projectDir` 为 `string | null`，默认 `null`；传字符串表示 `<sessionId>.jsonl` 所在目录，常用于跨项目或 worktree 恢复，传 `null` 或省略则让后续路径从当前 `originalCwd` 推导。
 
-这段设计解决了一个很实际的问题，如果只换 session ID、仍沿用旧 projectDir，程序可能成功加载 A 目录的历史，却把下一条消息写到 B 目录下同名的 JSONL。resume 必须同时恢复内存消息与后续持久化目标。
+这段设计把恢复的两个坐标绑在一起：只换 session ID 而沿用旧 projectDir，程序可能加载 A 目录的历史，却把下一条消息写到 B 目录下同名的 JSONL。因此 resume 同时恢复内存消息与后续持久化目标。
 
 ### 写入｜先去重，再为消息补齐父链
 

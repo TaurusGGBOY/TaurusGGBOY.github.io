@@ -13,9 +13,9 @@ imagePosition: "left"
 
 上一篇留下的问题是，**Claude Code 的服务器在整个远程流程中究竟承担什么作用？**
 
-先看一条 prompt 的去向，Remote Control 服务器把本地环境注册成 worker，为 environment 和 session 分配身份，调度 work，转发事件并维护 lease；它不运行本地 query loop。模型请求由本地进程按当前 provider 发出，`Read`、`Bash`、MCP 和权限检查也留在本地；远端页面只是控制与展示端。
+Remote Control 服务器把本地环境注册成 worker，为 environment 和 session 分配身份，调度 work，转发事件并维护 lease；它不运行本地 query loop。模型请求由本地进程按当前 provider 发出，`Read`、`Bash`、MCP 和权限检查也留在本地；远端页面只是控制与展示端。
 
-这里的“服务器”容易和另外两个概念混在一起，
+职责表先把“服务器”与模型 provider、Bridge/worker 分开，
 
 | 组件 | 所在位置 | 在这条远程链路中的职责 | 是否在这里执行本地工具 |
 | --- | --- | --- | --- |
@@ -45,7 +45,7 @@ imagePosition: "left"
 
 ![日志、事件、指标与 trace 的关联坐标](/images/posts/claude-code-source-reading-38/38-observability-signals-detail-handdrawn.png)
 
-先把"执行事实""观测信号"和"用户可见状态"分开，后面的五本账才不会互相替代。
+五本账分别承载执行事实、观测信号和用户可见状态，彼此不能互相替代。
 
 ## 正文
 
@@ -554,7 +554,7 @@ export async function buildDiagnostics(): Promise<Diagnostic[]> {
 <details>
 <summary>回答 37 留下的问题，Claude Code 的服务器在整个远程流程中究竟承担什么作用？</summary>
 
-先看一条 prompt 的去向，Remote Control 服务器把本地环境注册成 worker，为 environment 和 session 分配身份，调度 work，转发事件并维护 lease；它不运行本地 query loop。模型请求由本地进程按当前 provider 发出，`Read`、`Bash`、MCP 和权限检查也留在本地；远端页面只是控制与展示端。
+Remote Control 服务器把本地环境注册成 worker，为 environment 和 session 分配身份，调度 work，转发事件并维护 lease；它不运行本地 query loop。模型请求由本地进程按当前 provider 发出，`Read`、`Bash`、MCP 和权限检查也留在本地；远端页面只是控制与展示端。
 
 | 组件 | 所在位置 | 在这条远程链路中的职责 | 是否在这里执行本地工具 |
 | --- | --- | --- | --- |

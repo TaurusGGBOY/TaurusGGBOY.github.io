@@ -13,7 +13,7 @@ imagePosition: "left"
 
 上一篇的问题是，**普通用户可以使用 Claude Code 的 Team Memory 吗？**
 
-答案先放在前面，**普通用户不能靠修改 `settings.json` 把 Team Memory 强行打开，但普通账号也不是永远不能用。** 是否可用取决于发行版是否编译进了 Team Memory、账号是否被灰度开关放行，以及你要的是本地 `team/` 目录还是面向团队的远端同步。
+**普通用户不能靠修改 `settings.json` 把 Team Memory 强行打开，但普通账号也不是永远不能用。** 是否可用取决于发行版是否编译进了 Team Memory、账号是否被灰度开关放行，以及你要的是本地 `team/` 目录还是面向团队的远端同步。
 
 ### 先分清“本地 Team Memory”和“远端同步”
 
@@ -25,7 +25,7 @@ imagePosition: "left"
 | 从服务端 pull / 向服务端 push | 上一行条件，再加第一方 Anthropic OAuth、有效 access token，以及 inference/profile 两个 scope | 本地记忆即使存在，也不会远端同步；API key、BYOK 或其他 provider 不满足这道门 |
 | 自动持续同步 | 上一行条件，再加 `github.com` 的仓库 remote | watcher 不启动；没有 GitHub remote 的项目不会建立团队同步 |
 
-因此，“能不能使用”至少要先问清楚是哪一种，没有远端同步时，某个已经被放行的构建仍可能在本机读取或写入 `team/`；但这不意味着其他成员会看到相同内容。
+可用性要区分本地读取、远端同步和自动持续同步：没有远端同步时，某个已经被放行的构建仍可能在本机读取或写入 `team/`；但这不意味着其他成员会看到相同内容。
 
 ### 第一层｜`TEAMMEM` 是构建期能力，不是设置项
 
@@ -53,7 +53,7 @@ export function isTeamMemoryEnabled(): boolean {
 
 watcher 的启动顺序也很明确，先检查 `TEAMMEM` 和两个运行时开关，再调用 `getGithubRepo()`；只有解析到 `github.com/owner/repo` 才会先 pull 一次团队记忆，随后建立文件 watcher。没有 GitHub remote 时，源码会记录 `no github.com remote, skipping sync` 并退出这条同步路径。
 
-### 所以普通用户到底能不能用？
+### 普通用户的可用性分层
 
 - 如果当前安装的公开构建没有把 `TEAMMEM` 编译进去，答案是不能；改配置、改普通环境变量都无效。
 - 如果发行版包含该能力，账号又被 `tengu_herring_clock` 灰度放行，那么普通的第一方 OAuth 账号可以使用本地 Team Memory；源码没有要求必须是内部用户。
@@ -83,13 +83,13 @@ watcher 的启动顺序也很明确，先检查 `TEAMMEM` 和两个运行时开�
 
 ![AutoDream 的触发门、后台任务与记忆写回](/images/posts/claude-code-source-reading-42/42-dream-gates-detail-handdrawn.png)
 
-先把「何时尝试」「允许谁执行」和「失败后如何释放锁」分开，后文的五道门就不会被误读成一个时间定时器。
+AutoDream 的三个判断点是「何时尝试」「允许谁执行」和「失败后如何释放锁」；五道门由这三类状态共同决定，而不是一个时间定时器。
 
 ## 问题
 
 上一篇（41）的问题是，**普通用户可以使用 Claude Code 的 Team Memory 吗？**
 
-答案先放在前面，**普通用户不能靠修改 `settings.json` 把 Team Memory 强行打开，但普通账号也不是永远不能用。** 是否可用取决于发行版是否编译进了 Team Memory、账号是否被灰度开关放行，以及你要的是本地 `team/` 目录还是面向团队的远端同步。
+**普通用户不能靠修改 `settings.json` 把 Team Memory 强行打开，但普通账号也不是永远不能用。** 是否可用取决于发行版是否编译进了 Team Memory、账号是否被灰度开关放行，以及你要的是本地 `team/` 目录还是面向团队的远端同步。
 
 ### 先分清「本地 Team Memory」和「远端同步」
 
@@ -131,7 +131,7 @@ export function isTeamMemoryEnabled(): boolean {
 
 watcher 的启动顺序也很明确，先检查 `TEAMMEM` 和两个运行时开关，再调用 `getGithubRepo()`；只有解析到 `github.com/owner/repo` 才会先 pull 一次团队记忆，随后建立文件 watcher。没有 GitHub remote 时，源码会记录 `no github.com remote, skipping sync` 并退出这条同步路径。
 
-### 所以普通用户到底能不能用？
+### 普通用户的可用性分层
 
 - 如果当前安装的公开构建没有把 `TEAMMEM` 编译进去，答案是不能；改配置、改普通环境变量都无效。
 - 如果发行版包含该能力，账号又被 `tengu_herring_clock` 灰度放行，那么普通的第一方 OAuth 账号可以使用本地 Team Memory；源码没有要求必须是内部用户。

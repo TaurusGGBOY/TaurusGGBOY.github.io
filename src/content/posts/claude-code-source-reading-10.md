@@ -13,7 +13,7 @@ updated: 2026-08-04
 
 上一篇留下的问题是，**你知道 Claude Code 自带哪些 tool 吗？**
 
-答案先放在前面，工具清单不是调度器的输入原样。源码先在 `getAllBaseTools()` 建候选集，再经过 `isEnabled()`、deny 规则、运行模式、provider 能力和 feature gate，最终把本轮真正存在的工具交给模型；调度器只对这份会话快照负责。
+工具清单不是调度器的输入原样。源码先在 `getAllBaseTools()` 建候选集，再经过 `isEnabled()`、deny 规则、运行模式、provider 能力和 feature gate，最终把本轮真正存在的工具交给模型；调度器只对这份会话快照负责。
 
 ### `getAllBaseTools()` 里的基础清单
 

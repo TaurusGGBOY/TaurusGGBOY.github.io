@@ -9,9 +9,9 @@ image: "/images/posts/cordis-spatiotemporal-composability/spatiotemporal-composa
 imagePosition: "center"
 ---
 
-插件系统最难的部分，从来不是“把一个模块加载进来”，而是模块离开之后，运行时还是否保持干净；它依赖的服务消失或换了实现之后，使用它的组件又是否能按正确顺序停下来、重新连接。一个 Agent harness 还要面对模型流、工具、沙盒、审批、子 Agent 和持久化会话，这些对象的生命周期彼此交错，靠入口函数里的几组 `if` 很快就会失控。
+插件系统的关键问题不是把模块加载进来，而是组件离开后能否撤回自己的运行时修改；当依赖服务消失或换了实现，使用它的组件能否按生命周期重新连接。这个问题在 Agent harness 中更明显：模型流、工具、沙盒、审批、子 Agent 和持久化会话的生命周期彼此交错；如果只靠入口函数里的几组 `if` 维护，很快就会失控。
 
-我读完了 [A Programming Paradigm for Spatiotemporal Composability](https://github.com/cordiverse/paper/blob/main/paper.pdf) 的正文和参考文献，并对照了论文仓库的 [README](https://github.com/cordiverse/paper) 、[Cordis](https://github.com/cordiverse/cordis) 以及 DeepSeek Harness 当前的 [README](https://github.com/deepseek-ai/deepseek-harness/blob/master/README.md) 和[架构文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)。论文 README 把它标为 2026 年 8 月 13 日的 Draft，并明确说明仍是可能大幅变化的活跃预印本；因此，下面会把“论文的形式化保证”“Cordis 的实现”“DeepSeek Harness 的应用”分开叙述，不把预印本结论写成已经完成的产品承诺。
+本文用 [A Programming Paradigm for Spatiotemporal Composability](https://github.com/cordiverse/paper/blob/main/paper.pdf) 的两个概念——可撤回效果与响应式依赖——阅读论文仓库的 [README](https://github.com/cordiverse/paper) 、[Cordis](https://github.com/cordiverse/cordis) 以及 DeepSeek Harness 当前的 [README](https://github.com/deepseek-ai/deepseek-harness/blob/master/README.md) 和[架构文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)。论文 README 把它标为 2026 年 8 月 13 日的 Draft，并说明仍是可能大幅变化的活跃预印本。下文因此分开写“论文的形式化保证”“Cordis 的实现”和“DeepSeek Harness 的应用”，不把预印本结论写成产品承诺。
 
 ## 先给结论：这不是另一种 Agent Loop，而是动态组合的运行时基础
 

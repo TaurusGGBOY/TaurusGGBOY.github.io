@@ -57,7 +57,7 @@ return { worktreePath, worktreeBranch }
 
 还有一个容易误判的地方，Git 报告“无冲突”不等于没有合并问题。两个 teammate 可能分别实现了同一个 helper，或者一个修改了 API 返回值、另一个仍按旧契约调用；这类语义冲突不会出现在 `<<<<<<<` 标记里。lead 的职责是把任务说明、接口约束、测试和运行结果放在同一个审查闭环里，而不是只看 merge 命令的退出码。
 
-本文后续仍回到 MCP 的连接与能力发现；这里要记住的边界是，Agent Teams 提供协作控制面，Git 提供版本整合机制，lead 负责在两者之间做最后的工程判断。
+这里的边界是：Agent Teams 提供协作控制面，Git 提供版本整合机制，lead 负责在两者之间做最后的工程判断。下一节把这条边界接到 MCP 的连接与能力发现。
 
 ## 介绍本章的一些概念
 
@@ -91,7 +91,7 @@ return { worktreePath, worktreeBranch }
 
 ## 正文
 
-本文全部引用 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 还原源码。代码块只保留证明控制流所需的字段，省略埋点、UI 消息和无关实验分支；每个代码块后标注证据位置。`restored-src/` 只用于定位证据，不表示内部仓库原始目录。
+本篇使用 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 还原源码重建 MCP 控制流。代码块只保留证明当前机制所需的字段，省略埋点、UI 消息和无关实验分支；每个代码块后标注证据位置。`restored-src/` 只用于定位证据，不表示内部仓库原始目录。
 
 ### MCP 是一条带生命周期的协议连接
 

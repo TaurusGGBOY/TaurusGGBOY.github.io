@@ -35,7 +35,7 @@ CI 进程没有终端、没有用户点击权限弹窗，却要消费"模型正�
 
 ![Headless 模式的 text、JSON 与 stream-json 分帧](/images/posts/claude-code-source-reading-34/34-structured-io-framing-detail-handdrawn.png)
 
-这三个概念把本篇的读法固定下来，先区分界面与协议，再看消息怎样分帧，最后检查结果是否满足 schema。
+三者分别对应宿主边界、消息分帧和结果形状约束：界面由协议替换，消息按类型分帧，结果再由 schema 限定。
 
 ## 正文
 
@@ -47,7 +47,7 @@ CI 进程没有终端、没有用户点击权限弹窗，却要消费"模型正�
 
 CI 进程消费 stdout 中的流式事件，诊断面板则按事件类型更新自己的状态；它不需要 Ink 输入框，也不能假设一定存在人工点击的权限弹窗。稍后，内部 Node 宿主又由 SDK 提交同样的任务，前者把事件和终态写到 stdout，后者让宿主通过 Query 迭代器消费 assistant、tool、权限和 result；两者都跳过交互式 TUI，却共享查询、工具和权限内核。
 
-### 先补三个概念｜Headless、SDK 与 Structured IO
+### 三个关键边界｜Headless、SDK 与 Structured IO
 
 **Headless 用协议替换交互界面**，跳过 Ink renderer、消息列表、输入框、权限弹窗和快捷键这棵 React 树，仍保留会话状态、工具注册表、权限上下文、消息历史、MCP 连接和查询循环，并用输入输出协议承接原先由 UI 承担的交互。
 

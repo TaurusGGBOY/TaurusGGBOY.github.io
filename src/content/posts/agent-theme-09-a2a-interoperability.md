@@ -37,9 +37,9 @@ verified_at: "2026-08-17"
 
 > A2A 真正解决的不是“如何再启动一个 Agent”，而是“一个内部实现不可见的 Agent，如何被另一个团队、另一种框架或另一家厂商可靠地发现、委托、等待和接收结果”。
 
-这篇文章回答五个问题：A2A 从哪里来、现在的协议到底标准化了什么、哪些项目已经在使用它、Claude Code / Codex / Pi / DeepSeek harness 有没有 A2A 或相似实现，以及一个 Agent 项目到底有没有必要完整实现 A2A。
+本文沿五个问题展开：A2A 从哪里来、协议标准化了什么、哪些项目已经在使用它、Claude Code / Codex / Pi / DeepSeek harness 是否有 A2A 或相似实现，以及什么边界值得完整实现 A2A。
 
-先把判断放在前面：A2A 是跨边界的 Agent 互操作协议，不是所有多 Agent 架构的底座。一个 CLI 内部的子 Agent、同一进程里的函数调用、文件 mailbox、thread tree、stdin/stdout RPC，都可能解决协作问题，却不因此变成 A2A。多数项目应该先把自己的内部运行时做好，再在真正需要跨产品协作的边界上增加 A2A adapter 或 gateway。
+A2A 是跨边界的 Agent 互操作协议，不是所有多 Agent 架构的底座。CLI 内部子 Agent、同进程函数调用、文件 mailbox、thread tree 和 stdin/stdout RPC 都可能解决内部协作，却不因此成为 A2A。更稳妥的架构位置，是先保留内部运行时，再在确有跨产品协作需求的边界增加 adapter 或 gateway。
 
 ## 一、A2A 的前身：不是一条单线继承史
 

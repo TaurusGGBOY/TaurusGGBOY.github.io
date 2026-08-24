@@ -37,9 +37,9 @@ verified_at: "2026-08-12"
 ---
 
 
-> 扩展系统真正要解决的不是“再加几个工具”，而是把能力接进控制平面，同时说明它从哪里来、什么时候可见、能改变什么、失败后谁负责。
+> 扩展系统的核心不是“再加几个工具”，而是把能力接进控制平面，并说明它从哪里来、什么时候可见、能改变什么、失败后谁负责。
 
-本篇覆盖 Claude Code 源码解读 21–30：command、skill、task、subagent、team、plan/worktree、MCP、plugin、LSP，以及浏览器/IDE 外部宿主。前面我们把单 Agent 的边界画完；这里看系统怎样把更多能力和更多执行者接进来。
+本篇覆盖 Claude Code 源码解读 21–30：command、skill、task、subagent、team、plan/worktree、MCP、plugin、LSP，以及浏览器/IDE 外部宿主。重点是比较这些扩展和委派机制各自引入的契约：路由、能力发现、信任、生命周期和失败责任。
 
 ![Agent 扩展、委派与多 Agent](/images/posts/agent-theme-04-extension-delegation/agent-theme-04-extension-delegation-handdrawn.png)
 

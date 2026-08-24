@@ -38,7 +38,7 @@ imagePosition: "left"
 
 Anthropic 对两类模式的实践区分与源码边界相互印证，orchestrator-subagent 适合清晰、短小、低耦合的结果，由父 Agent 负责综合；agent team 适合独立任务的持续推进，让 worker 在多轮工作中保持上下文并相互协调，但要承担更高的 token 和通信成本。因此选择标准取决于任务是否需要持久身份和团队控制面。
 
-最后再强调一个容易混淆的点，同一个自定义 Agent 定义可以作为 `subagent_type` 被普通路径使用，也可以作为 teammate 的角色模板；定义里的模型、工具和提示词描述“它是谁”，而 `spawnTeammate` 还是 `runAgent` 决定“它以什么协作关系存在”。本文后续仍以 `@anthropic-ai/claude-code@2.1.88` 的还原源码为边界，继续看 Plan mode 和 worktree 如何分别隔离行为与文件。
+同一个自定义 Agent 定义可以作为 `subagent_type` 被普通路径使用，也可以作为 teammate 的角色模板；定义里的模型、工具和提示词描述“它是谁”，而 `spawnTeammate` 还是 `runAgent` 决定“它以什么协作关系存在”。本篇仍以 `@anthropic-ai/claude-code@2.1.88` 的还原源码为边界，下一节接着看 Plan mode 与 worktree 如何分别隔离行为与文件。
 
 ## 介绍本章的一些概念
 
@@ -70,7 +70,7 @@ Anthropic 对两类模式的实践区分与源码边界相互印证，orchestrat
 
 ## 正文
 
-本文全部引用 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 还原源码。代码块只保留证明控制流所需的字段，省略与当前机制无关的参数、UI 分支和实验逻辑；每个代码块后标注证据位置。`restored-src/` 只用于定位证据，不表示内部仓库原始目录。
+本篇使用 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 还原源码重建控制流。代码块只保留证明当前机制所需的字段，省略无关参数、UI 分支和实验逻辑；每个代码块后标注证据位置。`restored-src/` 只用于定位证据，不表示内部仓库原始目录。
 
 ### 两种隔离，解决的是两个不同问题
 

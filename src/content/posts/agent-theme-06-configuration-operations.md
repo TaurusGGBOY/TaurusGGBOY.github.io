@@ -35,9 +35,9 @@ verified_at: "2026-08-12"
 ---
 
 
-> 一个 Agent 能否长期使用，往往取决于模型调用之外的事情：配置是否可解释，路由是否可重现，远程连接是否可恢复，日志是否能回答“发生了什么”，升级是否不会覆盖认证。
+> Agent 能否长期使用，取决于模型调用之外的控制面：配置是否可解释，路由是否可重现，远程连接是否可恢复，日志是否能回答“发生了什么”，升级是否不会覆盖认证。
 
-本篇覆盖 Claude Code 源码解读 35–39：settings/feature flags、model routing/auth/provider、Bridge/Remote/Server、observability/cost/diagnostics、updates/migrations/onboarding。它们共同组成运维面，也是很多对比文章最容易一笔带过的部分。
+本篇覆盖 Claude Code 源码解读 35–39：settings/feature flags、model routing/auth/provider、Bridge/Remote/Server、observability/cost/diagnostics、updates/migrations/onboarding。比较的对象是运行状态如何被配置、暴露、记录和迁移；这也是判断一个 Agent 是否可运营的证据面。
 
 ![Agent 配置、模型路由、远程与运维](/images/posts/agent-theme-06-configuration-operations/agent-theme-06-configuration-operations-handdrawn.png)
 

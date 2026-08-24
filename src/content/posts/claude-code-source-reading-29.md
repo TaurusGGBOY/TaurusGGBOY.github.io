@@ -77,7 +77,7 @@ Skill 不只是静态说明文字。`createSkillCommand().getPromptForCommand()`
 
 最准确的记忆方式是，**Slash 是调用界面，Skill 是 prompt command，Plugin 是来源与装配边界。**只有组织策略把 `skills` 锁成 Plugin-only，或者 Skill 依赖 Plugin 才能提供的其他组件时，Plugin 才是必要条件；Slash 本身不是。
 
-下文事实均来自 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/`；代码块只保留 LSP 路由和状态变化所需的字段。
+本篇的 LSP 路由与状态重建以 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 为边界；代码块只保留当前结论所需的字段。
 
 ## 介绍本章的一些概念
 

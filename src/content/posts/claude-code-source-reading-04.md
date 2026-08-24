@@ -13,7 +13,7 @@ updated: 2026-08-04
 
 上一篇最后留下的问题来自一个很具体的命令，`claude -p`。当它无法像普通 REPL 一样停下来与用户交互时，工具权限由谁决定；而对 Claude Code 来说，带 `-p` 与不带 `-p`，究竟只是输出形式不同，还是运行模式已经变了？
 
-答案先说，**运行模式改变了权限的交互入口；本地弹窗改由配置规则或外部协议承担。**
+本篇的结论是，**运行模式改变了权限的交互入口；本地弹窗改由配置规则或外部协议承担。**
 
 `-p` 是 `--print` 的短写。最简单的用法是 `claude -p "解释这个项目"`，也可以通过 stdin 接收输入。普通单 prompt 用法会执行任务、输出结果并退出，适合 Shell 管道、脚本和 CI；SDK 还可以在 `stream-json` 输入模式下持续提供消息。`--output-format` 支持 `text`、`json` 和 `stream-json`，`text` 是默认的最终文本，`json` 输出聚合后的结果对象，`stream-json` 持续输出结构化事件，并要求同时启用 `--verbose`。
 
@@ -35,9 +35,9 @@ updated: 2026-08-04
 
 内层 Agent 能力仍然复用。两条路径最终都会进入 `query()` / `queryLoop()`，使用相同的模型流、工具契约、权限结果和 `tool_result` 回环。`-p` 保留完整 Agent 内核，把交互职责从本地 REPL 转交给命令行参数、stdin、配置规则或外部 SDK 宿主。
 
-这点很容易读错。`QueryEngine.ts` 的注释明确说，2.1.88 里的 `QueryEngine` 用于 headless/SDK，REPL 接入仍属于 “a future phase”。所以“一套内核”应该理解成**分层复用**，宿主层可以分叉，会话包装也可能不同，但进入 Agent 查询循环以后，模型、工具和消息语义重新汇合。
+这里的“一套内核”应理解为**分层复用**：`QueryEngine.ts` 的注释明确说，2.1.88 里的 `QueryEngine` 用于 headless/SDK，REPL 接入仍属于 “a future phase”；宿主层可以分叉，会话包装也可能不同，但进入 Agent 查询循环以后，模型、工具和消息语义重新汇合。
 
-本篇继续只讨论 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码。下面的片段省略了与当前机制无关的参数和分支，函数名、关键取值与调用关系保持不变。
+本篇仍以 `@anthropic-ai/claude-code@2.1.88` 的 source map 还原源码为边界。
 
 ## 介绍本章的一些概念
 
@@ -275,7 +275,7 @@ try {
 
 ### MCP server 只复用工具执行契约
 
-MCP server 是最容易被"多入口共享内核"这句话误导的一种模式。
+MCP server 说明了“多入口共享内核”的边界：它复用工具契约，却不运行 Agent 查询循环。
 
 `restored-src/src/entrypoints/mcp.ts` 的 `startMCPServer()` 通过 stdio 启动 MCP Server，注册 `ListToolsRequestSchema` 与 `CallToolRequestSchema`。收到工具调用后，它查找工具、检查是否启用、校验输入，然后直接执行 `tool.call()`，
 

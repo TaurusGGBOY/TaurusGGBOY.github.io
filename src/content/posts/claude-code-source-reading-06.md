@@ -13,7 +13,7 @@ updated: 2026-08-04
 
 上一篇最后的问题是，在 Claude Code CLI 中执行 `/new` 时，它究竟重置了哪些会话状态，又保留了哪些运行现场？
 
-答案先说，**`/new` 在当前 CLI 进程内切换活动会话，保留项目环境和进程级基础设施。**
+`/new` 的边界是，**它在当前 CLI 进程内切换活动会话，保留项目环境和进程级基础设施。**
 
 在 2.1.88 中，`/new` 复用 `/clear` 的实现。`restored-src/src/commands/clear/index.ts` 把它注册成别名，
 
@@ -566,7 +566,7 @@ stateDiagram-v2
 
 ## 30 行 vs 1488 行｜多出的 1458 行就是 Harness
 
-现在正面回答那个必须诚实面对的问题，既然骨架只有 30 行，为什么 `queryLoop()` 要写 1488 行？把最小骨架用 `queryLoop()` 自己的形状写出来，大约 30 行，
+这里的问题是，既然骨架只有 30 行，为什么 `queryLoop()` 要写 1488 行？把最小骨架用 `queryLoop()` 自己的形状写出来，大约 30 行，
 
 ```ts
 // [pseudocode] queryLoop 的最小骨架（约 30 行）：控制流完整，工程细节为零
@@ -603,7 +603,7 @@ while (true) {
 | 无上下文管理 | 四层压缩（snip → microcompact → collapse → autocompact）；compact boundary；`taskBudgetRemaining` 跨 compact 累计 |
 | 无遥测 | `queryCheckpoint`、`logEvent`、`headlessProfiler`、query chain tracking、tool-use summary |
 
-再诚实补一句复杂度，codebase-memory 图谱按 CALLS 边统计，`queryLoop` 有**约 72 个直接调用者与被调用关系节点**（`docs/audit/claude-code-blog-100-shortcomings.md` 第 63 条记录），直接调用者只有 1 个（`query()`），经 `query()` 间接进入的入口有 5 个（`QueryEngine.submitMessage`、REPL、`runForkedAgent`、`execAgentHook`、`startBackgroundSession`）；直接出站函数约 55 个，第二跳约 36 个。依赖注入让 `deps.callModel`、`runTools` 的编排链在图上只是间接边，真实连接数只会更多。
+复杂度还可以用 codebase-memory 图谱的 CALLS 边定位：`queryLoop` 有**约 72 个直接调用者与被调用关系节点**（`docs/audit/claude-code-blog-100-shortcomings.md` 第 63 条记录），直接调用者只有 1 个（`query()`），经 `query()` 间接进入的入口有 5 个（`QueryEngine.submitMessage`、REPL、`runForkedAgent`、`execAgentHook`、`startBackgroundSession`）；直接出站函数约 55 个，第二跳约 36 个。依赖注入让 `deps.callModel`、`runTools` 的编排链在图上只是间接边，真实连接数只会更多。
 
 **这 1458 行就是 Harness 本身。** 30 行骨架 + 1458 行生产工程，才构成一个可用的 Agent 运行时。练习部分会带你亲手把骨架跑起来，感受两者之间的差距。
 

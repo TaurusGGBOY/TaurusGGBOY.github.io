@@ -34,9 +34,9 @@ verified_at: "2026-08-12"
 ---
 
 
-> 记忆不是把旧聊天全部塞回 prompt，后台 Agent 也不是偷偷多跑一个模型。两者都必须有作用域、触发门槛、持久化格式、失败边界和用户可见的回路。
+> 记忆不是把旧聊天全部塞回 prompt，后台 Agent 也不是另一个隐形主循环。两者都需要作用域、触发门槛、持久化格式、失败边界和用户可见的回路。
 
-本篇覆盖 Claude Code 源码解读 40–43：session memory、Memdir/team memory、AutoDream、Kairos/assistant mode。它们关注的是主 Agent 结束之后发生什么，以及哪些经验可以安全地带到下一次会话。
+本篇覆盖 Claude Code 源码解读 40–43：session memory、Memdir/team memory、AutoDream、Kairos/assistant mode。比较的重点是主 Agent 结束后哪些状态可以被提炼、谁能在后台继续运行，以及这些结果如何回到下一次会话。
 
 ![Agent 记忆与后台智能](/images/posts/agent-theme-07-memory-background/agent-theme-07-memory-background-handdrawn.png)
 

@@ -35,13 +35,13 @@ imagePosition: "left"
 
 ![Remote Control 的会话关联与双层重连](/images/posts/claude-code-source-reading-37/37-remote-session-affinity-detail-handdrawn.png)
 
-本文先建立三个概念，**Session affinity**（远程消息先关联到具体本地会话，才能保持上下文、工具和工作目录一致）、**双工传输**（控制端与执行端各自发送事件，入站和出站可以采用不同连接策略）、**重连状态**（传输恢复与 Agent 会话恢复是两层目标，序号、去重和确认点负责衔接）。先把"谁执行""谁路由""谁控制"分开，再看 `poll`、`ACK`、heartbeat 和 sequence 如何把这三者重新连起来。
+本章的三个关键边界是 **Session affinity**（远程消息先关联到具体本地会话，才能保持上下文、工具和工作目录一致）、**双工传输**（控制端与执行端各自发送事件，入站和出站可以采用不同连接策略）和 **重连状态**（传输恢复与 Agent 会话恢复是两层目标，序号、去重和确认点负责衔接）。`poll`、`ACK`、heartbeat 和 sequence 正是把"谁执行""谁路由""谁控制"重新连起来的机制。
 
 ## 正文
 
 ### 这张金额单位工单从办公室 CLI 续到远端设备
 
-下午 17，20，工程师准备离开办公室，完整测试还剩最后一组浏览器用例，三个 teammate 也各自留下了未读消息。他没有把笔记本上的终端窗口当成唯一入口，而是在手机浏览器打开 Remote Control，确认显示的是同一个 session 后输入，
+下午 17，20，这张工单还剩最后一组浏览器用例，三个 teammate 也各自留下了未读消息。手机浏览器打开 Remote Control 后，确认显示的是同一个 session，再输入，
 
 > 继续处理这张金额单位工单。先恢复当前 worktree、后台测试、teammate 状态和待决权限，再完成验证；不要重新执行已经成功的副作用。
 

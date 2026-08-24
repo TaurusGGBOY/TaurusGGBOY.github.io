@@ -36,9 +36,9 @@ verified_at: "2026-08-12"
 ---
 
 
-> 体验层的价值不是把 Agent 变得更会聊天，而是让执行中的状态、结果、下一步和等待都能在正确的时间抵达正确的人或 Agent。
+> 体验层的价值不是让 Agent 更会聊天，而是让执行中的状态、结果、下一步和等待在正确的时间抵达正确的人或 Agent。
 
-本篇覆盖 Claude Code 源码解读 44–48：Buddy、Voice、MagicDocs/Prompt Suggestions、Notifications/Mailbox/Output Styles，以及系列总结。它们属于主循环之外的旁路和反馈面，却决定了一个长时间运行的 Agent 是否可感知、可接管、可继续。
+本篇覆盖 Claude Code 源码解读 44–48：Buddy、Voice、MagicDocs/Prompt Suggestions、Notifications/Mailbox/Output Styles，以及系列总结。它们属于主循环之外的反馈面；比较的重点是这些旁路如何投影状态、接收输入、传递建议，以及怎样保持可感知、可接管、可继续。
 
 ![Agent 体验层、反馈通道与系列收束](/images/posts/agent-theme-08-experience-feedback/agent-theme-08-experience-feedback-handdrawn.png)
 

@@ -13,7 +13,7 @@ imagePosition: "left"
 
 上一篇留下的问题是，你知道 rewind 的时候哪些东西是无法回滚的吗？
 
-把 rewind 当成“给 Claude Code 加了一个 Ctrl+Z”很容易误导。真正的问题是，当模型已经改文件、跑命令、推送 Git，又想回到某个消息时，哪一层状态有快照，哪一层根本没有进入文件历史？
+本篇先给出回滚边界：当模型已经改文件、跑命令、推送 Git，又回到某个消息时，只有进入文件历史的磁盘版本可能被恢复，外部副作用不在同一条链路中。
 
 本文只分析 `@anthropic-ai/claude-code@2.1.88` 的还原源码，不把后续版本的 `/rewind` UI 选项倒灌进来。对这一版，结论可以沿调用链落地，`fileHistoryRewind → applySnapshot → restoreBackup/unlink` 只恢复已有备份的磁盘文件，不撤销外部副作用，也不提供跨文件事务。
 
@@ -37,9 +37,7 @@ imagePosition: "left"
 
 ## 问题
 
-先接住上一篇留下的问题，**你知道 rewind 的时候哪些东西是无法回滚的吗？**
-
-把 rewind 当成“给 Claude Code 加了一个 Ctrl+Z”很容易误导。真正的问题是，当模型已经改文件、跑命令、推送 Git，又想回到某个消息时，哪一层状态有快照，哪一层根本没有进入文件历史？
+上一篇的问题是，**你知道 rewind 的时候哪些东西是无法回滚的吗？**
 
 本文只分析 `@anthropic-ai/claude-code@2.1.88` 的还原源码，不把后续版本的 `/rewind` UI 选项倒灌进来。对这一版，结论可以沿调用链落地，`fileHistoryRewind → applySnapshot → restoreBackup/unlink` 只恢复已有备份的磁盘文件，不撤销外部副作用，也不提供跨文件事务。
 

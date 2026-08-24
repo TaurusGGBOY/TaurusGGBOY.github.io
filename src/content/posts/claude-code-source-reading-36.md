@@ -13,7 +13,7 @@ imagePosition: "left"
 
 上一篇留下的问题是，**在 `/config` 中修改配置后，`settings.json` 中对应的配置也会同步修改吗？**
 
-先看写入调用，而不是看 UI 上的控件名称，**`/config` 不会把整份“当前生效配置”同步回一个 `settings.json`。** 在 `@anthropic-ai/claude-code@2.1.88` 中，它只挂载 `Settings` 页面；每个控件的 `onChange` 决定写入 `~/.claude.json`、某一层 settings 文件，还是只更新当前会话。
+**`/config` 不会把整份“当前生效配置”同步回一个 `settings.json`。** 在 `@anthropic-ai/claude-code@2.1.88` 中，它只挂载 `Settings` 页面；每个控件的 `onChange` 决定写入 `~/.claude.json`、某一层 settings 文件，还是只更新当前会话。
 
 入口本身没有“保存全部配置”的逻辑，
 
@@ -34,7 +34,7 @@ export const call: LocalJSXCommandCall = async (onDone, context) => {
 | `updateSettingsForSource('localSettings', ...)` | 当前项目的 `.claude/settings.local.json` | spinner tips、减少动画、output style、默认视图等本机偏好 | 会写 settings 文件，但不是共享的 `.claude/settings.json` |
 | `setAppState(...)` 或会话状态更新 | 当前进程的 AppState / session | 模型选择的即时状态、当轮 thinking 状态等 | 不一定；没有对应的磁盘写入调用 |
 
-这里的“全局”容易造成误解，`~/.claude.json` 确实是跨项目的 JSON 文件，但它不是用户 settings 文件。源码中的 `saveGlobalConfig()` 通过锁写入 `getGlobalClaudeFile()`，并过滤默认值、保护认证状态；它和 `updateSettingsForSource()` 的 settings 写入链是两套 API。相反，`userSettings` 的路径由 `getSettingsFilePathForSource()` 计算，正常才是 `~/.claude/settings.json`；project 与 local 则分别落在项目目录的 `.claude/settings.json` 和 `.claude/settings.local.json`。
+“全局”在这里指应用状态文件，而不是用户 settings 文件。`~/.claude.json` 确实是跨项目的 JSON 文件；源码中的 `saveGlobalConfig()` 通过锁写入 `getGlobalClaudeFile()`，并过滤默认值、保护认证状态；它和 `updateSettingsForSource()` 的 settings 写入链是两套 API。`userSettings` 的路径由 `getSettingsFilePathForSource()` 计算，正常才是 `~/.claude/settings.json`；project 与 local 则分别落在项目目录的 `.claude/settings.json` 和 `.claude/settings.local.json`。
 
 因此，若你在界面里切换“主题”或“自动 compact”，看到 `~/.claude.json` 变化是预期行为；若切换权限默认模式或语言，才应检查 `~/.claude/settings.json`。Config 面板在这版源码中没有直接调用 `updateSettingsForSource('projectSettings', ...)`，所以不能把它理解成会替你改写团队共享的项目 settings。
 
@@ -50,7 +50,7 @@ export const call: LocalJSXCommandCall = async (onDone, context) => {
 
 实际排查时可以按这条规则走，团队共享的规则编辑项目 `.claude/settings.json` 并提交；跨项目的个人默认值编辑 `~/.claude/settings.json`；只想让本机当前项目生效就编辑 `.claude/settings.local.json`；界面主题、认证和项目历史等应用状态则检查 `~/.claude.json`。最后还要看来源优先级，某个文件即使被改了，也可能被 local、CLI flag 或 policy 层覆盖，界面显示的是合并后的有效值，而不是某个文件的原样内容。
 
-把这条分流记住就够了，界面显示的是合并后的有效值，写入函数却仍然知道自己的目标层。接下来再看模型路由时，不要把“哪个文件保存了偏好”和“哪个 provider 发请求”混成同一件事。
+因此，界面显示的是合并后的有效值，写入函数仍然知道自己的目标层；接下来再看模型路由时，还要把“哪个文件保存了偏好”和“哪个 provider 发请求”分开。
 
 ## 介绍本章的一些概念
 
@@ -523,7 +523,7 @@ export const call: LocalJSXCommandCall = async (onDone, context) => {
 
 当前官方文档已经描述了更新版本中 `/config key=value` 的命令形式，但那是 2.1.181 之后的能力，不能倒推到本系列分析的 2.1.88。实际排查时可以按这条规则走，团队共享的规则编辑项目 `.claude/settings.json` 并提交；跨项目的个人默认值编辑 `~/.claude/settings.json`；只想让本机当前项目生效就编辑 `.claude/settings.local.json`；界面主题、认证和项目历史等应用状态则检查 `~/.claude.json`。最后还要看来源优先级，某个文件即使被改了，也可能被 local、CLI flag 或 policy 层覆盖，界面显示的是合并后的有效值，而不是某个文件的原样内容。
 
-把这条分流记住就够了，界面显示的是合并后的有效值，写入函数却仍然知道自己的目标层。
+界面显示的是合并后的有效值，写入函数仍然知道自己的目标层。
 
 </details>
 

@@ -13,7 +13,7 @@ imagePosition: "left"
 
 上一篇留下的问题是，你知道 Claude Code 会用你默认的模型进行 WebSearch 吗？
 
-答案不是简单的“是”或“不是”。默认情况下，WebSearch 会沿用当前主循环的 `context.options.mainLoopModel`；但运行时功能开关 `tengu_plum_vx3` 为真时，搜索流会切换到 `getSmallFastModel()`，优先使用 `ANTHROPIC_SMALL_FAST_MODEL`，未设置时回退到默认 Haiku。
+默认情况下，WebSearch 会沿用当前主循环的 `context.options.mainLoopModel`；但运行时功能开关 `tengu_plum_vx3` 为真时，搜索流会切换到 `getSmallFastModel()`，优先使用 `ANTHROPIC_SMALL_FAST_MODEL`，未设置时回退到默认 Haiku。
 
 因此，`isEnabled()` 返回 true 只说明当前 provider/model 组合具备 WebSearch 能力，不代表最终搜索模型已经确定。真正的模型选择发生在 `WebSearchTool.call()`，默认分支使用主循环模型，功能开关分支使用 small fast model；两条路径都通过独立的模型流调用服务端 WebSearch 工具。
 

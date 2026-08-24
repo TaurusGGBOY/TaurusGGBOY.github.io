@@ -46,7 +46,7 @@ IDE 知道当前选区，Chrome 知道标签页，Claude Code 的 query loop 却
 
 ## 正文
 
-本文以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码为边界。下面的代码只保留证明主路径所需的部分；省略的 import、日志和平台分支会明确标出。
+本篇以仓库从 `@anthropic-ai/claude-code@2.1.88` source map 还原出的源码重建主路径。下面的代码只保留证明当前结论所需的部分；省略的 import、日志和平台分支会明确标出。
 
 ### 三种检索能力先不要混成一个概念
 

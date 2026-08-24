@@ -104,7 +104,7 @@ runToolUse → 权限检查 → 具体 Tool.call()
 
 Read、Grep 这类短调用直接产生 `tool_result`，不创建运行时 Task；前台 Bash/Agent 即使注册 Task，当前工具调用仍等待执行结束；后台 Bash、后台 Agent 或远程 Agent 才把两层生命周期拆开，原始 `tool_use` 先拿到含 task ID、输出文件的结果，Task 在后台推进，终态后 `enqueueTaskNotification()` 生成 `task-notification` 放入队列，后续回合模型再按需读取。所以不能把"一个 tool-use 就是一个 Task"当成规则，Task 框架还服务主会话、Dream、远程任务和 teammate 等没有单个模型 `tool_use` 的执行实例；反过来，`TaskStop` 自己也是一次 `tool_use`，它按 `task_id` 找到已有 Task 并调用 `kill()`，不会把停止请求误认为被停止的任务本身。`toolUseId`、`AppState.tasks` 和通知队列如何接起来，以 `restored-src/`（2.1.88 source map 还原）为准。
 
-现在把问题再往前推一步，**把"请检查整个仓库"直接交给主 Agent，会让搜索噪声、临时工具结果和实现细节长期占着主上下文。Subagent 的价值在于把任务、权限和结果回流都切成一条可管理的边界，多开一个模型只是实现手段。**
+本篇的贡献是把委派拆成三条边界：任务进入独立 Query Loop，工具与权限在子上下文内重新装配，结果再通过前台工具结果或后台通知回流。把“请检查整个仓库”交给主 Agent 时，搜索噪声、临时工具结果和实现细节会长期占着主上下文；多开一个模型只是实现手段。
 
 ![主 Agent 与 Subagent 的上下文和能力边界](/images/posts/claude-code-source-reading-24/24-subagent-boundary-detail-handdrawn.png)
 

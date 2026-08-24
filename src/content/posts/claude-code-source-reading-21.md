@@ -54,7 +54,7 @@ imagePosition: "left"
 
 ![命令解析、查找与 handler 路由](/images/posts/claude-code-source-reading-21/21-command-routing-detail-handdrawn.png)
 
-本文只追踪命令真正改变执行流程的地方，注册表如何合并来源，解析器如何得到命令名和参数，以及 handler 如何决定调用本地逻辑、展开 prompt 或提交查询。
+本篇的贡献是把命令注册、解析、查找与 handler 分派连成一条控制流：它解释命令名和参数如何产生，以及何时进入本地逻辑、prompt 展开或 Query Loop。
 
 ## 正文
 

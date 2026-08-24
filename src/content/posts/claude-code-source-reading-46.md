@@ -15,7 +15,7 @@ imagePosition: "left"
 
 答案是先把 Windows 的麦克风通过 WSLg 暴露给 Linux，再让 ALSA 的默认录音设备转到 WSLg 提供的 PulseAudio，`voice` 配置本身不足以完成这件事。官方文档把 **WSL2 + WSLg** 列为前提；WSL1、没有 WSLg 的 WSL2、SSH 或其他远程会话没有本地麦克风通道，应该直接在 Windows 本机运行 Claude Code，或者使用外部语音转文字工具。
 
-这不是凭空推测。一个在 Windows 11 + WSL2 + Ubuntu 上实测的配置方案安装了 `libasound2-plugins`、`alsa-utils`、SoX 和 PulseAudio 工具，再用 ALSA 配置把默认设备指向 PulseAudio；另一位 WSL2 用户进一步验证，只有 `~/.asoundrc` 时仍可能出现 `Unknown PCM default`，同时写入 `/etc/asound.conf` 才能让 `arecord` 打开 `default`。两篇方案都把“先录一段音频”作为 `/voice` 之前的验收条件。
+两篇社区方案给出了相同的验收链：一个在 Windows 11 + WSL2 + Ubuntu 上实测的配置方案安装了 `libasound2-plugins`、`alsa-utils`、SoX 和 PulseAudio 工具，再用 ALSA 配置把默认设备指向 PulseAudio；另一位 WSL2 用户进一步验证，只有 `~/.asoundrc` 时仍可能出现 `Unknown PCM default`，同时写入 `/etc/asound.conf` 才能让 `arecord` 打开 `default`。两篇方案都把“先录一段音频”作为 `/voice` 之前的验收条件。
 
 ## 介绍本章的一些概念
 
@@ -39,7 +39,7 @@ imagePosition: "left"
 
 ![MagicDocs 与 Prompt Suggestions 两条旁路](/images/posts/claude-code-source-reading-46/46-sidecars-detail-handdrawn.png)
 
-先把文档副作用、模型预测和用户确认拆成三条线，后文的权限、cache key 与 ghost text 才不会混为一谈。
+三条线分别是文档副作用、模型预测和用户确认；权限、cache key 与 ghost text 由此保持各自边界。
 
 ## 问题
 
@@ -47,7 +47,7 @@ imagePosition: "left"
 
 答案是先把 Windows 的麦克风通过 WSLg 暴露给 Linux，再让 ALSA 的默认录音设备转到 WSLg 提供的 PulseAudio，`voice` 配置本身不足以完成这件事。官方文档把 **WSL2 + WSLg** 列为前提；WSL1、没有 WSLg 的 WSL2、SSH 或其他远程会话没有本地麦克风通道，应该直接在 Windows 本机运行 Claude Code，或者使用外部语音转文字工具。
 
-这不是凭空推测。一个在 Windows 11 + WSL2 + Ubuntu 上实测的配置方案安装了 `libasound2-plugins`、`alsa-utils`、SoX 和 PulseAudio 工具，再用 ALSA 配置把默认设备指向 PulseAudio；另一位 WSL2 用户进一步验证，只有 `~/.asoundrc` 时仍可能出现 `Unknown PCM default`，同时写入 `/etc/asound.conf` 才能让 `arecord` 打开 `default`。两篇方案都把「先录一段音频」作为 `/voice` 之前的验收条件。
+两篇社区方案给出了相同的验收链：一个在 Windows 11 + WSL2 + Ubuntu 上实测的配置方案安装了 `libasound2-plugins`、`alsa-utils`、SoX 和 PulseAudio 工具，再用 ALSA 配置把默认设备指向 PulseAudio；另一位 WSL2 用户进一步验证，只有 `~/.asoundrc` 时仍可能出现 `Unknown PCM default`，同时写入 `/etc/asound.conf` 才能让 `arecord` 打开 `default`。两篇方案都把「先录一段音频」作为 `/voice` 之前的验收条件。
 
 ### 先判断你的 WSL 是否具备条件
 
