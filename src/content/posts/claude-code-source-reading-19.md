@@ -66,6 +66,8 @@ imagePosition: "left"
 
 一次请求可能在 HTTP 层返回 529，在流已经输出一半时断开，或在工具实际执行后才抛出异常。把这些情况都写成"再试一次"，要么重复副作用，要么把本来可恢复的错误直接暴露给用户。
 
+本文的主线只有一条：Claude Code 先按错误发生的阶段和副作用状态分流，再决定是否重试。输入、权限等不会因重放而改变的错误直接结束；连接、认证和服务端容量错误按条件退避；上下文、输出上限或传输形状错误则先修复状态，或切换传输方式后再调用。这个分类是 2.1.88 还原源码中的控制流，不是线上错误频率的统计。
+
 ![错误分类、重试与熔断恢复阶梯](/images/posts/claude-code-source-reading-19/19-recovery-ladder-detail-handdrawn.png)
 
 ## 正文
@@ -82,15 +84,9 @@ imagePosition: "left"
 
 ### 这张金额单位工单失败时，Claude Code 先判断是哪一种失败
 
-10，03，工程师已经拿到金额字段的调用链，准备让模型读取 issue-tracker 的历史评论，API 却返回了 529；响应只输出了一半，终端停在"正在获取历史舍入规则"。10，11，重新检查本地代码时，Grep 因为一个已经被重命名的目录退出非零。10，46，修复分支上的测试又报错，但错误来自一个未安装的浏览器依赖，而不是金额断言。三件事都叫"失败"，可恢复方式完全不同。
+同一个任务里，API 可能返回 529，流可能在 `tool_use` 之后断开，Grep 也可能因为目录已重命名退出非零。三件事都叫"失败"，但恢复边界不同：网络请求可以退避，流可以重建，MCP、Bash 或测试的失败则要以对应的 `tool_result` 回填给模型。
 
-工程师因此把任务约束写得很明确，
-
-> 完成后使用 LSP、Chrome 和相关测试验证；失败时保留错误证据，必要时回滚或切换方案。不要因为一次网络错误就重复已经成功的文件写入或外部调用。
-
-网络请求可能进入退避，流可能重新建立，MCP、Bash 或测试的失败则要以对应的 `tool_result` 回填给模型。Claude Code 先分类并记录遥测，再由控制层决定重试、降级、回滚、把错误交回模型或结束会话；用户看到的最终结论必须来自成功结果或明确错误路径。
-
-下面沿这张金额单位工单的几个失败点进入源码，区分错误标签、恢复动作和最终呈现。
+下面沿这几个失败点进入源码，区分错误标签、恢复动作和最终呈现。重点不是记录一次具体排障过程，而是看控制流如何避免重放已经成功的文件写入或外部调用。
 
 ### 第一层分类｜遥测标签与控制决策分层处理
 
@@ -135,7 +131,7 @@ export function classifyAPIError(error: unknown): string {
 
 参数说明，`error` 是 `unknown`，所以函数先用 `instanceof`、HTTP status 和消息特征逐层缩窄。省略 `APIError.status` 时会跳过 4xx/5xx 回退；最终标签 `unknown` 表示静态分类器未命中已知形状。
 
-这里要特别注意，这一步只生成**诊断分类**。比如 401 会被标成认证类错误，但某些路径会刷新凭证后重试；429 会被标成 rate limit，但订阅用户、企业用户和无人值守模式的处理会分流。标签负责把错误说清楚，重试控制流由 `shouldRetry()` 和外层上下文决定。
+这一步只生成**诊断分类**，不直接决定控制流。401 可能进入凭证刷新，429 要看订阅、企业或无人值守模式；真正的重试判断由 `shouldRetry()` 和外层上下文完成。
 
 ### 先给结论｜直接错误、自动重试与降级
 
@@ -157,7 +153,7 @@ export function classifyAPIError(error: unknown): string {
 | 工具异常 | 回填给模型 | `is_error: true` 且配对 `tool_use_id` 的 `tool_result`，不由执行器自动重做 | 0；下一轮由模型决定 | 下一轮模型检查现场、改参数或解释 |
 | Hook 非零退出 | 归并 outcome | 退出码 2 / `decision: 'block'` 形成 blocking feedback；其他非零通常是 attachment | 不走 API 重试 | 模型可见反馈或用户可见附件 |
 
-矩阵中每一行都可以在正文对应小节找到源码证据。记住四件事，**401/429/529 这三类最容易混淆**（一个刷新凭证、一个看订阅、一个看连续计数）；**`refusal` 和 `max_tokens` 是模型已经返回了完整响应，不是网络异常**；**工具与 Hook 失败不走 API 重试**（前者回填给模型，后者归并 outcome）；**流式降级不是无成本重放**，因为失败流可能已经越过工具副作用边界。
+矩阵中的关键不是记住所有标签，而是区分四种控制流：**401/429/529** 分别看凭证、运行模式和连续计数；**`refusal` 与 `max_tokens`** 是模型响应，不是网络异常；**工具与 Hook 失败**分别回填模型和归并 outcome；**流式降级**可能已经越过工具副作用边界，不能视作无成本重放。
 
 这里还要把两个“看起来像错误”的模型返回单独拎出来。`getErrorMessageIfRefusal(stopReason, model)` 只在 `stopReason === 'refusal'` 时生成 Usage Policy 提示；它不是 `APIError`，所以不会经过 `shouldRetry()`。`stop_reason === 'max_tokens'` 和 `stop_reason === 'model_context_window_exceeded'` 也来自一个已经完成协议收口的模型响应，`claude.ts` 把它们标成 `max_output_tokens`，交给 `queryLoop()` 的续写恢复分支，而不是重新走网络退避。这里的“重试”其实是改变状态后的下一轮模型调用。
 
@@ -253,7 +249,7 @@ function shouldRetry(error: APIError): boolean {
 
 参数说明，省略 `error.status` 时，在连接错误特判之后直接进入不可重试分支。服务端非标准头 `x-should-retry` 的可见值是字符串 `'true'`、`'false'` 或缺失；缺失时继续按连接类型和状态码判断，它还会受到订阅类型和内部运行环境约束。429 对普通订阅用户默认不走这里的常规重试，Enterprise 可重试。408 是请求超时，409 在源码注释中是 lock timeout，5xx 是服务端错误。其余 4xx 默认返回 `false`。
 
-这段代码也说明"HTTP 失败一律重试"为什么危险。400 往往说明参数或上下文有问题，重放不会改变结果；403 通常要用户修复授权。只有源码明确知道凭证会被刷新、连接会被重建，或者服务端声明可以重试时，才值得继续。
+因此，400/403 默认不重放：前者通常需要修复参数或上下文，后者通常需要修复授权。只有凭证可刷新、连接可重建，或服务端明确允许时，才进入重试。
 
 ### 退避按服务端提示或指数公式计算
 
@@ -378,9 +374,7 @@ const result = yield* executeNonStreamingRequest(
 
 字段说明，`disableFallback` 合并环境变量与 `tengu_disable_streaming_to_non_streaming_fallback`；真值直接抛出 `streamingError`。降级分支把 `didFallBackToNonStreaming` 设为 `true` 并调用 `options.onStreamingFallback`。传入非流式执行器的第一层对象用 `model` 与 `source` 标识请求；第二层对象继续传递 `model`、`fallbackModel`、`thinkingConfig`、`signal`、`querySource`，并用 `initialConsecutive529Errors` 把当前 529 计为 1，否则从 0 开始。
 
-为什么源码还提供关闭开关？注释给出的原因很具体，启用 streaming tool execution 时，部分流可能已经启动了工具；再用非流式请求重做相同采样，可能生成同一工具动作并执行第二次。外层 `queryLoop()` 在收到 `onStreamingFallback` 后会 tombstone 部分 assistant message、清空旧 tool result，并 discard executor，但已经越过副作用边界的外部操作并不能靠清数组撤销。
-
-静态源码也不能告诉我们线上具体开关值。
+源码保留关闭开关，是因为注释明确指出：启用 streaming tool execution 时，部分流可能已经启动了工具；再用非流式请求重做相同采样，可能生成同一工具动作并执行第二次。外层 `queryLoop()` 在收到 `onStreamingFallback` 后会 tombstone 部分 assistant message、清空旧 tool result，并 discard executor，但已经越过副作用边界的外部操作并不能靠清数组撤销。
 
 ### 工具失败｜把异常回填给模型
 
@@ -438,7 +432,7 @@ const result = yield* executeNonStreamingRequest(
 
 字段说明，`hookMessages` 收集 `runPostToolUseFailureHooks()` 产出的更新；最终返回项的 `message` 是 user message，内部块以 `type: 'tool_result'`、`is_error: true` 标记失败，并把 `content` 与 `tool_use_id` 写回协议。完整返回对象还用 `sourceToolAssistantUUID` 关联产生该工具请求的 assistant 消息。
 
-工具失败后直接回填结果，这是一个重要的安全选择。Bash 可能已经执行前半段，Edit 可能已经写盘，MCP 服务也可能在返回错误前提交了远端事务。执行器无法仅凭一个 exception 判断副作用是否发生。把错误作为 `tool_result` 回给模型，可以让模型检查现场、换参数或向用户说明，并避免在副作用状态未知时自动重做。
+这个分流对应一个明确的副作用边界：Bash 可能已经执行前半段，Edit 可能已经写盘，MCP 服务也可能在返回错误前提交了远端事务。执行器无法仅凭一个 exception 判断副作用是否发生，因此把错误作为 `tool_result` 回给模型，让模型检查现场、换参数或向用户说明，而不是在状态未知时自动重做。
 
 如果错误是 `McpAuthError`，执行器还会把对应 client 从 `connected` 改为 `needs-auth`；其他状态、client 缺失或已离开 connected 时都保持原状态。这次状态修复不会自动重放原 MCP 调用。
 
@@ -507,7 +501,7 @@ export function isAbortError(e: unknown): boolean {
 
 ### 模型错误也有"修复输入再试"的分支
 
-有些模型/API 错误表示当前上下文形状无法被接受。`queryLoop()` 会先修复状态，再用新状态重试。
+输入形状或输出边界错误走状态修复分支：`queryLoop()` 先修复状态，再用新状态重试。
 
 最典型的是 prompt too long。API error message 会先被 withheld，不立即显示；随后运行时优先尝试 drain 已暂存的 context collapse，再尝试一次 reactive compact。压缩成功后，`buildPostCompactMessages()` 重建消息链，并以 `transition.reason = 'reactive_compact_retry'` 继续。已经尝试过的布尔标志 `hasAttemptedReactiveCompact` 会保留，防止"压缩后仍过长 → 再压缩"的死循环。
 
@@ -540,9 +534,7 @@ export function isAbortError(e: unknown): boolean {
 
 ### 静态源码能确认什么，不能确认什么
 
-静态源码可以确认默认重试数、HTTP status 与 header 的判断、指数退避公式、连续 529 的计数门槛、流转非流的入口、工具错误回填形状、Hook outcome、Abort 分支和 `queryLoop()` 的终止 reason。
-
-但功能开关、用户订阅类型、provider 返回的 header、实际 `fallbackModel`、网络故障分布和远端实验值都属于运行时条件。
+静态源码可以确认默认重试数、HTTP status 与 header 的判断、指数退避公式、连续 529 的计数门槛、流转非流的入口、工具错误回填形状、Hook outcome、Abort 分支和 `queryLoop()` 的终止 reason；不能确认功能开关、用户订阅类型、provider 返回的 header、实际 `fallbackModel`、网络故障分布和远端实验值。因此本文不推断线上频率或开关的实际取值。
 
 副作用边界也必须保守描述。流式 fallback 会清理局部消息与 executor，但不能撤销已经落盘或提交到外部系统的动作。要判断一次失败能否安全重试，仍然需要检查具体工具实现和真实现场。
 
@@ -571,13 +563,13 @@ export function isAbortError(e: unknown): boolean {
 
 源码里找不到官方选型记录，下面的判断来自代码结构与调用关系，属于解释而非官方声明。
 
-**第一，为什么错误要关在产生它的那一层？** 因为不同层的错误拥有不同的信息与副作用状态。API 层知道 header 和状态码，可以判断凭证是否刷新、连接是否重建；工具层知道副作用可能已经发生，不能自动重放；流层知道部分工具可能已经启动。让上层盲目 catch 再"再试一次"，要么重复副作用，要么把本来可恢复的错误直接暴露给用户。
+**分层恢复。** 不同层拥有不同的错误信息与副作用状态：API 层知道 header 和状态码，可以判断凭证是否刷新、连接是否重建；工具层知道副作用可能已经发生，不能自动重放；流层知道部分工具可能已经启动。让上层盲目 catch 再"试一次"，会重复副作用，或把本来可恢复的错误直接暴露给用户。
 
-**第二，为什么"诊断标签"与"重试决策"分离？** 因为同一个标签在不同环境下语义不同，401 在普通路径是认证错误、在 remote/CCR 是基础设施故障；429 对订阅用户和企业用户的处理分流。`classifyAPIError()` 负责把错误说清楚，`shouldRetry()` 与外层上下文负责决定怎么做，单一分类函数可以稳定，决策逻辑随运行环境变化。
+**标签与控制分离。** 同一个标签在不同环境下语义不同，401 在普通路径是认证错误、在 remote/CCR 是基础设施故障；429 对订阅用户和企业用户的处理也会分流。`classifyAPIError()` 负责描述错误，`shouldRetry()` 与外层上下文负责决定动作。
 
-**第三，为什么工具失败不自动重试？** 因为执行器无法仅凭一个 exception 判断副作用是否发生，Bash 可能已执行前半段，Edit 可能已写盘，MCP 服务可能在返回错误前提交了远端事务。把 `is_error: true` 的 `tool_result` 回填给模型，是把修正机会交回 Agent 循环，同时避免在副作用状态未知时自动重做。
+**工具失败回填。** 执行器无法仅凭一个 exception 判断副作用是否发生。把 `is_error: true` 的 `tool_result` 回填给模型，是把修正机会交回 Agent 循环，同时避免在状态未知时自动重做。
 
-**第四，为什么换模和流降级都要先清暂存？** 因为失败流中可能已经产出 `tool_use`，备用模型或非流式请求重试后会生成新的 ID；混入旧结果会制造孤儿 `tool_result`，严重时重复执行工具。先修复协议边界（清空 assistant 消息、tool result、tool-use 暂存、discard executor），再重做本次采样，这也是"不能撤销已落盘副作用"下的最小安全动作。
+**重试前修复协议边界。** 失败流中可能已经产出 `tool_use`，备用模型或非流式请求重试后会生成新的 ID；混入旧结果会制造孤儿 `tool_result`，严重时重复执行工具。因此先清空 assistant 消息、tool result、tool-use 暂存并 discard executor，再重做本次采样；这也是不能撤销已落盘副作用时的最小安全动作。
 
 ## 练习｜在真实会话里观察错误恢复
 
