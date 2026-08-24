@@ -86,6 +86,30 @@ R = 经过真实压测验证的聚合输出 tok/s
 
 如果要计算输入+输出总 token，还要把平均输入长度纳入模型。以 500 tok/s 输出为例，若每个请求平均输入 4096、输出 512，则输入/输出比为 8:1，计费或带宽口径的总 token 可能远高于 8100 万；但“模型生成能力”通常应报告 output tok/s，二者不要混写。
 
+## 7. 和其他模型、其他机器的并发吞吐对比
+
+为了知道我们的预算处在什么位置，我又补了一组公开并发评测。下表把他们的吞吐统一换算成“每周 5 天、每天 9 小时”的周产能等价；这只是把数字放到同一把尺子上，不代表这些评测真的连续工作 45 小时，也不代表模型能力、成本和精度相同。
+
+| 模型与机器 | 并发与 workload | 公开吞吐（tok/s） | 按 45 小时换算的周产能 | 说明 |
+| --- | --- | ---: | ---: | --- |
+| 我们：V4-Flash，8×H20，非 PD | C=30，真实 workload 待测 | 400–600 | 6480 万–9720 万 | 生产规划区间 |
+| 我们：V4-Flash，8×H20，PD 4P+4D | C=30，真实 workload 待测 | 250–500 | 4050 万–8100 万 | 生产规划区间 |
+| Qwen3-235B-A22B，8×H100 | C=500，4K input / 200 output | 931.21 | 1.5086 亿 | vLLM 现场 benchmark [14] |
+| DeepSeek-V3/R1 671B，8×H100 | 约 C=100，1024 input / 256 output | 约 620 | 1.0044 亿 | 独立现场 benchmark [16] |
+| Llama-3.1-70B，4×H100 | C=100，1000 input / 1000 output | 3794.76 | 6.1475 亿 | NVIDIA NIM，dense 70B [15] |
+| GPT-OSS-120B，2×H100 | C=32，100 input / 1000 output | 3023.03 | 4.8973 亿 | Oracle token-level throughput，方向性参照 [18] |
+| Qwen2.5-72B AWQ，1×L20 | C=10，约 512 input / 256 output | 108.84 | 1763.2 万 | 24 小时持续压测 [19] |
+
+这张表不能拿来做简单的“谁更快”排名。Llama-3.1-70B 是 dense 70B，GPT-OSS-120B 的指标命名是 token-level throughput，Qwen2.5-72B 还是 AWQ 单卡路径；它们与 V4-Flash 的总参数、激活参数、权重格式、并行方式和 serving runtime 都不一致。[15][18][19] 更合理的读法是：8×H20 的非 PD 预算 400–600 tok/s，低于 8×H100 上 Qwen3-235B 的 931 tok/s，接近 8×H100 上超大 DeepSeek V3/R1 的约 620 tok/s；考虑到 GPU、版本和 workload 差异，这个区间是保守的容量规划，不是离谱的低估。[14][16]
+
+并发也会改变结论。Qwen3-235B 的 931.21 tok/s 是 C=500 的高并发点；DeepSeek V3/R1 的公开记录则显示 C≈100 后输出吞吐基本见顶，继续加并发主要会把等待时间分摊给更多用户。[14][16] 这正是我们的 C=30 不能直接套用 C=8 结果的原因：要同时看 aggregate output tok/s、每用户 TPOT、TTFT 和 p95/p99。
+
+还有一个适合做硬件敏感性参照的结果：SemiAnalysis InferenceX 在 DeepSeek R1 0528、8K/1K FP8、97 tok/s/user 的交互目标下，给出 H100 154.3 tok/s/chip、H200 500.1 tok/s/chip；页面明确说明这是从真实 benchmark 数据插值得到的 operating point，不是固定并发的一次性实测。[17] 它说明 H200 的显存带宽会显著改变大模型吞吐，但不能把单 chip、每用户交互指标直接乘成我们的 8 卡 aggregate 产能。
+
+NVIDIA 还为 Qwen3-235B-A22B 定义了一个很适合复刻的统一 workload：16×H100/H200、4K input / 200 output、C=32，同时测试 aggregated 与 disaggregated；不过该页面发布的是拓扑和压测模板，没有给出可直接引用的 output tok/s。[20] 我们可以借用这个思路，把自己的验收矩阵固定为 4K/200、C=32 附近，再补上真实业务分布，最后比较非 PD 与 4P+4D 的吞吐和尾延迟。
+
+从部署决策看，我会保留三档：短中等输入、缓存命中正常时按非 PD 600 tok/s、9720 万/周做上沿预算；生产承诺按 500 tok/s、8100 万/周；thinking、长上下文或缓存命中差时按 400 tok/s、6480 万/周。PD 方案则先按 250 tok/s、4050 万/周做保守预算，只有在 30 并发的 p99 TTFT/TPOT 和独立扩缩容收益明确改善后，才上调到 400–500 tok/s。
+
 ## 最终建议：先做四格压测，再决定是否 PD
 
 第一格是统一 TP=8、官方 0731、固定随附模块开关，分别压 128/64、4K/128 和真实业务分布；第二格在相同版本和相同请求上把并发阶梯跑到 8、16、30、48，记录 output tok/s、TTFT、TPOT、p95/p99、失败率和显存水位。第三格才是 4P+4D，Prefill 和 Decode 使用一致的 kernel、CUDA Graph、KV dtype 和 warmup，避免把“PD”与“关闭优化”混成一个变量。
@@ -119,3 +143,17 @@ R = 经过真实压测验证的聚合输出 tok/s
 [12] [SGLang issue: V4 Flash H20 cache behavior](https://github.com/sgl-project/sglang/issues/35129)
 
 [13] [DeepSeek-V4-Flash-0731 raw configuration](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/raw/main/config.json)
+
+[14] [GPUStack: Qwen3-235B-A22B on 8×H100](https://docs.gpustack.ai/2.0/performance-lab/qwen3-235b-a22b/h100/)
+
+[15] [NVIDIA NIM LLM performance benchmarks](https://docs.nvidia.com/nim/benchmarking/llm/1.0.0/performance.html)
+
+[16] [DeepSeek-V3/R1 671B on 8×H100 throughput benchmark](https://github.com/dzhsurf/deepseek-v3-r1-deploy-and-benchmarks)
+
+[17] [SemiAnalysis InferenceX: DeepSeek R1 H100 vs H200](https://inferencex.semianalysis.com/compare/deepseek-r1-h100-vs-h200)
+
+[18] [Oracle OCI: GPT-OSS-120B benchmark](https://docs.oracle.com/en-us/iaas/Content/generative-ai/benchmark-openai-gpt-oss-120b.htm)
+
+[19] [llm-quant-bench external serving comparisons](https://github.com/yinli-systems/llm-quant-bench)
+
+[20] [NVIDIA Dynamo: Qwen3-235B-A22B FP8](https://docs.nvidia.com/dynamo/dev/recipes/qwen3-235b-a22b-fp8)
