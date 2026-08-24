@@ -9,7 +9,7 @@ draft: false
 
 如果手里有 8 张 H20，目标是长期跑 DeepSeek-V4-Flash，最容易被误导的不是显存容量，而是把“模型能启动”“单请求很快”和“30 并发持续吞吐”当成同一个指标。它们分别对应装载、延迟和容量，计算方式完全不同。
 
-本文只估算**输出 token**。条件是每周工作 5 天、每天 9 小时、服务保持满载，客户端最多维持 30 个并发请求。平均输入长度、输出长度、是否开启 thinking、前缀缓存命中率和硬件 SKU 都会改变结果，所以文中的点估算是预算口径，区间才是部署决策口径。
+本文最终核算的是**输出 token**，但评测不能只看输出 token/s。条件是每周工作 5 天、每天 9 小时、服务保持满载，客户端最多维持 30 个并发请求。平均输入长度、输出长度、输入吞吐、是否开启 thinking、前缀缓存命中率和硬件 SKU 都会改变结果，所以文中的点估算是预算口径，区间才是部署决策口径。
 
 ## 先给结论
 
@@ -38,7 +38,50 @@ SGLang 对 PD 分离的解释很准确：prefill 偏计算，decode 偏 KV cache
 
 这就是为什么 PD 不是天然加速开关。它适合“prefill 和 decode 负载比例变化很大、需要独立扩缩容、长上下文排队拖慢短请求”的服务；如果流量主要是短输入、短输出，统一 TP=8 往往更容易把 8 张卡的算力和通信效率吃满。
 
-## 3. 非 PD：公开 H20/SGLang 数据能支撑什么
+## 3. 输入性能也必须纳入吞吐口径
+
+输入 token 不会被“生成”出来，因此周产能表仍然只统计 output token；但输入性能会直接决定系统能否维持目标 output tok/s。这里要把四个指标分开：
+
+| 指标 | 含义 | 主要瓶颈 |
+| --- | --- | --- |
+| input tok/s | Prefill 每秒处理的输入 token 数 | 输入长度、上下文长度、计算吞吐、前缀缓存命中率 |
+| output tok/s | Decode 每秒生成的输出 token 数 | 并发、输出长度、显存带宽、KV Cache 容量 |
+| request/s | 每秒完成的请求数 | 输入输出长度、排队和调度 |
+| TTFT / ITL | 首 token 延迟 / 后续 token 间隔 | Prefill 排队、Decode 争抢、KV 传输和调度 |
+
+在稳定运行时，如果平均完成率为 `λ` 请求/秒，平均每个请求有 `I` 个输入 token、`O` 个输出 token，则：
+
+```text
+input tok/s = λ × I
+output tok/s = λ × O
+total token/s = input tok/s + output tok/s
+```
+
+例如 30 个并发请求，平均每个请求输入 8000 token、输出 1000 token，平均从进入到完成需要 60 秒，则完成率约为 `30 ÷ 60 = 0.5 request/s`，对应 4000 input tok/s 和 500 output tok/s。这里的 500 tok/s 才是通常意义上的模型生成产能；4000 input tok/s 是系统必须承受的 Prefill 处理量，不能漏掉。
+
+因此，前文的“400–600 output tok/s”必须理解为带有 workload 条件的区间，而不是脱离输入长度的硬件常数。如果只给出“30 并发”而不固定输入长度、输出长度和缓存命中率，就不能复现一个有意义的吞吐数字。NVIDIA 的分离式服务文档也把 Prefill 的压力归因于输入长度、上下文和提示词复用，把 Decode 的压力归因于并发、输出长度和活跃 KV Cache。[21]
+
+输入负载还决定 PD 是否值得使用。非 PD 中，长 Prefill 会与正在生成的请求争抢同一组调度、计算和显存资源，可能拖高 Decode 的 ITL 和 p99；PD 可以把 Prefill 和 Decode 分到不同 GPU 池，并分别扩容，但需要额外传输 KV Cache。低并发或短输入时，传输和 GPU 池切分可能抵消收益；长输入、输入长度波动大、又需要稳定 TTFT/ITL 时，PD 的资源隔离价值更明显。[21][22]
+
+所以 8×H20 的验收不能只记录聚合 output tok/s，至少应同时记录：
+
+```text
+input tok/s、output tok/s、request/s
+TTFT、平均 ITL、p95/p99 ITL
+输入长度、输出长度、并发数、前缀缓存命中率
+GPU 利用率、KV Cache 使用率、PD 场景的 KV 传输耗时
+```
+
+测试矩阵建议固定为 1K/4K/8K/32K 输入，512/2K/8K 输出，并将并发从 1、8、16、30 逐级提高。最终比较的是相同输入输出分布下的 output tok/s、input tok/s 和 p99 延迟，而不是把不同 workload 的“总 token/s”直接排名。周产能公式仍为：
+
+```text
+周输出 token = 162000 × R
+R = 真实压测得到的聚合 output tok/s
+```
+
+如果业务还需要计费或带宽口径的总 token，则另行计算 `input tok/s + output tok/s`，不要把它与模型生成产能混写。
+
+## 4. 非 PD：公开 H20/SGLang 数据能支撑什么
 
 目前最接近本问题的公开现场数据，是一份在 8×H20 96GB 上对 DeepSeek-V4-Flash-0731 的部署记录。它的 SGLang 结果是：128 input / 64 output、并发 8 时，输出吞吐 480.99 tok/s；4096 input / 128 output、并发 4 时，输出吞吐 531.47 tok/s。[11] 这不是 30 并发的实测，也不是任意上下文长度都能复现的保证，但足以说明 8×H20 的整机级输出吞吐大约处于数百 tok/s，而不是简单用单卡速度乘 8。
 
@@ -46,7 +89,7 @@ SGLang 对 PD 分离的解释很准确：prefill 偏计算，decode 偏 KV cache
 
 SGLang 的公开 V4 benchmark 还给出了 H200 上的参考点：V4-Flash FP4、balanced 策略、并发 64 时，单卡报告 3072 output tok/s。[7] 这个数字只用来说明高端 H200 的基准位置，不能拿来给 H20 做线性换算；硬件、量化格式、并发、版本和测试策略都不同。
 
-## 4. PD：为什么公开结果看起来会慢很多
+## 5. PD：为什么公开结果看起来会慢很多
 
 同一份 H20 部署记录还测试了单节点 4P+4D。短请求 128/64、并发 8 时，4P+4D 只有 65.85 tok/s；4096/128、并发 4 时是 33.63 tok/s。[11] 这组数字不能被解读为“PD 在 H20 上只有 30–70 tok/s”，因为测试同时关闭了 DSpark 和 CUDA Graph，而且从一个 TP=8 引擎改成了两个 TP=4 引擎。作者也明确指出，主要损失来自这两个改变，而不是 NIXL 本身。[11]
 
@@ -54,7 +97,7 @@ SGLang 的公开 V4 benchmark 还给出了 H200 上的参考点：V4-Flash FP4�
 
 在目标 workload 还没跑通之前，我建议 PD 先按非 PD 的 60%–85% 做容量预算。因此，当非 PD 按 400–600 tok/s 预算时，PD 的规划区间约为 250–500 tok/s，对应每周 4050 万–8100 万输出 token。这个比例是容量规划假设，不是公开 benchmark 结论；如果业务以超长输入为主，PD 的收益可能体现在 TTFT 和尾延迟，而不是周输出 token。
 
-## 5. 正式版的复现边界：权重、随附模块与运行时要一起固定
+## 6. 正式版的复现边界：权重、随附模块与运行时要一起固定
 
 DeepSeek-V4-Flash-0731 正式版不是一个只写下模型名就能复现的数字。公开配置显示它是混合精度正式权重，并注明它携带 DSpark；SGLang 的 V4 配置也把正式版与随附的 speculative decoding 路线分开列出。[4][8][13] 因此，压测时必须固定 checkpoint、SGLang 版本、Hopper kernel、KV dtype、Graph capture、上下文长度和是否使用随附模块。
 
@@ -69,7 +112,7 @@ R = 经过真实压测验证的聚合输出 tok/s
 
 正式版的随附模块是否开启，应作为一个单独的 A/B 变量记录；不能把开启和关闭、不同版本、不同 KV 配置的结果混成同一个“模型速度”。
 
-## 6. 一周到底能产出多少
+## 7. 一周到底能产出多少
 
 每天 9 小时、每周 5 天，工作时间是 45 小时，也就是 162000 秒。因此每增加 100 tok/s 稳态输出吞吐，周产能就增加 1620 万输出 token：
 
@@ -86,7 +129,7 @@ R = 经过真实压测验证的聚合输出 tok/s
 
 如果要计算输入+输出总 token，还要把平均输入长度纳入模型。以 500 tok/s 输出为例，若每个请求平均输入 4096、输出 512，则输入/输出比为 8:1，计费或带宽口径的总 token 可能远高于 8100 万；但“模型生成能力”通常应报告 output tok/s，二者不要混写。
 
-## 7. 和其他模型、其他机器的并发吞吐对比
+## 8. 和其他模型、其他机器的并发吞吐对比
 
 为了知道我们的预算处在什么位置，我又补了一组公开并发评测。下表把他们的吞吐统一换算成“每周 5 天、每天 9 小时”的周产能等价；这只是把数字放到同一把尺子上，不代表这些评测真的连续工作 45 小时，也不代表模型能力、成本和精度相同。
 
@@ -157,3 +200,7 @@ NVIDIA 还为 Qwen3-235B-A22B 定义了一个很适合复刻的统一 workload�
 [19] [llm-quant-bench external serving comparisons](https://github.com/yinli-systems/llm-quant-bench)
 
 [20] [NVIDIA Dynamo: Qwen3-235B-A22B FP8](https://docs.nvidia.com/dynamo/dev/recipes/qwen3-235b-a22b-fp8)
+
+[21] [NVIDIA Dynamo: Disaggregated Serving Overview](https://docs.nvidia.com/dynamo/kubernetes/disaggregated-serving/overview)
+
+[22] [NVIDIA Dynamo: Disaggregated Serving Architecture](https://docs.nvidia.com/dynamo/dev/knowledge-base/concepts/system-architecture/disaggregated-serving)
