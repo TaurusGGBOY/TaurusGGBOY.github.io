@@ -1,207 +1,258 @@
 ---
-title: "DeepSeek Harness 如何实现可控撤回：从 dsh-file-undo 看插件边界"
+title: "DeepSeek Harness 如何开发无工作区副作用的撤回插件：以 dsh-message-edit 为例"
 published: 2026-08-24
-description: "结合 DeepSeek Harness 的工具执行管线、Cordis 生命周期和 LLM adapter/provider 源码，说明怎样开发一个只补偿本地文件写入的撤回插件。"
-tags: ["deepseek-harness", "plugin-system", "rollback", "side-effects", "typescript"]
+description: "从 dsh-message-edit 的源码出发，区分会话版本撤回、Cordis effect 与 DSH coeffect，并给出一种不修改工作区的插件设计。"
+tags: ["deepseek-harness", "plugin-system", "session-versioning", "coeffect", "typescript"]
 category: "AI / Architecture"
 draft: false
 image: ""
 ---
 
-DeepSeek Harness 可以把“撤回”做成一个范围受控的补偿插件：在文件工具真正执行前保存 before-state，在用户显式请求时，通过官方 `fs` 和当前 session 的沙箱策略写回原内容。
+“撤回”不是一个足够精确的技术名词。
 
-这个设计能处理一类具体事故：Agent 覆盖了尚未提交的配置或源码，用户想撤回刚才那一次 `write` / `edit`。它不承诺回滚所有副作用。恢复动作本身仍然是一次本地写入，但不会重新进入模型循环，不执行 shell，不访问网络，也不修改 Git 历史。本文把这种边界称为**可控撤回**。
+在 DeepSeek Harness（DSH）里，撤回可以指删除一段模型上下文、切换到旧的会话分支、释放一个插件注册的资源，也可以指补偿已经发生的文件写入。它们的对象、证据和失败方式都不同。把它们都叫作 rollback，很容易把 DSH 的 `coeffect`、Cordis 的 `effect` 和业务副作用补偿混成一个概念。
 
-真实例子是社区插件 [`dsh-file-undo`](https://github.com/QinLuza/dsh-file-undo)。它提供 `/undo`、`/undo list`、`/undo <n>` 和 `/undo prune [days]`，记录文件操作前的完整内容，再按用户指定的快照恢复。这个插件的价值不在于按钮名字，而在于它把采集点、存储、恢复权限和不支持的情况都写成了可检查的代码。
+本文换一个更合适的真实案例：社区插件 [`dsh-message-edit`](https://github.com/Moeblack/dsh-message-edit)。它实现的是消息编辑、重生成、任意回合重试和版本时间线。它不原地改写旧 Session 事件，也不负责恢复工作区文件、命令外部效果或已经产生的产物。撤回发生在“会话版本”这一层，因此可以把它称为**无工作区副作用的上下文撤回**。
 
-## 撤回的对象必须先定义
+这里的“无副作用”有明确范围：插件不把撤回动作变成文件写回或 shell 补偿；它并不意味着重新生成时不会发起新的模型请求，也不意味着已经发生的网络、数据库或进程副作用可以被撤销。
 
-DeepSeek Harness 已经提供了几种相邻机制，它们的撤回对象不同：
+## 先把三个概念拆开
 
-| 机制 | 撤回或恢复的对象 | 不能替代的能力 |
-| --- | --- | --- |
-| Cordis 的 `ctx.effect()` | 插件注册的监听器、命令、服务和资源 | 恢复插件已经改写的文件内容 |
-| session event log | 模型消息、工具调用和结果等持久事实 | 自动重建 `write` / `edit` 之前的全文 |
-| `ctx.llm.registerAdapter()` | 当前 context 中的 provider route | 撤回已经发出的模型请求 |
-| `dsh-file-undo` | 被捕获的一次本地 `write` / `edit` | shell 修改、删除和外部系统副作用 |
+DSH 的插件代码里至少会遇到三种容易混淆的“逆操作”：
 
-因此，文件撤回插件要防止的不是“插件卸载后监听器还在”这一类生命周期泄漏，而是“文件已经被覆盖，before-state 没有留下”。这决定了它必须进入工具执行管线，而不是只实现一个 `dispose()`。
+| 概念 | 它管理的对象 | 典型代码 | 它不承诺什么 |
+| --- | --- | --- | --- |
+| `coeffect` | 运行时所需的依赖、provider 和 consumer 关系 | 依赖注入、服务可用性与动态组合 | 不负责回到旧的用户消息 |
+| `ctx.effect()` | 插件注册动作的生命周期 | 注册 HTTP route、监听器或临时资源 | 不会补偿业务数据变化 |
+| 会话版本 inverse | 一个版本分支与其父分支的关系 | `restore-version`、父 Session 导航 | 不会撤回已经发出的外部请求 |
 
-## 采集点：`tools/pre-execute`
+这张表是全文的边界。`coeffect` 解决的是“这段代码依赖什么，以及依赖变化时怎样重新组合”；会话版本解决的是“下一次模型请求应该从哪一段历史开始”；`ctx.effect()` 解决的是“插件卸载时如何撤销自己的注册”。三者可以同时出现在一个插件里，但不是同一条撤回链路。
 
-官方工具运行时把调用拆成一条有名字的管线：
+## 真实插件：dsh-message-edit 做了什么
 
-```text
-tools/pre-execute
-  → registered guards
-  → tools/execute
-  → tools/post-execute
-  → finalizeContent
-  → tools/result
+插件 README 给出的安装方式是：
+
+```bash
+dsh plugin --profile web add dsh-message-edit
 ```
 
-[`dsh-tools` 文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/tools/README.md) 将 `pre-execute` 定义为可扩展的准入瀑布，将 `execute` 定义为围绕真实分发的包装点，并把 `tools/result` 保留为观察最终结果的事件。
+它提供三类操作：
 
-`dsh-file-undo` 选择 `tools/pre-execute`，因为 before-state 在工具 body 运行后就可能丢失。它的 [`snapshotIfMutation()`](https://github.com/QinLuza/dsh-file-undo/blob/master/src/index.ts#L99-L116) 只处理 `write` 和 `edit`，从参数取出 `file_path`，通过官方 `fs` 解析和读取目标，再追加一条快照：
+- `edit`：编辑已经落定的用户文本、助手思考块或助手回复文本；
+- `reroll`：从最近一个已完成的助手回合之前重新生成；
+- `retry`：从指定历史回合重新执行。
+
+每次操作都产生一个新的 Session 版本。默认的 `truncate` 策略只重新执行目标输入；`preserve` 策略则保留后续用户输入，让它们在新分支中重新经过模型和工具链。原会话并不被删除，Timeline 可以展示版本树，并通过父子关系切回旧版本。
+
+这正是一个比“恢复文件”更干净的撤回例子：插件改变的是模型将要看到的会话投影，不是工作区的字节。
+
+## 源码路径一：把撤回目标固定在完整回合边界
+
+插件没有尝试从一条 `assistant/message` 事件中局部抹掉几段文本，而是先找到目标回合的闭合边界。`editPlan()` 的核心逻辑是：确定目标回合，令 `boundary` 指向该回合开始之前，然后把编辑后的用户输入或助手内容放入新版本计划中。
+
+源码中的关键片段如下：
 
 ```ts
-async function snapshotIfMutation(exec, fs) {
-  if (exec.name !== "write" && exec.name !== "edit") return
-
-  const filePath = exec.arguments?.file_path
-  if (typeof filePath !== "string") return
-
-  const target = await fs.resolve(filePath)
-  const before = await readExistingTextOrNull(fs, target)
-  await appendSnapshot({
-    filePath,
-    command: exec.name,
-    before,
-    time: Date.now(),
-  })
+return {
+  boundary: turn.startSeq - 1,
+  version: pairVersionEffect(operation.sessionId, {
+    operation: "edit",
+    cascade: operation.cascade,
+    targetTurn: turn.turn,
+    targetEventSeq: event.seq,
+    // ...before / after / blockKind
+  }),
+  queuedUsers: [edited, ...later],
 }
 ```
 
-这个采集点绕开了两个不可靠来源：工具结果通常只返回成功文案，session 日志也不必然保存被覆盖前的全文。插件不需要修改官方工具，也不需要复制一套 Agent Loop；它只在既有执行边界上留下未来补偿所需的数据。
+这段设计防止了一种很隐蔽的错误：只复制一条消息，却把原回合里的工具调用、工具结果和 `turn/end` 留在上下文里。这样会得到一条看似连续、实际没有对应执行来源的历史。
 
-`pre-execute` 还有一个明确的边界：它发生在真正执行前。如果后面的 guard 拒绝调用，简单实现可能已经留下快照。`dsh-file-undo` 选择尽量不漏记；如果产品只接受成功写入，应在前置阶段保存 pending snapshot，在 `tools/post-execute` 确认成功后再提交到持久存储。
+因此，插件把“回退”定义为**回到闭合回合之前，再创建完整的新回合**，而不是对原始事件做原地编辑。README 也明确说明，目标回合的 `turn/start`、模型请求、工具调用、工具结果和 `turn/end` 不会被局部拼接到新版本中。
 
-## 真实插件的四个实现点
+## 源码路径二：effect/inverse 作为版本数据，而不是删除事件
 
-### 1. 用 `inject` 声明能力
-
-插件入口声明自己需要 `commands`、`tools`、`fs` 和 `sandboxPolicy`。[`src/index.ts`](https://github.com/QinLuza/dsh-file-undo/blob/master/src/index.ts#L17-L30) 中的核心定义是：
+每个新版本都会附带一个 `message-edit/version` 事件。`pairVersionEffect()` 同时写入正向效果和逆向目标：
 
 ```ts
-export const name = "file-undo"
-export const inject = ["commands", "tools", "fs", "sandboxPolicy"]
-```
-
-这项声明同时承担类型和运行时边界。少写 `inject`，代码可能通过 TypeScript 检查，但在运行时访问 `ctx.commands` 时仍会被 Guard 拒绝。插件能编译，不代表它已经正确进入 harness。
-
-### 2. 快照只保存补偿所需的数据
-
-真实插件的 `FileUndoSnapshot` 包含展示路径、工具名、操作前全文和时间戳；`before: null` 表示文件原本不存在。它没有复制模型 prompt、整个 session 或 Git diff。
-
-```ts
-interface FileUndoSnapshot {
-  filePath: string
-  command: "write" | "edit"
-  before: string | null
-  time: number
+function pairVersionEffect(sourceSessionId, effect) {
+  return {
+    schemaVersion: MESSAGE_EDIT_VERSION_SCHEMA,
+    effect: { ...effect, id: crypto.randomUUID() },
+    inverse: {
+      kind: "restore-version",
+      sessionId: sourceSessionId,
+    },
+  }
 }
 ```
 
-快照写入 `~/.dsh/file-undo/snapshots.jsonl`，一行对应一次操作。追加路径采用 append-only，避免多个工具调用都用“读完整文件—改数组—覆盖写回”来追加记录。[存储源码](https://github.com/QinLuza/dsh-file-undo/blob/master/src/index.ts#L43-L97) 还实现了最近一项弹出、按索引删除和按时间清理。
+这里的 `inverse` 不是“把旧 JSON 删除掉”。它记录的是应该回到哪个父 Session。源码的 `MessageEditVersionEvent` 类型也把这两半放在同一个持久事件里：`effect` 描述编辑、重生成或重试，`inverse` 指向恢复版本。
 
-这不是完整的并发协议。`/undo` 和 `prune` 会重写 JSONL；如果多个 Agent 共享撤回历史，应再加入单写者队列、文件锁或按 session 分片。真实插件的 README 也明确说明快照是全局共享的，这个取舍不能在新实现里被隐藏。
+这种做法有三个直接收益：
 
-### 3. 把撤回做成显式 command
+1. 原始 Session 事件保持 append-only，历史消息的 ID 和工具关联不会因为撤回而被重写；
+2. 父 Session 和子 Session 构成版本树，旧版本仍然可以被读取和切回；
+3. undo/redo 不需要复制一份“看起来像旧消息”的替代文本，而是沿着真实的版本关系导航。
 
-插件在 `apply()` 内注册 `undo` command，并声明 `input` 提示，使 `/undo list`、`/undo 1` 这类参数进入命令 handler。[命令注册源码](https://github.com/QinLuza/dsh-file-undo/blob/master/src/index.ts#L117-L175) 的结构可以概括为：
+这也是“无工作区副作用”的关键：撤回动作本身只新增会话元数据和新 Session，不调用文件写入接口，不调用 shell，也不对原 Session 做 destructive mutation。
+
+## 源码路径三：从 seed 创建子 Agent
+
+`versionSeed()` 先继承目标边界之前的事件，再追加版本事件；如果是助手块编辑，还会追加一个结构完整的手工回合。随后 `createVersionAgent()` 调用公开的 `ctx.agents.create()`：
 
 ```ts
-yield ctx.commands.register({
-  name: "undo",
-  input: { hint: "[list | <n> | prune [days]]" },
-  handler: async (invocation) => {
-    // 读取 list、索引、prune 或最近一项快照
+const seed = versionSeed(source, plan)
+
+const child = await ctx.agents.create({
+  sessionId: childId,
+  seed: seed.events,
+  meta: {
+    cwd: source.header.cwd,
+    parentSession: source.id,
+    seedLength: seed.inheritedLength,
   },
+  agentOptions: options,
 })
+
+await ctx.sessions.flush(child.agent.session)
 ```
 
-命令直接读取快照并调用恢复函数，不把撤回改写成新的模型输入，也不让模型自行决定补偿目标。目标路径、操作索引和恢复内容均来自插件维护的记录。
+`seed` 是新会话的历史起点；`parentSession` 和 `seedLength` 让运行时知道它来自哪个版本。创建成功后，插件才把需要重跑的用户输入交给 `child.agent.followup()`。
 
-### 4. 用官方 `fs` 恢复，并重新解析沙箱策略
+这里有一个值得复用的事务顺序：先构造并持久化完整的子 Session，再排入后续模型任务。如果创建或 flush 失败，代码会释放 child Agent；如果 workspace 挂接失败，也会执行对应的逆操作。这个“操作失败时清理插件自己刚创建的资源”是生命周期一致性，不是业务层的全局回滚。
 
-恢复函数先处理 `before === null`：这表示一次新文件创建，而当前官方 `fs` 没有 delete/unlink 能力，所以插件返回错误，不用 `node:fs` 越过 harness 删除文件。已有文件则通过 `ctx.fs.resolve()` 得到目标，再由 `ctx.sandboxPolicy.resolve({ session })` 解析当前会话策略，最后用 `ctx.fs.writeText()` 写回。[恢复源码](https://github.com/QinLuza/dsh-file-undo/blob/master/src/index.ts#L176-L197) 的关键逻辑如下：
+源码中确实调用了 `workspace.attachSession(childId)`，但这只是把新 Session 关联到已有 workspace；它没有读取快照、写回文件或恢复 Git 状态。也就是说，**关联工作区会话**和**修改工作区内容**是两个不同动作，不能因为代码出现 `workspace` 就把插件归类为文件回滚插件。
+
+## `ctx.effect()` 不是 coeffect，也不是业务撤回
+
+插件最后用 `ctx.effect()` 注册 HTTP route：
 
 ```ts
-if (snapshot.before === null) {
-  return { kind: "error", text: "file deletion is not supported" }
+export function apply(ctx) {
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: "exact",
+      path: "/message-edit",
+      handler: (request, response) => handleRoute(ctx, request, response),
+    }),
+    "message-edit: HTTP route",
+  )
 }
-
-const target = await ctx.fs.resolve(snapshot.filePath)
-const policy = ctx.sandboxPolicy.resolve({ session })
-await ctx.fs.writeText(target, snapshot.before, undefined, undefined, policy)
 ```
 
-这里的权限语义很清楚：恢复会产生一次本地写入，但写入经过官方文件服务和原调用 session 的 workspace policy。插件不能因为自己曾经读到文件，就获得绕过当前 workspace 边界的写权限。
+这里的 effect 表示：注册 route 后，Cordis 持有一个 disposer；插件作用域结束时，route 可以被撤销。它解决的是资源所有权问题。
 
-## `@2-llm-adapterprovider`：另一种可撤回关系
+而 `coeffect` 的讨论重点是依赖和组合。例如，插件入口声明：
 
-LLM adapter/provider 源码展示了“撤回注册关系”的另一种实现。`LlmRuntime.registerAdapter()` 会先校验整组 provider：名称不能为空、route 不能重复、adapter metadata 必须与 provider id 对齐；全部通过后才提交路由。返回的 registration handle 还能用 `replace()` 原子替换自己持有的 route，避免“先 dispose、再 register”让观察者看到短暂的空注册表。[`LlmRuntime` 源码](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm/src/index.ts) 和 [LLM 能力包文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm/README.md) 都把这条关系描述成随调用 fiber 生命周期回收的注册。
+```ts
+export const inject = [
+  "sessions",
+  "agents",
+  "sessionPersistence",
+  "sessionQuery",
+  "workspaceRegistry",
+  "webServer",
+]
+```
 
-`prepareCall()` 则把当前 adapter registration、解析后的 call config 和 retry policy 固定在一次 prepared call 上，而且一次 prepared call 只能 dispatch 一次。provider 在下一次请求前被替换，不会悄悄改写已经准备好的这次请求。
+这表示插件需要这些运行时能力，才能完成版本创建、持久化、时间线查询和 HTTP 暴露。依赖服务是否存在、何时可用、依赖改变后怎样重新绑定，属于 coeffect/依赖组合问题；它不等于撤回某个用户回合。
 
-这两种撤回应分开理解：
+可以用一句话区分：
 
-| 场景 | 逆操作 | 能否回滚外部事实 |
-| --- | --- | --- |
-| `ctx.llm.registerAdapter()` | 从 registry 移除 provider route，并发布更新事件 | 不能撤回已经发出的模型请求 |
-| `dsh-file-undo` | 写回捕获的 before-state | 只补偿目标文件，并受 sandbox policy 限制 |
-| `ctx.effect()` | 按 owner 生命周期执行 disposer | 不自动补偿数据库、网络或 shell |
+> `coeffect` 决定插件能接上哪些能力；`ctx.effect()` 决定这些接线何时被收回；`message-edit/version` 决定会话版本如何回到父分支。
 
-LLM adapter 的 disposer 撤回的是能力注册，文件快照插件补偿的是一类已发生的本地写入。两者都属于生命周期设计，却不是同一个事务。
+## `@2-llm-adapterprovider` 能提供什么参照
 
-## 开发自己的撤回插件
+LLM adapter/provider 的源码适合用来说明“能力注册”和“会话历史”为什么必须分层。provider route 的注册、替换、失效和生命周期回收，处理的是下一次调用如何找到模型能力；它并不拥有已经落盘的用户消息，也不应该负责把历史会话切回某个 turn。
 
-### 先写 claim ceiling
+因此，开发会话撤回插件时可以借用 adapter/provider 的几个工程习惯：
 
-第一版应把承诺写成一句可测试的话：
+- 注册前校验依赖和输入，避免半成品能力进入运行时；
+- 把一次操作的正向效果和逆向描述放在同一个可验证结构里；
+- 让一次 prepared call 在 dispatch 后保持语义稳定，不让后续 provider 变化改写既有事实；
+- 用 disposer 管理注册关系，但不要把 disposer 当成外部副作用的补偿器。
 
-> 对已经捕获的既有文件 `write` / `edit`，在当前 session 沙箱策略允许的范围内，把目标恢复到操作前内容。
+对应的官方入口可以参考 [LLM 能力包文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm/README.md) 和 [`LlmRuntime` 源码](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm/src/index.ts)。这些源码能帮助我们理解 provider 生命周期；`dsh-message-edit` 则展示了如何在 Session 层建立自己的版本关系。
 
-这句话已经排除了删除、新文件清理、shell 重定向、网络、数据库和模型请求。每新增一种副作用，都应先定义它自己的补偿协议，而不是把“undo”扩展成全局回滚按钮。
+## 开发自己的无工作区副作用撤回插件
 
-### 在执行前采集，在成功后提交
+### 1. 先写清楚撤回对象
 
-如果只需要一个最小可用实现，`tools/pre-execute` 足以捕获 before-state。若要求撤回历史只包含真正成功的写入，则采用两阶段结构：前置阶段把快照放进 pending map，后置阶段确认成功后再追加 JSONL。
+第一版不要写“支持撤回所有操作”，而要写成：
 
-工具名也必须来自实际 catalog。环境可能使用 `write` / `edit`，也可能使用 `str_replace_editor`、`bash` 或 `run_code`；猜错名字时，拦截器通常不会报错，只会一直不命中。
+> 对一个已闭合的 Session 回合，从该回合之前创建一个新版本；原 Session 事件保持不变；撤回不修改工作区文件、Git 状态或其他外部产物。
 
-### 让恢复路径比采集路径更保守
+如果插件支持 `preserve`，还要补充：后续用户输入会在新分支重新执行，因此会产生新的模型请求和新的工具效果。这个策略不是“免费复制历史”，而是一次新的执行。
 
-恢复阶段至少应满足四项约束：
+### 2. 把边界放在完整回合，而不是单条消息
 
-- 只能写回快照中的目标；
-- 每次恢复重新解析当前 session 的 sandbox policy；
-- 不通过 shell 处理路径；
-- 不使用未声明的 delete/unlink 能力，无法恢复时返回明确错误。
+需要先从事件流中识别：
 
-撤回失败不应自动多次重试。权限变化、用户再次编辑或路径状态变化，都可能让重试变成新的覆盖风险。
+- `turn/start` 和 `turn/end`；
+- 本回合的 user message；
+- assistant message、工具调用和工具结果；
+- 回合是否已经闭合。
 
-### 把插件生命周期和业务补偿分开
+只对闭合回合提供 edit、reroll 或 retry。目标回合之前的事件可以作为 seed；目标回合之后的输入根据 `truncate` 或 `preserve` 决定是否重新排队。
 
-命令注册、事件监听、定时清理和临时资源应放进 `ctx.effect()`，在插件卸载时由 disposer 收回；文件快照则负责补偿插件已经观察到的业务写入。前者管理“插件是否还活着”，后者回答“某次文件变更是否能恢复”。
+### 3. 用版本树代替 destructive mutation
+
+每个分支至少需要：
+
+```ts
+interface VersionEvent {
+  schemaVersion: number
+  effect: {
+    operation: "edit" | "reroll" | "retry"
+    targetTurn: number
+    targetEventSeq: number
+  }
+  inverse: {
+    kind: "restore-version"
+    sessionId: string
+  }
+}
+```
+
+提交版本前验证三件事：父 Session 存在；边界是连续事件；逆向目标与 `parentSession` 一致。验证失败时，不创建半成品 Session，也不修改当前版本。
+
+### 4. 把 workspace 关联和 workspace 修改分开
+
+如果插件需要让新 Session 出现在同一个 workspace 下，可以调用 workspace registry 的公开 API 关联 Session；但不要因此顺手加入文件快照和恢复逻辑。只要需求变成“恢复文件”，它就已经是另一个插件能力，需要独立的快照、权限、并发和失败补偿设计。
+
+### 5. 明确不可撤回的外部事实
+
+重新生成会重新调用 provider。已经发生的模型请求、网络请求、数据库写入、发送出去的消息和已经退出的进程，都不能因为会话切换而消失。UI 上可以把旧版本隐藏在当前 surface 之外，但这不等于物理擦除，也不等于外部系统回滚。
 
 ## 验收测试
 
 | 测试 | 期望 |
 | --- | --- |
-| 已存在文件执行 `write`，再 `/undo` | 内容逐字节恢复到 before-state |
-| 连续两次改同一文件 | 每次撤回都对应正确快照 |
-| `/undo <n>` | 只恢复指定操作，不误改其他目标 |
-| 新文件创建 | 清楚报告 delete/unlink 不支持 |
-| shell 重定向改文件 | 不声称已捕获 |
-| 工具被 guard 拒绝 | 验证是否留下孤立快照，并决定是否采用 pending 提交 |
-| 恢复路径超出 workspace | 被当前 sandbox policy 拒绝 |
-| 插件卸载 | 命令和监听器消失，快照文件不被误删 |
-| 撤回后再次发生 Agent 写入 | 撤回写入不被错误识别为新的 Agent mutation |
+| 编辑一个已闭合的用户回合 | 新 Session 从目标回合之前分支，原 Session 仍可读取 |
+| 编辑 assistant response | 新版本包含完整闭合回合，不复制原工具链 |
+| `reroll` 最近回复 | 新版本重新排入原用户输入 |
+| `retry` 历史回合 | `truncate` 与 `preserve` 产生不同且可观察的后续策略 |
+| 选择旧版本执行 undo | 沿父 Session 关系切回，不删除原事件 |
+| 连续执行 undo/redo | 每次只处理一个版本效果，验证 LIFO 和直接子分支 |
+| 创建子 Agent 失败 | 不留下可见的半成品 Session 或 workspace 关联 |
+| 插件卸载 | HTTP route 等注册资源被 disposer 收回 |
+| 运行期间检查工作区 | 插件自身不写文件、不改 Git index、branch 或既有产物 |
+| 检查外部调用 | 明确记录：重生成会产生新的模型请求，旧请求不可撤回 |
 
-最后一项尤其重要。真实插件通过 `ctx.fs.writeText()` 恢复，不会重新调用模型工具；更复杂的实现仍需区分 Agent mutation 和 user-requested compensation，避免撤回动作自己套自己。
+## 结论：把“无副作用”写成可验证的范围
 
-## 结论：把“无副作用”改写成范围声明
+`dsh-message-edit` 的价值不是提供一个“撤回”按钮，而是把撤回对象限制在会话版本：从完整回合边界生成子 Session，用 append-only 事件记录版本效果和逆向目标，再通过父子 Session 关系实现 undo/redo。它不把文件恢复、外部 API 补偿或 provider 注销混入同一个命令。
 
-DeepSeek Harness 适合承载这种插件，因为它把工具事件、能力注册、官方文件服务、session 策略和 LLM provider 路由都暴露成了可组合边界。`dsh-file-undo` 在这些边界上建立了一条完整链路：执行前采集、JSONL 保存、显式命令、策略约束下恢复。
+这也解释了为什么不能用 coeffect 来代替会话撤回。coeffect 让插件能够组合运行时依赖；`ctx.effect()` 让注册资源可被收回；会话版本事件才描述用户可见历史怎样变化。三个层次各自有清楚的所有权，撤回插件才不会变成一个无法验证的“全局 undo”。
 
-它的可信度来自承诺很窄：只恢复已经捕获的 `write` / `edit`，不撤回 shell，不撤回删除，不撤回网络请求，也不抹去模型已经看到的事实。真正可迁移的经验是按副作用类型设计补偿协议：文件写入用快照，临时资源用释放句柄，外部 API 用业务级 compensation，模型调用只记录不可回滚的事实。
+如果未来要加入文件恢复，应把它设计成单独的能力：明确快照时机、写入权限、并发策略和外部副作用边界，并在文章和 API 名称中与上下文撤回区分开。对于当前这个插件，最可信的承诺已经足够具体：**切换会话版本，不改写原历史，不修改工作区；需要重跑的内容仍然是一次新的执行。**
 
 ## 资料与源码入口
 
-- [DeepSeek Harness 工具执行管线](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/tools/README.md)
-- [DeepSeek Harness LLM 能力包](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm/README.md)
+- [DeepSeek Harness：Everything is a Plugin](https://github.com/deepseek-ai/deepseek-harness)
+- [`dsh-message-edit` README](https://github.com/Moeblack/dsh-message-edit/blob/main/README.md)
+- [`dsh-message-edit` Host 源码](https://github.com/Moeblack/dsh-message-edit/blob/main/src/index.ts)
+- [`dsh-message-edit` 版本数据模型](https://github.com/Moeblack/dsh-message-edit/blob/main/src/shared.ts)
+- [DSH LLM 能力包](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm/README.md)
 - [`LlmRuntime` 源码](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm/src/index.ts)
-- [真实插件：`dsh-file-undo`](https://github.com/QinLuza/dsh-file-undo)
-- [`dsh-file-undo` 主源码](https://github.com/QinLuza/dsh-file-undo/blob/master/src/index.ts)
-- [作者在 DeepSeek Harness 社区发布的插件说明](https://github.com/deepseek-ai/deepseek-harness/discussions/2471)
