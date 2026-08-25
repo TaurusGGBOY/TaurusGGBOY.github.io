@@ -1,8 +1,8 @@
 ---
-title: "Claude Code源码解读49：从搜索 Release Note 到最后一个字"
+title: "Claude Code源码解读49：从 Web Search 到最后一个字"
 published: 2026-08-25T20:30:00+08:00
 updated: 2026-08-25
-description: "沿着 Claude Code、Open WebUI、SGLang 和 DeepSeek V4 Flash 的源码，追踪一次搜索请求如何变成用户看到的最后一个字。"
+description: "沿着 Claude Code、NewAPI、SGLang 和 DeepSeek V4 Flash 的源码，追踪一次 Web Search 请求如何变成用户看到的最后一个字。"
 tags: ["claude-code", "source-code", "ai-agent", "sglang", "deepseek"]
 category: "AI / Architecture"
 draft: false
@@ -15,14 +15,14 @@ imagePosition: "left"
 如果你在 Claude Code 里输入：
 
 ```text
-请帮我搜索一下 Claude Code 的最新版本的 release note
+请帮我通过 Web Search 搜索 Claude Code 的当前最新版本、发布时间和官方更新内容，优先使用 Anthropic 和 Claude Code 的官方页面。
 ```
 
 你看到的通常是一段文字，最后停在某个汉字、标点或英文字符上。这个过程看起来像一次聊天，源码里却至少经过了四条边界：用户输入进入 Agent Loop，模型决定是否调用搜索，搜索结果重新进入下一轮上下文，推理框架再把 token 解码成增量文本，最后由终端把增量拼到屏幕上。
 
 那么，最后一个字到底在哪里产生？
 
-答案先放在前面：**在本文的本地模型假设里，最后一个可见字符不是 Claude Code 生成的，也不是 Open WebUI “显示出来”的；它是 DeepSeek V4 Flash 生成的 token 经 SGLang 的 detokenizer 还原成文本后，沿着 SSE 和宿主渲染链路逐段抵达用户的结果。** 但在默认的 Claude Code 2.1.88 源码里，模型协议仍是 Anthropic Messages API。要把本地 Open WebUI 和 SGLang 接进来，还需要一个把 OpenAI 兼容流转换成 Claude Code 能消费的事件流的适配层。
+答案先放在前面：**在本文的本地模型假设里，最后一个可见字符是 DeepSeek V4 Flash 生成的 token 经 SGLang 的 detokenizer 还原成文本后，沿着 SSE 和宿主渲染链路逐段抵达用户的结果。** 但在默认的 Claude Code 2.1.88 源码里，模型协议仍是 Anthropic Messages API。NewAPI 可以承担统一网关和协议转发的边界；具体能否直接接收 Claude Code 的请求，取决于所选接口和上游适配配置。
 
 这条边界不先说清楚，后面所有“Claude Code 直接连本地 DeepSeek”的调用链都会少一层。
 
@@ -83,57 +83,40 @@ server_tool_use(start)
   -> tool_result
 ```
 
-搜索结果回到主循环后，主模型才有机会把“最新版本”与 release note 内容合在一起。搜索动作和最后答案之间，至少隔着一次工具结果回填。
+搜索结果回到主循环后，主模型才有机会把网页内容合成最终回答。搜索动作和最后答案之间，至少隔着一次工具结果回填。
 
-## `/release-notes` 和“搜索最新版本”不是同一条路径
+## 把本地模型接进来：NewAPI 是网关与协议边界
 
-在 2.1.88 源码中，`src/commands/release-notes/release-notes.ts` 实现的是本地命令 `/release-notes`。它会尝试在 500 毫秒内抓取 `CHANGELOG.md`，超时就使用缓存；没有可用内容时只返回 GitHub changelog 链接。
+下面进入本地模型假设：NewAPI 负责统一入口和上游路由，SGLang 提供本地模型服务。
 
-数据源在 `src/utils/releaseNotes.ts`：
+[NewAPI 官方文档](https://github.com/QuantumNous/new-api-docs/blob/main/docs/en/api/index.md)把它定义为支持多种主流模型接口格式的中继网关，其中包括 OpenAI Chat 和 Anthropic Chat。它处理的是请求格式、渠道选择、鉴权、重试和流式响应转发；模型本身仍在上游服务中执行。
 
-```ts
-const RAW_CHANGELOG_URL =
-  'https://raw.githubusercontent.com/anthropics/claude-code/refs/heads/main/CHANGELOG.md'
-```
+因此，NewAPI 放在 Claude Code 与 SGLang 之间时，职责可以拆成三层：
 
-它先把 changelog 按 `## version` 切段，再取每段的 `- ` 行。`getRecentReleaseNotes()` 会按 semver 排序，并最多返回 5 条；`getAllReleaseNotes()` 则把所有版本按从旧到新的顺序整理成 `Version x.y.z:` 文本。
+1. 对外提供 Claude Code 或兼容客户端能够调用的 API 接口。
+2. 根据模型、渠道和配置选择上游，把请求转换成目标服务能够理解的格式。
+3. 将上游的流式结果转发给客户端，必要时处理工具调用、usage 和结束信号。
 
-这解释了一个实际差异：
-
-- `/release-notes` 是客户端的本地命令，数据来自缓存或 GitHub `main` 分支的 `CHANGELOG.md`。
-- “请帮我搜索最新版本”是 Agent 任务，模型可能调用 Web Search，再读取 release 页面、changelog 或其他页面。
-
-截至 2026-08-25，我核对到的 [Claude Code GitHub `releases/latest`](https://github.com/anthropics/claude-code/releases/latest) 是 `v2.1.241`，发布日期是 2026-08-23，正文只有 “Bug fixes and reliability improvements”。同一时间 [main 分支的 `CHANGELOG.md`](https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md) 顶部已经出现 `2.1.245` 和 `2.1.243` 条目。前者是已发布 release，后者是主分支 changelog 内容，不能混写成“最新已发布版本”。
-
-从代码可以推断，老版本客户端的 `/release-notes` 可能看到比 GitHub Releases 页面更新的 changelog 条目，因为它读的是 `main` 分支；这不是版本比较算法出错，而是“release 页面”和“main changelog”本来就是两条数据源。
-
-## 把本地模型接进来：Open WebUI 是协议边界
-
-下面进入用户给出的假设：Open WebUI 连接本地模型，模型由 SGLang 提供服务。
-
-这里把“one-webui”按 [Open WebUI](https://github.com/open-webui/open-webui) 理解。项目官方文档把 `/v1/chat/completions` 作为核心兼容入口，支持 `stream`、标准参数和工具调用；它并不要求后端一定是某一家模型厂商，只要求后端遵守 OpenAI 兼容协议。
-
-这层的职责不是重新生成 token，而是做三件事：
-
-1. 接收前端或上游客户端的消息数组、模型名、工具和 `stream` 参数。
-2. 根据配置把请求转发到本地 OpenAI 兼容后端。
-3. 将上游的流式 chunk 作为 SSE 返回，并在需要时维护聊天记录、工具状态和 UI 的 assistant 草稿。
-
-所以假设链路可以画成：
+假设链路可以画成：
 
 ```text
-Claude Code / 协议适配器
-        │ OpenAI-compatible POST /v1/chat/completions
+Claude Code queryLoop
+        │ Anthropic Messages 或兼容接口
         ▼
-Open WebUI
-        │ provider routing + SSE proxy
+NewAPI
+        │ channel routing + protocol relay
         ▼
-SGLang HTTP server
+SGLang OpenAI-compatible server
+        │
+        ▼
+DeepSeek V4 Flash
 ```
 
-但这里不能把 Open WebUI 当成 Claude Code 的透明替身。Claude Code 2.1.88 的 `queryModelWithStreaming()` 最终进入 `src/services/api/claude.ts`，按 Anthropic 的 `message_start`、`content_block_start`、`content_block_delta`、`message_delta` 和 `message_stop` 组装消息。Open WebUI 与 SGLang 默认返回的是 OpenAI 风格的 `choices[].delta.content`。
+这里有两个边界要分开。NewAPI 的网关能力不等于 Web Search 能力；纯 Web Search 仍然要由 Claude Code 的搜索工具、模型服务的工具能力或外部搜索适配器提供。NewAPI 只负责把请求和结果在协议边界之间传递。
 
-如果没有适配器，协议在这里就断了。一个真正可运行的适配器至少要把：
+另一个边界是格式转换。Claude Code 2.1.88 的 `queryModelWithStreaming()` 按 Anthropic 的 `message_start`、`content_block_start`、`content_block_delta`、`message_delta` 和 `message_stop` 组装消息。SGLang 的 OpenAI 接口则返回 `choices[].delta.content` 一类的流式片段。NewAPI 可以提供 Anthropic 或 OpenAI 形式的接口，但实际部署仍要确认入口、渠道配置和工具调用字段是否覆盖当前请求。
+
+如果中间采用 OpenAI 兼容链路，适配器至少要把：
 
 ```text
 OpenAI chunk: choices[0].delta.content = "Claude"
@@ -142,24 +125,6 @@ Anthropic event: content_block_delta / text_delta / text = "Claude"
 ```
 
 并且还要转换 `finish_reason`、tool call、usage、错误和取消语义。只把 URL 改成 `http://localhost:xxxx/v1`，不能让 Claude Code 自动理解另一套事件格式。
-
-## DeepSeek Harness：谁负责 Agent Loop，谁负责模型流
-
-如果在 Claude Code 这一侧再换成 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 这样的 Agent runtime，控制面会更容易对照。`packages/core/agent-loop/src/agent.ts` 的 `ReactLoopAgent` 把一次任务拆成 `turn` 和 `step`；每个 step 通过 `llm.prepareCall()` 固定模型配置，再消费 `llm/stream`。收到流式分片后，它把原始 chunk 写入 `assistant/chunk`，随后再形成 `assistant/message`。
-
-这说明 Harness 和 SGLang 不是同一层：Harness 负责“什么时候请求模型、怎样保存分片、怎样继续工具调用”，SGLang 负责“怎样调度请求、执行前向计算、采样 token、解码并返回文本”。Harness 的 [`DeepSeekAdapter`](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm-deepseek/src/adapter.ts) 还会处理流空闲 watchdog、取消和 `TRANSPORT`/`TIMEOUT` 错误，但它不会替代 SGLang 的 GPU decode。
-
-放回本文的假设链路就是：
-
-```text
-Claude Code queryLoop 或 DeepSeek Harness ReactLoopAgent
-        -> 协议适配器 / LLM adapter
-        -> Open WebUI
-        -> SGLang
-        -> DeepSeek V4 Flash decode
-```
-
-这里的 `assistant/chunk` 与 Claude Code 的 `text_delta` 也不是同名字段的直接互换。前者是 Harness 的事件日志，后者是 Anthropic stream event；两者都表达增量，但持久化语义和传输协议不同。
 
 ## SGLang：请求怎样走到 DeepSeek V4 Flash 的 decode
 
@@ -201,13 +166,13 @@ SGLang 的 `serving_chat.py` 再把 `content["text"]` 与上一次的 `stream_of
 2. QueryEngine / queryLoop 将用户消息与 system prompt、tools 交给模型适配器。
 3. 模型输出搜索 tool call；Claude Code 执行搜索，得到 tool_result。
 4. queryLoop 把 tool_result 放回 messages，再发起最终回答请求。
-5. 协议适配器把 Anthropic Messages 请求改成 OpenAI chat completion 请求。
-6. Open WebUI 路由到本地 SGLang，并保持 SSE 连接。
+5. NewAPI 按部署配置处理 Anthropic 或 OpenAI 兼容请求，并选择本地 SGLang 渠道。
+6. NewAPI 将请求转发到 SGLang，并保持 SSE 连接。
 7. SGLang tokenizer manager 分词并把请求送入 scheduler。
 8. DeepSeek V4 Flash 做 prefill 和多次 decode，每次产生 token id。
 9. DetokenizerManager 增量解码，检查 UTF-8 完整性，输出新增文本。
 10. SGLang `serving_chat.py` 发送 `choices[].delta.content`。
-11. Open WebUI 转发 chunk；协议适配器把它变成 Anthropic `text_delta`。
+11. NewAPI 转发 chunk；必要的协议适配器把它变成 Anthropic `text_delta`。
 12. Claude Code 的 `handleMessageFromStream()` 执行 `onStreamingText(text => text + deltaText)`。
 13. REPL 的 `onStreamingText` 更新 React state，终端重新渲染。
 ```
@@ -228,9 +193,9 @@ Claude Code 收到最后文本后，还要检查是否存在 `tool_use`。如果
 
 ## 最后的工程结论
 
-沿着源码追踪一次“搜索最新 release note”，真正需要核对的是五个坐标：
+沿着源码追踪一次 Web Search，真正需要核对的是五个坐标：
 
-1. **请求在哪一层被改写。** Claude Code 的 `queryLoop` 组装上下文，Open WebUI 组装兼容请求，SGLang 再把文本变成 token id。
+1. **请求在哪一层被改写。** Claude Code 的 `queryLoop` 组装上下文，NewAPI 负责网关路由与协议转发，SGLang 再把文本变成 token id。
 2. **工具结果在哪里回填。** `WebSearchTool` 的结果要回到下一次模型请求，不能把搜索进度当成最终答案。
 3. **协议在哪里转换。** Anthropic stream event 与 OpenAI SSE delta 不是同一种结构，适配器是必需的边界。
 4. **token 在哪里变成文本。** DeepSeek V4 Flash 只产生 token id；SGLang 的 detokenizer 负责 UTF-8 安全的增量文本。
@@ -238,7 +203,7 @@ Claude Code 收到最后文本后，还要检查是否存在 `tool_use`。如果
 
 如果你要复现这条链路，最有价值的日志不是只打印最终答案，而是同时记录：请求 `rid`、模型返回的 tool call、一次搜索的 tool result、协议适配前后的 chunk、SGLang 的 token id 与 detokenized delta，以及 Claude Code 最后一次 `text_delta`。这样才能判断“字没有出现”究竟发生在模型没生成、detokenizer 没提交、SSE 没转发，还是终端 state 没更新。
 
-本文的源码事实分别来自 Claude Code 2.1.88 还原源码、Open WebUI 官方兼容接口说明和 SGLang 当前 `main` 源码；Open WebUI → SGLang → DeepSeek V4 Flash 接入 Claude Code 的部分是部署假设，需要一个实际的协议适配器才能运行。DeepSeek V4 Flash 的模型文件、SGLang 分支和硬件后端会继续变化，复现时应以部署 commit、启动参数和 tokenizer 版本为准。
+本文的源码事实分别来自 Claude Code 2.1.88 还原源码、NewAPI 官方接口文档和 SGLang 当前 `main` 源码；NewAPI → SGLang → DeepSeek V4 Flash 接入 Claude Code 的部分是部署假设，能否直接复用 Anthropic 接口取决于 NewAPI 的入口与渠道配置。DeepSeek V4 Flash 的模型文件、SGLang 分支和硬件后端会继续变化，复现时应以部署 commit、启动参数和 tokenizer 版本为准。
 
 ## 留给下一篇的问题
 
@@ -247,11 +212,9 @@ Claude Code 收到最后文本后，还要检查是否存在 `tool_use`。如果
 ## 资料与代码索引
 
 - [Claude Code `query.ts`](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/main/restored-src/src/query.ts)：`queryLoop`、模型请求、tool use 与 tool result 回填。
-- [Claude Code `releaseNotes.ts`](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/main/restored-src/src/utils/releaseNotes.ts)：changelog 抓取、缓存、版本解析与最多 5 条摘要。
-- [Claude Code `release-notes.ts`](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/main/restored-src/src/commands/release-notes/release-notes.ts)：500 毫秒抓取窗口与缓存回退。
 - [Claude Code `claude.ts`](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/main/restored-src/src/services/api/claude.ts)：Anthropic stream event 的累积与 assistant message 组装。
-- [Open WebUI OpenAI-compatible 文档](https://docs.openwebui.com/getting-started/quick-start/connect-a-provider/starting-with-openai-compatible/)：`/v1/chat/completions`、stream 和工具调用边界。
-- [Open WebUI `openai.py`](https://github.com/open-webui/open-webui/blob/main/backend/open_webui/routers/openai.py)：OpenAI 兼容路由源码。
+- [NewAPI API Overview](https://github.com/QuantumNous/new-api-docs/blob/main/docs/en/api/index.md)：OpenAI Chat、Anthropic Chat 等中继接口格式。
+- [NewAPI Project Introduction](https://github.com/QuantumNous/new-api-docs-v1/blob/main/content/docs/en/guide/wiki/basic-concepts/project-introduction.mdx)：统一入口、渠道路由和网关职责。
 - [SGLang `serving_chat.py`](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/openai/serving_chat.py)：OpenAI 请求与 SSE 输出。
 - [SGLang `tokenizer_manager.py`](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/tokenizer_manager.py)：请求规范化、分词与 scheduler 派发。
 - [SGLang `detokenizer_manager.py`](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/detokenizer_manager.py)：`BatchTokenIDOutput` 到增量文本。
