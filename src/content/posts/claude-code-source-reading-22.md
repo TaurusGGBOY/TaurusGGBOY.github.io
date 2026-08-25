@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读22：提示词如何变成可执行能力"
 published: 2026-07-24T16:47:09+08:00
-updated: 2026-08-04
+updated: 2026-08-25
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -57,17 +57,21 @@ function hasCommandWithArguments(
 - **frontmatter 的两个布尔值构成入口表**，`user-invocable` 控制用户 `/name`，`disable-model-invocation` 控制模型 `Skill` 工具；`context: fork` 把展开结果交给独立 Agent，其余值在当前 Query Loop 内继续。
 - 模型看到的是**预算裁剪的索引**，`skill_listing` attachment 只占上下文窗口 1%（缺省 8,000 字符），单条 description 加 `whenToUse` 上限 250 字符；只有 Agent 拥有 Skill 工具时才注入。
 - 调用 Skill 本身仍走权限系统，`SkillTool.checkPermissions()` 按 deny → allow → ask 决策；`allowed-tools` 只是为本次调用附加权限规则，不绕过沙箱与 deny。
+- `function calling`、Anthropic 的 `tool_use`、MCP 和 Skill 不在同一层：前两者描述模型如何请求工具，MCP 描述宿主如何连接外部能力，Skill 描述模型应该如何组织工作；Skill 自己仍通过 `SkillTool` 进入同一个 `tool_use` 执行器。
 
 > ⚠️ **证据边界**，本文全部引用 `restored-src/`（`@anthropic-ai/claude-code@2.1.88` source map 还原源码）。`loadedFrom` 的可见值包括 `'commands_DEPRECATED' | 'skills' | 'plugin' | 'managed' | 'bundled' | 'mcp'`；`user-invocable`、`disable-model-invocation`、`context` 的解析规则可以确认，但运行期 feature flag 与远程 Skill 的行为属于运行时条件。
 
 ## 本篇新增
 
-上一篇（21）讲 Command 系统如何把输入路由到 `prompt` / `local` / `local-jsx` 三条路径；本篇沿其中最容易混淆的一支往下走，新增两个认知点，
+上一篇（21）讲 Command 系统如何把输入路由到 `prompt` / `local` / `local-jsx` 三条路径；本篇沿其中最容易混淆的一支往下走，新增三个认知点，
 
 - **Skill 生命周期图**，从发现 → 注册 → 索引 → 调用 → 展开 → 执行 → 恢复七阶段，把"同一份 Markdown 如何在不同入口拥有不同可见性与权限"一次画清。
 - **渐进披露的预算机制**，模型先看到 `skill_listing` 短目录（1% 窗口、250 字/条），真正选中后才加载全文，这是 Skill 与常驻 system prompt 的根本区别。
+- **四层能力边界**，把通用的 `function calling`、Anthropic 的 `tool_use`、MCP 的外部调用和 Skill 的指令展开放回同一条执行链，解释为什么 Skill 常常和 MCP 配合，却不能替代 MCP。
 
 ## 问题
+
+本篇把 Skill 看成从提示词资产到执行能力的装配链：运行时先发现和解析 Markdown，再根据命令、插件、fork 或 inline 语义选择加载方式，最后把能力放入当前会话或隔离上下文。Skill 的边界在于它改变可用指令，不直接等于一个新的工具权限。
 
 一份 `SKILL.md` 只有几十行文字，却可能出现在 slash 菜单、模型工具列表和独立 Agent 的 system prompt 中。它的难点在于同一份文件要适配不同入口的可见性、参数替换和权限边界。
 
@@ -76,6 +80,42 @@ function hasCommandWithArguments(
 本文沿着 Skill 的生命周期阅读，先发现并解析 frontmatter，再生成 prompt command，调用时才展开正文；`context: fork` 只改变后续上下文归属，不改变 Skill 的发现规则。
 
 ## 正文
+
+### 先把 function calling、tool use、MCP 和 Skill 放回各自的层次
+
+这四个词经常一起出现，是因为它们最后都可能让模型完成一次“调用能力”。但它们回答的不是同一个问题。`function calling` 是跨厂商的通用模式：模型生成结构化的名称和参数，宿主程序负责执行；它本身不规定函数从哪里来、如何鉴权，也不规定结果如何传输。
+
+在本章对应的 Anthropic 调用里，具体协议名称是 `tool_use` 和 `tool_result`。模型在 assistant 内容中产生 `tool_use`，Claude Code 执行后生成带同一 `tool_use_id` 的 `tool_result`，再把结果交回下一轮推理。`query.ts` 在取消或工具未完成时也会按这个 ID 补齐结果，因此 `tool_use` 是模型与 Claude Code 之间的消息边界，不是某个 MCP 专属入口。
+
+Claude Code 内部再多一层 `Tool` 抽象。它把 `name`、输入 schema、权限检查和 `call()` 放在同一个可执行对象上；`toolToAPISchema()` 把这个对象转换成模型请求中的工具定义，`runToolUse()` 则在收到 `tool_use` 后按名称找回同一个对象。内置 `Read`、`Bash` 和 MCP 工具都沿这条路径进入执行器。
+
+MCP 发生在执行器的下一层。MCP Client 通过 `tools/list` 发现外部工具，把它们包装为带 `isMcp: true` 的内部 `Tool`；模型仍然使用普通的 `tool_use` 调用它。真正执行时，MCP Tool 的 `call()` 才通过 `client.callTool({ name, arguments })` 把请求送到 MCP Server。换句话说，MCP 改变的是工具的发现、传输和实现位置，不是模型调用消息的形状。
+
+Skill 则是 Claude Code 的工作流和指令层。模型调用 `Skill` 时，调用本身也会经过 `tool_use` 和通用 Tool 执行器；`SkillTool.call()` 找到 `Command` 后，要么通过 `getPromptForCommand()` 把 Markdown 展开到当前上下文，要么在 `context: fork` 时启动隔离 Agent。Skill 提供“应该怎样做”，后续真正读文件、改文件或访问外部服务，仍然要调用已有的内置 Tool 或 MCP Tool。
+
+| 概念 | 所在层 | 它提供什么 | 源码中的对应物 |
+| --- | --- | --- | --- |
+| `function calling` | 通用模型调用模式 | 结构化的名称与参数 | 泛化概念，不是本仓库的单独运行时类型 |
+| `tool_use` | Anthropic 模型协议 | 模型请求工具与接收结果 | `tool_use` / `tool_result` 内容块 |
+| `Tool` | Claude Code 运行时 | schema、权限、`call()` 和结果映射 | `Tool`、`buildTool()`、`runToolUse()` |
+| MCP | 宿主与外部服务之间 | 工具发现、连接、认证和 `tools/call` | `tools/list`、`client.callTool()` |
+| Skill | Claude Code 指令/工作流层 | 能力索引、Markdown 展开、inline/fork | `SKILL.md`、`SkillTool`、`getPromptForCommand()` |
+
+可以把它们画成两条嵌套的边界，
+
+```text
+模型 ── tool_use / tool_result ── Claude Code
+                                      │
+                                      ├─ 内置 Tool.call() → 本地文件、Shell、网络
+                                      ├─ SkillTool.call() → 展开指令或启动 fork Agent
+                                      └─ MCP Tool.call() → MCP client.callTool()
+                                                               │
+                                                               └─ MCP Server
+```
+
+因此，`Skill + 内置工具` 可以完全不依赖 MCP；例如一个 `/commit` Skill 只要编排 `Read`、`Bash` 和测试流程就够了。需要 GitHub、Slack、数据库或浏览器等外部系统时，Skill 仍然有价值，但它的角色是规定顺序、前置条件和验证方式，MCP 才提供真正的外部执行能力。当前源码里的 Chrome Skill 就明确要求先加载 Skill，再调用 `mcp__claude-in-chrome__*` 工具。
+
+还要留意 MCP 的另一种能力：MCP Server 可以通过 `prompts/list` 暴露 Prompt。Claude Code 会把这种远程 Prompt 转成 `loadedFrom: 'mcp'` 的 `Command`，再由 SkillTool 获取其内容；这让 MCP 能提供“远程 Skill-like 指令”，但它和 `tools/list` 暴露的可执行 Tool 仍是两条不同路径。
 
 ### Skill 是可发现、可展开的能力说明
 
@@ -586,7 +626,7 @@ Claude Code 的 Skill 系统复用 Command 与 Query Loop 执行内核。它把�
 
 `可发现元数据 + 延迟展开的正文 + Command 路由 + Tool 权限 + 可选 Agent 上下文`
 
-它把"团队经验"变成一种声明式扩展，但执行能力仍来自 Claude Code 已有的 Query Loop、工具注册表、权限引擎和 Agent 运行时。下一篇就沿 fork 背后的公共设施继续往下看，Claude Code 怎样把一次长时间工作变成可创建、可观察、可取消并最终收束的 Task。
+它把"团队经验"变成一种声明式扩展，但执行能力仍来自 Claude Code 已有的 Query Loop、工具注册表、权限引擎和 Agent 运行时。因此，Skill 是工作流层，不是对 `tool_use` 或 MCP 的替代：`tool_use` 是模型与宿主的调用消息，MCP 是宿主与外部服务的连接协议，Skill 只负责把指令和执行顺序按需带入上下文。真正的能力仍由内置 Tool 或 MCP Tool 的 `call()` 提供。下一篇就沿 fork 背后的公共设施继续往下看，Claude Code 怎样把一次长时间工作变成可创建、可观察、可取消并最终收束的 Task。
 
 ### SkillTool 的 prompt 自己也有一个预算
 
@@ -608,6 +648,10 @@ Claude Code 的 Skill 系统复用 Command 与 Query Loop 执行内核。它把�
 | 索引 | `getCharBudget()` / `formatCommandsWithinBudget()` | `src/tools/SkillTool/prompt.ts` | 已确认 |
 | 索引 | `getSkillListingAttachments()` / `skill_listing` | `src/utils/attachments.ts` | 已确认 |
 | 模型入口 | `inputSchema` / `validateInput()` | `src/tools/SkillTool/SkillTool.ts` | 已确认 |
+| 模型协议 | `tool_use` / `tool_result` 配对 | `src/query.ts` | 已确认 |
+| Tool 适配 | `toolToAPISchema()` | `src/utils/api.ts`、`src/services/api/claude.ts` | 已确认 |
+| MCP 工具 | `fetchToolsForClient()` / `isMcp: true` | `src/services/mcp/client.ts`、`src/tools/MCPTool/MCPTool.ts` | 已确认 |
+| MCP 调用 | `client.callTool()` / `tools/list` | `src/services/mcp/client.ts` | 已确认 |
 | 用户入口 | `userInvocable === false` 拒绝 | `src/utils/processUserInput/processSlashCommand.tsx` | 已确认 |
 | 权限 | `SkillTool.checkPermissions()` deny/allow/ask | `src/tools/SkillTool/SkillTool.ts` | 已确认 |
 | 权限 | `command_permissions` 附件 / `allowed-tools` | `src/utils/processUserInput/processSlashCommand.tsx` | 已确认 |
@@ -629,12 +673,14 @@ Claude Code 的 Skill 系统复用 Command 与 Query Loop 执行内核。它把�
 2. **验证入口表**，把同一个 Skill 的 `user-invocable` 改为 `false`，输入 `/release-note`，确认得到拒绝消息且 `shouldQuery: false`；把 `disable-model-invocation` 改为 `true`，确认模型无法通过 `Skill` 工具调用它。两组观察应各自独立成立。
 3. **验证权限路径**，给 Skill 声明 `allowed-tools: Bash`，然后在项目里配置 deny `Bash:*` 的权限规则，再调用 Skill，确认 Skill 本身可以被调用（或询问），但正文要求执行的 Bash 仍会被 deny，`allowed-tools` 没有绕过 deny。
 4. **观察动态发现**，在项目深层子目录放一个嵌套 `.claude/skills/` 与 `SKILL.md`，用文件工具打开该目录下的文件，确认 Skill 列表在会话中出现新增（增量视图），且只宣布首次见到的 Skill。
+5. **验证四层边界**，让一个 Skill 规定 GitHub 工单的步骤，再观察模型通过 `tool_use` 调用 Skill 与 `mcp__github__*` 的顺序；确认 Skill 提供流程，MCP Client 才通过 `tools/call` 执行外部操作。
 
 ## 自测
 
 1. `user-invocable: false` 与 `disable-model-invocation: true` 分别控制什么入口？
 2. `skill_listing` attachment 在什么条件下才注入？模型看到的内容为什么只是短索引？
 3. `loadedFrom: 'mcp'` 的 Skill 为什么跳过内联 shell 展开？
+4. 如果一个 Skill 要操作 GitHub，Skill、`tool_use` 和 MCP 分别负责哪一段？
 
 <details>
 <summary>参考答案</summary>
@@ -642,6 +688,7 @@ Claude Code 的 Skill 系统复用 Command 与 Query Loop 执行内核。它把�
 1. **分别控制用户与模型入口。** `user-invocable: false` 使 `isHidden` 为真并阻止用户 `/name`（`processSlashCommand.tsx` 在展开前返回拒绝消息、`shouldQuery: false`）；`disable-model-invocation: true` 把 Skill 从模型可调用列表移除，并被 SkillTool 校验拒绝。两者独立，组合后四种入口状态见上文入口表。
 2. **只有 Agent 拥有 Skill 工具时才注入。** `getSkillListingAttachments()` 先检查 `options.tools` 是否包含名称匹配 `Skill` 的工具，没有则返回 `[]`。模型看到的只是 `formatCommandsWithinBudget()` 裁剪后的短索引（1% 窗口、单条 250 字上限），因为渐进披露的设计目标就是让模型上下文只承担"知道有哪些能力"，全文由 `getPromptForCommand()` 在选中后展开。
 3. **因为 MCP Skill 被视为远端、不受信任的内容。** `getPromptForCommand()` 里 `if (loadedFrom !== 'mcp')` 才调用 `executeShellCommandsInPrompt()`；精确值 `'mcp'` 直接跳过内联 shell 执行，避免远端注入的正文在本地执行 shell 命令。
+4. **Skill 规定流程，`tool_use` 负责模型发出结构化调用，MCP 负责连接 GitHub。** 模型先通过 `tool_use` 调用 `Skill`，Claude Code 展开 GitHub 工单流程；模型随后再次通过 `tool_use` 调用 `mcp__github__*`，Claude Code 的 MCP Client 才通过 `tools/call` 请求外部服务，返回结果再成为 `tool_result`。
 
 </details>
 
