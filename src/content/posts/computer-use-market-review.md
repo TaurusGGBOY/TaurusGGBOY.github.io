@@ -95,22 +95,67 @@ Computer Use 可以没有 Agent，只做单次动作循环。Agent 也可以没�
 
 2024 年以后，Computer Use 变成了模型厂商的产品名，但“让程序代替人操作屏幕”已经经历了几轮演化。新产品改变的是决策来源和泛化方式，不是凭空发明了鼠标自动化。
 
-### 第一阶段：按键精灵把“重复操作”变成脚本
+这里要先把“最早”拆开。若说的是可编程自动化，最早可以追溯到 1801 年的提花织机；若说的是计算机宏指令，是 1950 年代的汇编语言工具；若说的是图形界面上的直接操作，关键节点是 1963 年的 Sketchpad 和 1968 年的 Engelbart NLS 演示；若说的是今天这种模型根据目标自行选择屏幕动作，则要到 2022 年以后才形成 Agent 研究路线，2024 年才被模型厂商产品化 [38][39][40][41][35][37]。
+
+这不是一条从“宏”直线升级到“AI”的历史，而是三条路线最后汇合：
+
+1. **可编程路线：** 把一串操作编码成卡片、宏、脚本或工作流。
+2. **界面路线：** 让机器能够接收鼠标、键盘、窗口、控件和屏幕上的视觉输入。
+3. **决策路线：** 让系统根据目标、环境反馈和异常重新安排下一步。
+
+传统自动化主要解决前两条，Agent Use 才把第三条加入进来。
+
+### 第一阶段：从提花织机到 GUI，先出现的是“可操作的界面”
+
+1801 年，Joseph Marie Jacquard 展示了由穿孔卡片控制图案的织机。卡片序列存储了每一行织造模式，机器可以自动重复复杂操作；Computer History Museum 将它列为穿孔卡控制机器和后续计算机编程的重要前史 [38]。这当然还不是计算机自动化，但它已经包含了后来脚本系统的三个基本元素：外部表示的程序、可替换的操作序列，以及机器按序执行。
+
+进入电子计算机后，宏指令把“一条调用”展开成多条汇编指令。IBM 对 macro instruction 的定义仍然是“让汇编器处理预先定义的一组指令”；1957 年的 IBM 705 Autocoder 手册已经把这种宏指令作为程序准备方式记录下来 [39][50]。这个阶段的宏服务的是程序员，目标是减少重复代码；按键宏服务的是终端用户，目标是减少重复操作。两者的共同点是，计划在执行前就已经写好。
+
+1963 年，Ivan Sutherland 的 Sketchpad 展示了用光笔直接操纵屏幕对象的方式 [41]。1968 年，Douglas Engelbart 的 NLS 公开演示进一步把鼠标、键盘、超文本、文件链接、协作和命令系统放到一个交互环境中 [40]。1973 年的 Xerox Alto 又把位图显示、鼠标、窗口、菜单和直接操作组织成了个人工作站的形态 [42]。
+
+这些项目本身不是宏录制器，也不是 GUI Agent。它们解决的是更基础的问题：机器必须先拥有一个可观察、可操作的界面，后续程序才有可能记录或重放人的操作。没有鼠标、窗口、控件和输入事件，今天所说的“Computer Use”连动作空间都不存在。
+
+### 第二阶段：1990 年代，宏、脚本和 GUI 测试工具分成不同产品线
+
+到 1990 年代，自动化开始分成三类。
+
+**第一类是应用内脚本。** AppleScript 在 1993 年进入 Macintosh 软件生态，使用 Apple events 向可脚本化应用发送命令。它的目标不是模拟鼠标，而是直接控制 Finder 和其他应用对象 [43][51]。这条路线后来发展成 Office 宏、AppleScript、VBScript、COM 和 API 自动化，优点是状态结构化、速度快，缺点是应用必须主动暴露脚本接口。
+
+**第二类是安装和系统管理脚本。** Microsoft 的 ScriptIt 用脚本监控窗口标题，并向正确的窗口发送预先定义或运行时决定的按键，被用于 Windows NT 的无人值守安装和系统配置 [44]。它已经很接近“看窗口再发送动作”，但判断依据仍然是窗口标题和文本规则，不是视觉模型。
+
+**第三类是 GUI 测试工具。** Mercury Interactive 的 WinRunner 在 1995 年的资料中已经出现了 Windows 界面测试、可复用脚本、对象表和文本识别等能力 [48]。它把录制/回放从个人效率工具带进了软件测试：脚本不只是“再点一遍”，还要检查对象是否存在、行为是否符合预期。
+
+AutoIt 的历史可以把这条国外工具链串得更清楚：其开发者记录，1998 年为解决 Windows NT 无人值守安装中的按钮操作问题，先使用 Microsoft ScriptIt，随后因为可靠性、按键延迟和工作目录等限制，决定做一个替代工具；AutoIt v1 在 1999 年发布，v2 同年加入 AutoItX [45]。这说明 2001 年前后已经存在一个由 ScriptIt、WinBatch、AutoIt、WinRunner、AppleScript 等组成的工具生态。
+
+### 第三阶段：按键精灵的真实位置——不是“凭空发明”，也不能简单说成“照搬”
 
 按键精灵官网写明，它创立于 2001 年，由软件模拟鼠标和键盘动作，通过脚本代替用户执行一系列电脑或手机操作 [33]。它的历史定位很有代表性：让没有编程背景的用户也能录制、编辑和分享脚本，把“我每天要点几十次”变成“运行一次脚本”。
 
-按键精灵的关键价值不只是坐标点击，而是把执行能力做成了一个普通用户可以使用的产品：
+那么，按键精灵一开始参考的是国内还是国外软件？公开资料能支持的答案需要分成两层。
+
+第一层是**类别来源**。按键精灵出现时，国外已经有键鼠脚本、窗口自动化和 GUI 测试工具；AutoIt 的开发记录甚至明确写下了它与 ScriptIt 的承接关系 [45]。因此，按键精灵并不是第一个想到用软件模拟鼠标键盘的产品，它进入的是一个已经存在的技术类别。
+
+第二层是**直接来源**。2005 年一篇对按键精灵早期开发者的采访记录，开发者当时试用过多款国外键盘鼠标工具，认为它们对国内玩家不够好用，于是与伙伴自行设计了第一版按键精灵 [49]。这可以支持“吸收国外同类工具的思路，再围绕中国玩家和中文使用场景重做”的判断；目前没有找到可靠材料证明按键精灵直接 fork 了 AutoIt、ScriptIt 或 WinRunner 中的某一个。
+
+按键精灵真正做对的地方，不是发明了一个新的输入事件，而是把已有技术改造成了更适合中文用户和游戏场景的产品：
 
 1. **录制降低了编写成本。** 用户先做一遍，系统记录动作。
 2. **脚本保存了流程。** 同一套动作可以重复运行，也可以被修改和分发。
-3. **插件和社区扩大了动作空间。** 脚本不再局限于几个鼠标事件，而是可以组合窗口、图像、文字和外部程序。
-4. **代价由维护者承担。** 界面发生变化时，需要重新找图、改坐标、补等待或增加分支。
+3. **中文脚本和图形化编辑降低了学习门槛。** 用户不必先掌握 AutoIt、VBScript 或 C 语言，便可以组合循环、判断、找图和键鼠动作。
+4. **游戏场景提供了明确的需求。** 重复练级、刷怪、连点和窗口操作是非常具体的任务，用户可以立刻判断脚本是否有效。
+5. **社区和脚本交易扩大了供给。** 软件不再只是一个个人宏录制器，而是形成脚本作者、使用者、插件和分发渠道组成的生态 [33]。
+
+代价也没有消失。界面发生变化时，仍然要重新找图、改坐标、补等待或增加分支；脚本可以执行预先写好的判断，却不会像 Agent 那样从用户目标重新规划整个任务。
 
 按键精灵今天的官网已经把 AI 视觉识别和元素定位加入产品描述，并把 ERP、浏览器、微信、钉钉等应用列入自动化场景 [33]。这说明传统脚本产品也在吸收视觉定位，但它的主语仍然是“脚本执行引擎”：流程由人定义，系统负责重复执行。
 
-这里有一个经常被忽略的历史事实：许多所谓“AI Computer Use”解决的第一个问题，其实早已被脚本工具解决过。它们真正新增的是在任务执行时生成路径、解释新界面和处理未预先写好的分支。
+因此，按键精灵与 AutoIt 的关系，更准确的说法是“同时代同类工具之间的参照和竞争”，而不是“已经证实的直接继承关系”。产品功能相似，只能证明它们共享问题空间，不能自动证明代码、设计或商业来源存在直接抄袭。
 
-### 第二阶段：screen scraping 和 RPA 进入企业流程
+### 第四阶段：按键精灵扩展到网页、手机，RPA 开始企业化
+
+按键精灵并没有停留在 Windows 游戏脚本。UiBot 的开发者文档把国内这条产品线概括为：2001 年从 Windows 客户端游戏开始，2009 年出现网页版按键精灵，2013 年又出现手机版按键精灵 [46]。这三个节点对应了三种不同的执行环境：桌面窗口、浏览器页面和移动端触摸界面。
+
+与此同时，传统脚本开始进入企业流程。
 
 企业软件往往没有稳定的公开 API，尤其是旧 ERP、终端模拟器、虚拟桌面和内部系统。RPA 沿着 screen scraping 和 UI automation 的路径发展，用软件机器人读取屏幕或控件，再重复员工在界面上的操作。相关研究把 RPA 视为对早期 screen scraping 的延伸：当后端接口不可用时，UI 本身就成了自动化边界 [34]。
 
@@ -122,7 +167,7 @@ Computer Use 可以没有 Agent，只做单次动作循环。Agent 也可以没�
 
 但 RPA 仍然是确定性软件。它可以通过选择器和规则提高抗变化能力，却不会自己理解“为什么这个字段应该填成这个值”。如果流程没有写出这个分支，机器人通常不会主动问用户。
 
-### 第三阶段：LLM Agent 把“行动”放进推理循环
+### 第五阶段：LLM Agent 把“行动”放进推理循环
 
 2022 年的 ReAct 论文把语言模型的推理轨迹和外部行动交错起来：模型一边形成计划，一边调用环境获取信息，再根据结果调整下一步 [35]。这一步的意义在于，Agent 不再只是一次性生成答案，而是可以观察外部状态、执行动作、处理异常。
 
@@ -132,7 +177,7 @@ Computer Use 可以没有 Agent，只做单次动作循环。Agent 也可以没�
 
 WebArena 和 VisualWebArena 把真实网站和视觉信息引入评测；OSWorld 则把浏览器、办公软件、文件系统和操作系统组合成更开放的桌面任务 [25][30][36]。研究开始从“模型能不能调用函数”转向“模型能不能在一个持续变化的电脑环境里完成工作”。
 
-### 第四阶段：Computer Use 被模型厂商产品化
+### 第六阶段：Computer Use 被模型厂商产品化
 
 Anthropic 在 2024 年 10 月公开 Computer Use beta，允许 Claude 看屏幕、移动光标、点击和输入；官方同时承认这一能力当时仍然实验性强、容易出错 [37]。2025 年 1 月，OpenAI 发布 Operator 研究预览，背后的 CUA 模型把视觉、推理和强化学习结合起来，通过截图和鼠标键盘动作操作 GUI [1][2]。
 
@@ -389,6 +434,20 @@ OSWorld-Human 的分析发现，一些 Agent 即使完成任务，也会使用�
 [35] Yao, Shunyu, et al. (2022). "ReAct: Synergizing Reasoning and Acting in Language Models". arXiv. https://arxiv.org/abs/2210.03629
 [36] Koh, Jing Yu, et al. (2024). "VisualWebArena: Evaluating Multimodal Agents on Realistic Visual Web Tasks". ACL Anthology. https://aclanthology.org/2024.acl-long.50/
 [37] Anthropic (2024). "Introducing computer use, a new Claude 3.5 Sonnet, and Claude 3.5 Haiku". https://www.anthropic.com/news/3-5-models-and-computer-use
+[38] Computer History Museum (2015). "1801: Punched cards control Jacquard loom". https://www.computerhistory.org/storageengine/punched-cards-control-jacquard-loom/
+[39] IBM (2025). "Macro instructions". IBM Documentation. https://www.ibm.com/docs/en/hla-and-tf/1.6.0?topic=language-macro-instructions
+[40] Engelbart, Douglas (1968). "The Demo". The Doug Engelbart Institute. https://www.dougengelbart.org/mousesite/1968Demo.html
+[41] Computer History Museum (1963). "Ivan Sutherland Introduces the Sketchpad". https://www.computerhistory.org/tdih/january/7/
+[42] Computer History Museum (2014). "Xerox Alto Source Code". https://computerhistory.org/blog/xerox-alto-source-code/
+[43] Apple (2009). "AppleScript Language Guide". Apple Developer Documentation. https://developer.apple.com/library/archive/documentation/AppleScript/Conceptual/AppleScriptLangGuide/
+[44] Microsoft (1999). "INFO: Incorporating ScriptIt with Unattended Installation". Microsoft Knowledge Base archive. https://ftp.zx.net.nz/pub/archive/ftp.microsoft.com/MISC/KB/en-us/191/605.HTM
+[45] AutoIt (2026). "History" and "AutoIt and Developer History". https://www.autoitscript.com/wiki/History
+[46] UiBot (2020). "RPA 简介：UiBot 发展历程". UiBot Developer Guide. https://docs.uibot.com.cn/guide/d1/ch002.html
+[47] 钛媒体 (2019). "RPA 百年简史：90 年自动化与信息技术更迭，15 载成就 RPA 如今声名". https://www.tmtpost.com/4168153.html
+[48] IT Week (1995). "Mercury Interactive 修改 WinRunner 测试工具". https://www.itweek.ru/infrastructure/article/detail.php?ID=77797
+[49] 17173 (2005). "按键精灵幕后开发者访谈". https://news.17173.com/content/2005-3-15/n190_106651.html
+[50] Smithsonian National Museum of American History (1957). "Pamphlet, 705 Autocoder System Macro-Instruction Manual". https://americanhistory.si.edu/collections/object/nmah_690179
+[51] Cook, William (2006). "AppleScript". University of Texas at Austin archive. https://www.cs.utexas.edu/~dahlin/Classes/439/ref/applescript.pdf
 
 ## Methodology Appendix
 
