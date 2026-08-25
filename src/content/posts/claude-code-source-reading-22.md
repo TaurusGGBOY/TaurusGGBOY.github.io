@@ -74,7 +74,7 @@ function hasCommandWithArguments(
 
 本篇把 Skill 看成从提示词资产到执行能力的装配链：运行时先发现和解析 Markdown，再根据命令、插件、fork 或 inline 语义选择加载方式，最后把能力放入当前会话或隔离上下文。Skill 的边界在于它改变可用指令，不直接等于一个新的工具权限。
 
-一份 `SKILL.md` 只有几十行文字，却可能出现在 slash 菜单、模型工具列表和独立 Agent 的 system prompt 中。它的难点在于同一份文件要适配不同入口的可见性、参数替换和权限边界。
+一份 `SKILL.md` 只有几十行文字，却会在不同阶段拥有不同表示：它可以出现在 slash 菜单、`skill_listing` / `skill_discovery` attachment 中；真正选中后，正文才作为 `messages` 内容或 fork Agent 的上下文进入模型。模型的 `tools` 数组里通常不是每个 Skill 各占一个 Tool，而只有一个 `Skill` Tool schema，负责接收 Skill 名称和可选参数。它的难点在于同一份文件要适配不同入口的可见性、参数替换和权限边界。
 
 ![Skill 从发现到展开的渐进式披露](/images/posts/claude-code-source-reading-22/22-skill-disclosure-detail-handdrawn.png)
 
@@ -394,6 +394,49 @@ return [{
 **参数说明，** `toolUseContext` 必填。`options.tools` 中零个工具名称匹配 `Skill` 时直接返回 `[]`；`agentId` 可为 `undefined`，此时源码用空字符串作为主 Agent 的去重键。`mcpSkills` 为空时保留本地数组；非空时 `uniqBy()` 对同名项 first-wins。`isInitial` 是布尔值，只有该 Agent 的 sent set 原先为空才为真。
 
 这就是渐进展开真正节省 token 的地方，程序可以已经读过全文，但模型上下文只承担短索引。description 写得含糊，Claude 就可能选不中；description 写成一篇小作文，又会被 250 字符和总预算截断。
+
+### 自然语言不会直接触发文件搜索，而是先由模型选择 Skill
+
+这里要把三种容易混在一起的东西拆开：
+
+1. **`tools` 数组里的工具定义。** 默认并不是把每个 Skill 的 `SKILL.md` 都注册成一个 Tool。Claude Code 注册的是一个 `Skill` Tool，它的输入大致只有两个字段：
+
+   ```ts
+   {
+     skill: string,
+     args?: string,
+   }
+   ```
+
+   `skill` 是要调用的名称，`args` 是可选参数。Skill 的完整 Markdown 正文不在这个 schema 里。
+
+2. **模型看到的发现索引。** 当当前 Agent 拥有 `Skill` Tool 时，运行时会把本地与 MCP 的可调用 Skill 压缩成 `skill_listing` attachment，主要包含名称、短描述和必要的使用提示；实验性 Skill Search 还可能根据用户输入产生 `skill_discovery` attachment。两者都只是“有哪些能力、何时适用”的索引，不是 `SKILL.md` 全文。
+
+3. **真正调用后的展开内容。** 模型根据自然语言与这些描述判断是否匹配。比如用户说“把这个 PDF 转成 Markdown，并保留表格结构”，模型可能发出：
+
+   ```json
+   {
+     "skill": "pdf",
+     "args": "转成 Markdown，保留表格结构"
+   }
+   ```
+
+   随后的代码路径才会把名称交给 `SkillTool`：
+
+   ```text
+   自然语言
+     → skill_listing / skill_discovery
+     → 模型判断是否匹配
+     → tool_use(name="Skill", input={skill, args})
+     → SkillTool.getAllCommands()
+     → findCommand(name, commands)
+     → getPromptForCommand()
+     → SKILL.md 正文进入 messages 或 fork Agent 上下文
+   ```
+
+   这里的“模型判断”与“运行时查找”是两件事。前者默认由模型根据名称、描述和 `whenToUse` 做语义匹配；后者不是再次做向量搜索，而是调用 `findCommand()`，按命令名、展示名或别名做精确匹配。`SkillTool.getAllCommands()` 会先合并本地命令与 MCP prompt 命令，再执行这次查找。因此，自然语言本身不会让运行时直接扫描所有 `SKILL.md` 并猜一个 Skill 名称；它先让模型选出一个 Skill 名称，运行时再验证这个名称是否存在、是否允许模型调用，并展开对应正文。
+
+如果索引中没有明显匹配，模型通常不会凭空调用一个不存在的 Skill；启用实验性 Skill Search 时，运行时可能先依据用户输入补充一批 `skill_discovery` 结果，但这仍然只是发现提示，最终仍需要 `Skill` Tool 调用才能展开正文。直接输入 `/pdf` 则是另一条本地 slash 入口，通常不会先产生 `Skill` `tool_use`；下文会单独展开这条路径。
 
 ### 用户调用与模型调用在同一个定义上汇合
 
