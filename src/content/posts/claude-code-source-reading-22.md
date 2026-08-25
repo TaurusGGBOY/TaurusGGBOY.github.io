@@ -68,6 +68,7 @@ function hasCommandWithArguments(
 - **Skill 生命周期图**，从发现 → 注册 → 索引 → 调用 → 展开 → 执行 → 恢复七阶段，把"同一份 Markdown 如何在不同入口拥有不同可见性与权限"一次画清。
 - **渐进披露的预算机制**，模型先看到 `skill_listing` 短目录（1% 窗口、250 字/条），真正选中后才加载全文，这是 Skill 与常驻 system prompt 的根本区别。
 - **四层能力边界**，把通用的 `function calling`、Anthropic 的 `tool_use`、MCP 的外部调用和 Skill 的指令展开放回同一条执行链，解释为什么 Skill 常常和 MCP 配合，却不能替代 MCP。
+- **用户输入 `/skill` 后的消息流水线**，slash 文本如何被解析、展开成 Skill 正文，再与命令元信息一起进入 API 的 `messages` 数组。
 
 ## 问题
 
@@ -396,6 +397,78 @@ return [{
 
 ### 用户调用与模型调用在同一个定义上汇合
 
+#### 用户输入 `/skill` 后发生了什么
+
+上一节讲的是“模型已经决定调用 Skill”之后的分支。可是用户在终端里输入 `/release-note v1.2` 并按下回车时，模型还没有机会调用 `Skill` 工具。这个入口走的是另一条本地链路：先把 slash 文本解析成命令，再把命令对应的 `SKILL.md` 展开成消息，最后才进入 Query Loop。
+
+可以把它压缩成一条消息流水线：
+
+```text
+按下 Enter
+  → handlePromptSubmit()
+  → processUserInput()
+  → parseSlashCommand() / findCommand()
+  → getPromptForCommand(args)
+  → 命令元信息 + Skill 正文（user message）
+  → normalizeMessagesForAPI()
+  → query()
+  → anthropic.beta.messages.create()
+```
+
+启动时，`getCommands(cwd)` 会把 `.claude/skills/release-note/SKILL.md` 这样的文件加载成一个 `PromptCommand`。所以回车时并不是临时去磁盘“猜”一个 Skill 名称，而是在已经建立的命令注册表里查找：
+
+```ts
+const command = findCommand(
+  commandName,
+  commands,
+)
+```
+
+`parseSlashCommand()` 的职责很小，也很明确。它去掉开头的 `/`，按第一个空格切出命令名和参数；如果第二个 token 是 `(MCP)`，还会把它标记为 MCP 命令。于是：
+
+```ts
+parseSlashCommand('/release-note v1.2')
+// {
+//   commandName: 'release-note',
+//   args: 'v1.2',
+//   isMcp: false,
+// }
+```
+
+之后 `processSlashCommand()` 会用命令名、面向用户的名称和 aliases 做匹配。匹配不到时，它返回 `Unknown skill`，并且不会发起模型查询；匹配到 `PromptCommand` 后，才会调用 `getPromptForCommand(args)`。
+
+`getPromptForCommand()` 会完成几件会改变最终提示词的事情：确定 Skill 目录作为 `baseDir`，替换 `$ARGUMENTS` 和 `$1`、`$2` 这类位置参数，注入 `${CLAUDE_SKILL_DIR}` 与 `${CLAUDE_SESSION_ID}`，并处理 Skill 中允许的 shell 动态内容。换句话说，用户输入的 `v1.2` 不是单独作为一个字段传给 API，而是先参与生成 Skill 的正文。
+
+随后 `getMessagesForPromptSlashCommand()` 会生成一组消息，核心结构可以简化为：
+
+```ts
+[
+  createUserMessage({ content: commandMetadata }),
+  createUserMessage({ content: skillBody, isMeta: true }),
+  ...attachmentMessages,
+  createAttachmentMessage({
+    type: 'command_permissions',
+    allowedTools,
+  }),
+]
+```
+
+第一条消息包含 `<command-message>`、`<command-name>` 和可选的 `<command-args>` 等元信息；第二条才是展开后的 Skill 正文。`isMeta: true` 影响的是普通对话 UI 如何展示，并不意味着这段正文不会进入模型上下文。
+
+这里有一个很容易混淆的边界：直接输入 `/release-note v1.2` 时，通常不会先产生一个 `Skill` `tool_use`。这是用户入口在本地完成的命令展开；只有模型主动选择 Skill 时，才会进入 `SkillTool.call()`。两条入口最后可以复用同一份 Skill 定义，但“如何到达这份定义”不同。
+
+消息进入 `query()` 之前，还会经过 `normalizeMessagesForAPI()`：过滤只供界面显示的消息，合并相邻的 user messages，并保留附件和权限上下文。于是命令元信息与 Skill 正文通常会作为同一个 user turn 发送给模型。随后 Query Loop 把它们和 system prompt、tools 一起交给 `anthropic.beta.messages.create()`。
+
+因此，用户按下回车后的关键变化不是“把 `/release-note` 原样追加到 system prompt”，而是：
+
+```text
+原始文本 /release-note v1.2
+  → 本地命令解析
+  → Skill 正文与参数展开
+  → isMeta user message
+  → API 的 messages 数组
+```
+
 用户输入 `/pdf invoice.pdf` 时，上一篇的 Command 路由会找到 PromptCommand。模型主动调用时，则通过一个明确的工具 Schema，
 
 ```ts
@@ -622,6 +695,8 @@ frontmatter 的 `paths` 还支持条件 Skill，启动时先把它们放进 `con
 
 Claude Code 的 Skill 系统复用 Command 与 Query Loop 执行内核。它把多来源的 `SKILL.md` 与注册型能力归一为 PromptCommand，用短 description 和 `whenToUse` 建立发现索引，再在用户或模型真正选中时展开完整正文。`user-invocable` 与 `disable-model-invocation` 分别控制用户和模型入口；`allowed-tools` 把附加规则交给权限系统，并不绕过 deny 与沙箱；`context: fork` 把长过程隔离到子 Agent，其他值则在当前 Query Loop 内继续。动态目录与 `paths` 条件又让能力可以随着文件位置按需出现。
 
+用户 slash 入口还说明了另一件事：Skill 正文虽然不是 system prompt，却会在按下 Enter 后作为 `isMeta` user message 进入 `messages`，由 `normalizeMessagesForAPI()` 与命令元信息合并，再进入 Query Loop。
+
 把 Skill 直接拼进 system prompt，代码会短一些，但会付出四个代价，全文 token 常驻、入口无法统一（用户斜杠、模型调用、插件、MCP 各写一套执行器）、权限混淆（`allowed-tools` 只是把规则交给权限上下文，真正的 Bash、Edit、MCP 工具仍执行自己的校验）、上下文难隔离（重任务需要 fork 才能只回传结果）。因此，Skill 更准确的心智模型是，
 
 `可发现元数据 + 延迟展开的正文 + Command 路由 + Tool 权限 + 可选 Agent 上下文`
@@ -652,7 +727,10 @@ Claude Code 的 Skill 系统复用 Command 与 Query Loop 执行内核。它把�
 | Tool 适配 | `toolToAPISchema()` | `src/utils/api.ts`、`src/services/api/claude.ts` | 已确认 |
 | MCP 工具 | `fetchToolsForClient()` / `isMcp: true` | `src/services/mcp/client.ts`、`src/tools/MCPTool/MCPTool.ts` | 已确认 |
 | MCP 调用 | `client.callTool()` / `tools/list` | `src/services/mcp/client.ts` | 已确认 |
+| 用户入口 | `parseSlashCommand()` / `processUserInput()` | `src/utils/slashCommandParsing.ts`、`src/utils/processUserInput/processUserInput.ts` | 已确认 |
 | 用户入口 | `userInvocable === false` 拒绝 | `src/utils/processUserInput/processSlashCommand.tsx` | 已确认 |
+| 消息注入 | `getMessagesForPromptSlashCommand()` / `normalizeMessagesForAPI()` | `src/utils/processUserInput/processSlashCommand.tsx`、`src/utils/messages.ts` | 已确认 |
+| API 请求 | `query()` / `anthropic.beta.messages.create()` | `src/query.ts`、`src/services/api/claude.ts` | 已确认 |
 | 权限 | `SkillTool.checkPermissions()` deny/allow/ask | `src/tools/SkillTool/SkillTool.ts` | 已确认 |
 | 权限 | `command_permissions` 附件 / `allowed-tools` | `src/utils/processUserInput/processSlashCommand.tsx` | 已确认 |
 | 展开 | `getPromptForCommand()` 参数/变量/shell | `src/skills/loadSkillsDir.ts` | 已确认 |
