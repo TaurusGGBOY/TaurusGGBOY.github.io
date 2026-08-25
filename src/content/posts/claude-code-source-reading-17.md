@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读17：长会话如何继续运行"
 published: 2026-07-24T16:47:04+08:00
-updated: 2026-08-04
+updated: 2026-08-25
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -23,17 +23,17 @@ imagePosition: "left"
 - `/compact`、模型切换、MCP 工具变化等主动改变请求前缀，属于设计上的重新建缓存；
 - 等待超过缓存生命周期后自然重建，属于 TTL 到期。
 
-本仓库的 `restored-src/` 重建压缩后的消息、工具与项目状态装配；上述 issue 的线上复现仍由 issue 页面支持，后续版本的修复也不属于当前源码结论。“四把手术刀”的比喻来自[源码泄露文章对四种压缩粒度的概括](https://juejin.cn/post/7623258895395110966)，下面的控制流和字段则以仓库中能直接读到的源码为准。
+本仓库的 `restored-src/` 可以确认压缩之后如何重建消息、怎样重新附加工具和项目状态，但不能单凭静态源码证明上述 issue 的线上复现，也不能把后续版本的修复结论倒灌到当前源码。至于本文的“四把手术刀”这个比喻，背景来自[源码泄露文章对四种压缩粒度的概括](https://juejin.cn/post/7623258895395110966)；下面的控制流和字段，以仓库中能直接读到的源码为准。
 
 ## 介绍本章的一些概念
 
-- Claude Code 有**四种压缩机制，不是一种**，`HISTORY_SNIP`、Microcompact、Context Collapse、Autocompact 在每次 query 前以不同粒度先后生效，先做局部、便宜的，最后才允许一次完整重建。
+- Claude Code 有**四种压缩机制，不是一种**，`HISTORY_SNIP`、Microcompact、Context Collapse、Autocompact 会在各自开关和触发条件满足时，以不同粒度参与每次 query 的请求准备流程；它们前面还有一个控制单条 API 消息工具结果总量的 Budget Reduction 层。因此图里是“五层”，概念上是“一个前置预算层 + 四种压缩机制”。
 - **Context Collapse 的实现文件不在 2.1.88 source map 里**，能确认调用点、类型和持久化日志，不能确认风险评分、提交阈值和摘要生成，这是本文最重要的证据边界。
 - 曾有 **1279 个会话连续压缩失败超过 50 次**，最严重的会话失败 3272 次、每天浪费约 25 万次 API 调用；2.1.88 已加熔断保护，**连续失败 3 次即停止重试**。
 - 恢复会话时的缓存失效 bug（GitHub [#42338](https://github.com/anthropics/claude-code/issues/42338)）会让**约 512K token 被重新写入缓存**，根因指向 `deferred_tools_delta` 改变了工具结果的排列顺序。
 - Autocompact **先尝试 session memory（零 API 成本）**，内容不足或边界不可信时才回退到模型摘要；两者组成一条回退链。
 
-> ⚠️ **证据边界**，当前 `restored-src/` 能看到 `snipCompact.js`、`snipProjection.js`、`cachedMicrocompact.js` 和 `contextCollapse` 的调用点、类型、持久化逻辑，但对应的 gated implementation 并不完整。本文可以确定"它怎样接入、返回什么、怎样持久化"，不能臆造 snip 的选择启发式、缓存编辑器的具体删除策略，或 Context Collapse 的风险评分和提交阈值。详见 [known-gaps.md](reference/known-gaps.md)。
+> ⚠️ **证据边界**，当前 `restored-src/` 能看到 `snipCompact.js`、`snipProjection.js`、`cachedMicrocompact.js` 和 `contextCollapse` 的调用点、类型、持久化逻辑，但对应的 gated implementation 并不完整。本文可以确定"它怎样接入、返回什么、怎样持久化"，不能臆造 snip 的选择启发式、缓存编辑器的具体删除策略，或 Context Collapse 的风险评分和提交阈值。详见 [known-gaps.md](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/main/docs/blog/reference/known-gaps.md)。
 
 ## 最小心智模型
 
@@ -42,7 +42,7 @@ imagePosition: "left"
 ```mermaid
 flowchart TB
     A[原始消息集合<br/>超过有效窗口?] --> B
-    B[第一层 tool-result budget<br/>截断超长工具结果]
+    B[第一层 tool-result budget<br/>持久化超预算结果 · preview/path 替代]
     B --> C
     C[第二层 HISTORY_SNIP<br/>选择性删除消息 · 修复父子链]
     C --> D
@@ -53,13 +53,15 @@ flowchart TB
     F[第五层 Autocompact<br/>session memory 优先 · 模型摘要兜底<br/>写入 compact boundary]
 ```
 
-模型，**一张"成本递增的防御阶梯"**（仓库中对应手绘版 `./assets/17-four-scalpels-handdrawn.png`）。越靠下的层越贵、越彻底，删除消息不需要模型，缓存编辑不重写内容，投影归档不破坏完整历史，只有最后一步才把旧上下文交给模型做一次结构化重建。层与层**不是互斥的 `if/else` 分支**，`HISTORY_SNIP` 和 Microcompact 可以在同一次 query 中先后执行，Context Collapse 先投影上下文，只有仍然需要时才进入最后的压缩判断。
+可以把它画成**一张"成本递增的防御阶梯"**（仓库中对应手绘版 `/images/posts/claude-code-source-reading-17/17-four-scalpels-handdrawn.png`）。最前面的 Budget Reduction 只是请求前的工具结果预算整形，不属于四把“压缩刀”；后面的机制越靠下越贵、越彻底，删除消息不需要模型，缓存编辑不重写内容，Context Collapse 的投影成本则受缺失实现限制，不能静态穷举；源码明确会把旧上下文交给模型做结构化重建的是 Autocompact 的传统摘要路径。层与层**不是互斥的 `if/else` 分支**，`HISTORY_SNIP` 和 Microcompact 可以在同一次 query 中先后执行，Context Collapse 先投影上下文，只有仍然需要时才进入最后的压缩判断。
 
 ## 正文
 
+本篇的主线是把长会话压力按成本和信息损失分层处理：先裁剪冗余，再压缩工具结果和缓存，随后才进入上下文重建或模型摘要。每一层都有自己的触发条件和可恢复边界，`compact` 不是一个无条件清空消息的按钮。
+
 本文全部引用 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 还原源码；`restored-src/` 只用于定位证据，不表示内部仓库原始目录。代码块只保留证明控制流所需的字段，`// ...` 表示省略埋点、UI 消息和无关分支，每个代码块后标注证据位置。
 
-### 一次 query 的五层防御顺序
+### 一次 query 的“前置预算 + 四种压缩”顺序
 
 还是用那张金额单位工单来观察。调查过程中，Claude Code 读过支付服务的目录、金额转换函数、回调样例和历史 issue，还启动了测试并让 teammate 在后台检查数据库。需要保留的内容包括已经确认的根因和被证伪的假设、工具调用产生的副作用及其结果、当前 worktree 与后台任务状态、下一轮必须接着做的动作。每次目录搜索的全部重复输出可以丢掉。
 
@@ -68,7 +70,11 @@ flowchart TB
 ```ts
 let messagesForQuery = [...getMessagesAfterCompactBoundary(messages)]
 
-// 这里还会先做 tool-result budget 处理
+messagesForQuery = await applyToolResultBudget(
+  messagesForQuery,
+  toolUseContext.contentReplacementState,
+  // 省略 transcript 写入回调和 skipToolNames
+)
 
 let snipTokensFreed = 0
 if (feature('HISTORY_SNIP')) {
@@ -115,6 +121,58 @@ const { compactionResult } = await deps.autocompact(
 > 证据，`restored-src/src/query.ts:365-468`（2.1.88 source map 还原源码），工具结果预算 → `HISTORY_SNIP` → Microcompact → Context Collapse → Autocompact 的调度顺序。
 
 这个顺序本身就是设计，先做局部、便宜、不会生成摘要的处理，再尝试投影旧上下文，最后才允许一次完整重建。`snipTokensFreed` 会传给 Autocompact，因为最后一个 assistant message 里的历史 usage 仍反映删除前的大小（见下文"Token 估算与预算追踪"）。
+
+### 前置层｜Budget Reduction 先控制单个 API message 的工具结果总量
+
+Budget Reduction 容易和 Microcompact 混在一起，但它们处理的不是同一个问题。前者检查**每一个 API-level user message 中所有 tool result 的合计字符数**；后者处理已经变旧、需要清理或从缓存中删除的 tool result。Budget Reduction 发生在 Microcompact 之前，而且不调用 LLM。
+
+`applyToolResultBudget(messages, state, writeToTranscript?, skipToolNames?)` 的入口很轻：`state` 是 `undefined` 时直接返回原消息，表示这项能力没有启用；有状态时才进入 `enforceToolResultBudget()`。默认单条消息预算是 `MAX_TOOL_RESULTS_PER_MESSAGE_CHARS = 200_000` 个字符，`getPerMessageBudgetLimit()` 允许 GrowthBook 的 `tengu_hawthorn_window` 用有限正数覆盖它，否则回退到这个默认值。
+
+它不是把整段历史裁成固定长度，而是按消息独立判断。对每个消息，源码把结果分成已经做过决定的 frozen 项和本轮新出现的 fresh 项；只有 `frozenSize + freshSize > limit` 时，才从 fresh 项中选择足够大的结果持久化。已经发送过且未被替换的结果会被冻结，后续不会为了新的阈值再改写，这样不会破坏 prompt cache 的前缀稳定性。
+
+```ts [pseudocode]
+const limit = getPerMessageBudgetLimit()
+
+for (const userMessage of messages) {
+  const { frozen, fresh } = partitionByPriorDecision(userMessage)
+  if (size(frozen) + size(fresh) <= limit) continue
+
+  const selected = selectFreshToReplace(fresh, frozen, limit)
+  for (const toolResult of selected) {
+    const persisted = await persistToolResult(
+      toolResult.content,
+      toolResult.toolUseId,
+    )
+    replaceWithPreviewAndPath(persisted)
+  }
+}
+```
+
+替换后的模型可见内容不是语义摘要，而是一个 `<persisted-output>` 结构，包含原始大小、完整文件路径、前部 preview，若还有未展示内容则追加 `...`。完整结果仍在磁盘上；写入失败时保留原内容，不会凭空给模型一个不完整的成功替身。对于声明 `maxResultSizeChars: Infinity` 的工具（例如 Read），这层会跳过它们，仍由工具自己的结果上限负责。
+
+#### 模型想要 preview 之外的内容怎么办？
+
+这里的 preview 不是给结果做语义摘要，而是给模型一段可定位的入口。`generatePreview()` 最多取前 2,000 字节，优先在换行处结束；如果后面还有内容，`buildLargeToolResultMessage()` 会保留 `...`，并同时写入完整文件路径。因此，模型真正收到的是一个普通的 `tool_result` 文本，而不是一个可以自动展开的文件引用。
+
+如果前 2KB 没有回答当前问题，模型需要根据路径再次调用 `Read`，必要时配合 `offset` 和 `limit` 分段读取。Claude Code 不会因为文件已经落盘，就把全文隐式追加到下一次 prompt；模型不发起这次读取，后面的内容就不会进入它的上下文。反过来，`Read` 返回的又是一次新的 `tool_result`，仍然要经过同一条 query loop。
+
+这也解释了“持久化”与“模型可见”不是一回事：持久化保证完整结果有一个本地副本，preview 只决定当前这一轮模型先看到什么。
+
+#### 预览替换会不会破坏 prompt cache？
+
+对一个刚产生、尚未发送过的超大结果，替换发生在它第一次进入 API 消息之前；Claude Code 没有改写已经缓存的历史前缀。消息级预算还会按 `tool_use_id` 记录决定：已经替换的结果后续复用完全相同的 preview，已经原样发送过的结果则冻结，不会为了后来的预算变化再 事后 改写。这样做的目的就是让同一段前缀保持字节一致。
+
+因此，预览替换本身通常不会让已有缓存前缀失效；真正会改变缓存命中范围的是后续对历史消息内容的清理、压缩或顺序重建。这个边界要和“结果被保存到了磁盘”分开理解。
+
+因此两者可以这样区分，
+
+| 机制 | 触发维度 | 模型看到的变化 | 完整结果在哪里 |
+| --- | --- | --- | --- |
+| Budget Reduction | 单个 API message 的 tool result 合计超过字符预算 | 持久化大结果，以 preview/path 替换正文 | 磁盘文件 |
+| 时间型 Microcompact | 距离最近 assistant message 的时间间隔达到阈值 | 更早的 compactable result 改成 cleared marker | 清理函数本身不创建持久化副本；原始历史是否仍可恢复取决于 transcript 后续记录与裁剪路径 |
+| 缓存型 Microcompact | 缓存编辑器的数量/保留策略 | 消息数组可以不变，API 追加 cache edits | 服务端缓存按 tool use ID 删除 |
+
+> 证据，`restored-src/src/query.ts:365-394`（请求前调用）；`restored-src/src/utils/toolResultStorage.ts:421-434,739-909,924-936`（阈值、持久化替换和入口）；`restored-src/src/constants/toolLimits.ts:49`（200,000 字符默认值）。
 
 ### 第一刀｜HISTORY_SNIP 只剪掉已经不值得携带的消息
 
@@ -244,9 +302,13 @@ const TIME_BASED_MC_CONFIG_DEFAULTS: TimeBasedMCConfig = {
 
 > 证据，`restored-src/src/services/compact/timeBasedMCConfig.ts:30,36`（2.1.88 source map 还原源码），静态默认配置与 `getTimeBasedMCConfig()` 的远程覆盖入口。
 
-这些不是所有运行时环境都必然采用的值，`getTimeBasedMCConfig()` 会读取远程配置覆盖它们。源码能确认的控制流是，只有配置启用、query 来源符合条件、最近一个 assistant 的时间戳可用，且间隔超过 `gapThresholdMinutes` 时，才会产生 trigger。
+这些不是所有运行时环境都必然采用的值，`getTimeBasedMCConfig()` 会读取远程配置覆盖它们。源码能确认的控制流是，只有配置启用、query 来源符合条件、最近一个 assistant 的时间戳可用，且间隔达到或超过 `gapThresholdMinutes` 时，才会产生 trigger。
 
-触发后，代码先收集 `COMPACTABLE_TOOLS` 对应的 tool use ID，按出现顺序保留最后 `keepRecent` 个；实际保留数经过 `Math.max(1, config.keepRecent)`，避免 `keepRecent` 为 0 时把所有结果都清空。然后遍历 user message 的 content block，
+所以，`[Old tool result content cleared]` 不是“某个 tool_result 超过 2KB”或“上下文一变大”就会出现的通用错误提示。它只出现在时间型 Microcompact 的本地清理路径：当前是主线程、功能开关已启用，而且距离最近一次主线程 assistant 消息已经达到配置的闲置阈值。静态默认值是 60 分钟，但默认总开关关闭，实际部署还可能通过 `tengu_slate_heron` 改写 `enabled`、`gapThresholdMinutes` 和 `keepRecent`。
+
+这个阈值比较的是“现在”与最近一次 assistant 消息的时间戳，不是某个工具结果自己的产生时间；“old”也不是按每个结果单独计时，而是按 compactable tool use 在消息序列中的先后顺序定义。默认保留最近 5 个，且实现会用 `Math.max(1, keepRecent)`，避免配置为 0 时把所有结果都清掉。
+
+触发后，代码先收集 `COMPACTABLE_TOOLS` 对应的 tool use ID，按出现顺序保留最后 `keepRecent` 个；实际保留数经过 `Math.max(1, config.keepRecent)`，避免 `keepRecent` 为 0 时把所有结果都清空。这里的“old”不是逐条比较每个 `tool_result` 自己的时间戳，而是**按 transcript 中的出现顺序**定义：全部 compactable ID 中，排在最近 `keepRecent` 个之前的 ID 都进入清理集合。例如 T1 到 T7 共 7 个结果、`keepRecent = 5` 时，T1、T2 是 old，T3 到 T7 保留。然后遍历 user message 的 content block，
 
 ```ts
 if (
@@ -263,6 +325,8 @@ if (
 > 证据，`restored-src/src/services/compact/microCompact.ts:446-500`（2.1.88 source map 还原源码），替换逻辑；`microCompact.ts:36,41,138` 分别定义 cleared marker、`COMPACTABLE_TOOLS` 与 `calculateToolResultTokens()`。
 
 它保留 `tool_result` block 和 `tool_use_id`，只把旧结果内容替换成固定的 cleared marker。工具调用仍然保留，模型也不需要重新总结这段结果，程序只把已经不值得重复发送的大段结果变成一个短占位符。
+
+这里还要区分“清理”和“持久化”。时间型 Microcompact 的替换代码只写入固定 marker，并没有调用 `persistToolResult()` 去为原文新建 `tool-results` 文件。如果这段结果此前已经通过 Budget Reduction 持久化过，原来的文件仍可能存在；如果此前没有持久化，不能因为看到了 cleared marker 就推断有一个可供 `Read` 的完整副本。模型当前能看到的只是 marker，是否还能从本地 transcript 或其他历史记录恢复，则取决于后续的记录、snip 和 compact 路径，不能由这个 marker 本身保证。
 
 如果没有可清除的结果，或估算出的 `tokensSaved` 为 0，函数返回 `null`，入口继续尝试缓存编辑路径。成功清理后还会重置 Microcompact 的模块状态，并通知 prompt-cache break detector，下一次 cache read 变小是本次主动清理造成的，不应被当成异常断缓存（见下文"缓存断点策略"）。
 
@@ -295,6 +359,8 @@ if (toolsToDelete.length > 0) {
 > 证据，`restored-src/src/services/compact/microCompact.ts:89-135` 附近的缓存编辑路径（2.1.88 source map 还原源码）；`query.ts:870-888` 确认 boundary 等 API 返回真实的 `cache_deleted_input_tokens` 后再写入。`getToolResultsToDelete()` / `createCacheEditsBlock()` 来自动态 import 的 `cachedMicrocompact.js`，实现文件不在 source map 中。
 
 这里 `messages` 原样返回。`cache_reference` 和 `cache_edits` 会在 API 层附加，boundary 也要等 API 返回真实的 `cache_deleted_input_tokens` 后再写入，客户端不用估算值冒充服务端实际删除量。
+
+这条路径与时间型路径的缓存含义也不同：缓存编辑会让服务端删除选中的缓存引用，下一次 `cache_read` 变小是预期结果，但不是把整个 prompt cache 清空；时间型路径则认为长时间闲置后缓存已经不温热，于是直接改写本地发送视图，并主动把这次变化标记为预期的 cache deletion。两者都不表示“模型自动获得了被删除的原文”。
 
 两条路径的前提不同，时间间隔超过阈值时，源码认为服务端缓存已不再温热，所以直接改 prompt 内容；缓存编辑路径假定缓存仍然可编辑，只告诉 API 删除哪些缓存引用。因此 Microcompact 解决的是"工具结果太贵"，而不是"整段对话需要一份新的语义摘要"，它可以让下一次请求变小，却不会负责重建计划、项目上下文或历史结论。
 
@@ -726,7 +792,7 @@ prompt cache 按**前缀精确匹配**，系统提示、工具定义、项目上
 
 源码注释记录了一类历史故障，曾有 **1279 个会话连续压缩失败超过 50 次**，最严重的单个会话失败 **3272 次**，每天因此浪费约 **25 万次 API 调用**，每一次失败都向 API 发一次必然失败的压缩请求，没有任何停止条件。2.1.88 的补救是 **3 次失败的 circuit breaker**，`tracking.consecutiveFailures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`（`autoCompact.ts:70`，值为 3）时，`autoCompactIfNeeded()` 直接返回 `{ wasCompacted: false }`，不再发起新的压缩请求；只有压缩成功才把计数归零（`consecutiveFailures: 0`）。
 
-> 证据，`restored-src/src/services/compact/autoCompact.ts:70,262-266,343`（2.1.88 source map 还原源码），熔断常量与两处使用点。历史数字（1279 会话、3272 次、25 万次）来自源码注释，属于 [external-version](reference/known-gaps.md) 类别，2.1.88 已带熔断，数字描述的是更早版本线上记录。
+> 证据，`restored-src/src/services/compact/autoCompact.ts:70,262-266,343`（2.1.88 source map 还原源码），熔断常量与两处使用点。历史数字（1279 会话、3272 次、25 万次）来自源码注释，属于 [external-version](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/main/docs/blog/reference/known-gaps.md) 类别，2.1.88 已带熔断，数字描述的是更早版本线上记录。
 
 #### 事故二｜恢复会话时 prompt cache 大规模失效（#42338）
 
@@ -734,12 +800,13 @@ GitHub issue [#42338](https://github.com/anthropics/claude-code/issues/42338) �
 
 这和缓存"自然过期"不是一回事，需要把三件事分开，`resume/continue` 重建顺序发生回归，属于**恢复 bug**；`/compact`、模型切换、MCP 工具变化等主动改变请求前缀，属于**设计上的重新建缓存**；等待超过缓存生命周期后自然重建，属于 **TTL 到期**。本仓库的 `restored-src/` 可以确认压缩之后如何重建消息、怎样重新附加工具和项目状态，但不能单凭静态源码证明上述 issue 的线上复现，也不能把后续版本的修复结论倒灌到当前源码。完整的问答见文末"回顾"。
 
-### 四把刀如何协同，而不是互相替代
+### 四种压缩如何协同，并与 Budget Reduction 配合
 
 把完整链路压缩成一张表，
 
 | 阶段 | 主要动作 | 是否改写消息内容 | 失败或不适用时 |
 | --- | --- | --- | --- |
+| Budget Reduction | 按单个 API message 的 tool result 总量持久化大结果，替换成 preview/path | 是，当前请求视图被替换 | 未超预算、工具被跳过或持久化失败时保留原内容 |
 | 读取 boundary | 取最近 compact boundary 后的历史，并按需要投影 snip | 可能只改读取视图 | 继续使用 boundary 后的原始切片 |
 | `HISTORY_SNIP` | 删除指定 UUID，重连 `parentUuid` | 是 | 返回当前消息，或交给后续机制 |
 | 时间型 Microcompact | 用 cleared marker 替换旧 `tool_result` | 是 | 尝试缓存编辑 |
@@ -747,11 +814,12 @@ GitHub issue [#42338](https://github.com/anthropics/claude-code/issues/42338) �
 | Context Collapse | 提交/重放归档区间，投影较短视图 | 视图层面是 | 真实 overflow 时先尝试 recovery |
 | Autocompact | session memory 优先，传统模型摘要兜底 | 是，生成新 boundary | 返回失败并保留失败计数 |
 
-最容易误读的地方有三个，
+最容易误读的地方有四个，
 
-1. **snip 和 Microcompact 可以同时运行。** queryLoop 的注释明确说二者不是互斥关系；snip 释放的 token 还会进入 Autocompact 的判断。
-2. **Context Collapse 不是 Autocompact 的一个摘要模板。** 它有自己的 commit log、snapshot 和读取投影；开启后，主线程自动摘要会被抑制，overflow recovery 才是后备通道。
-3. **session memory 不是完整压缩之外的第五条管线。** 它是在 `autoCompactIfNeeded()` 触发之后，替代传统 `compactConversation()` 生成 `CompactionResult` 的优先分支；不能用时返回 `null`，随后仍走传统摘要。
+1. **Budget Reduction 不是 Microcompact。** 前者按单条 API message 的合计字符预算把结果持久化成 preview/path，后者按时间间隔或缓存编辑策略清理旧结果；前者不生成语义摘要。
+2. **snip 和 Microcompact 可以同时运行。** queryLoop 的注释明确说二者不是互斥关系；snip 释放的 token 还会进入 Autocompact 的判断。
+3. **Context Collapse 不是 Autocompact 的一个摘要模板。** 它有自己的 commit log、snapshot 和读取投影；开启后，主线程自动摘要会被抑制，overflow recovery 才是后备通道。
+4. **session memory 不是完整压缩之外的第五条管线。** 它是在 `autoCompactIfNeeded()` 触发之后，替代传统 `compactConversation()` 生成 `CompactionResult` 的优先分支；不能用时返回 `null`，随后仍走传统摘要。
 
 如果回到那张金额单位工单，最理想的执行路径是，先把无价值的旧工具输出剪掉，再把仍温热的缓存引用做编辑；如果 Context Collapse 已有可提交区间，就用更短投影视图继续调查；只有这些动作仍不足以容纳请求时，才用 session memory 或模型摘要生成新的 boundary。下一轮 query 接收到的是一组带有历史结论、尾部细节和运行状态的可执行消息，不会只是简单截断的聊天记录。
 
@@ -762,17 +830,17 @@ GitHub issue [#42338](https://github.com/anthropics/claude-code/issues/42338) �
 | 层 | 动作 | 释放 | 剩余 |
 | --- | --- | --- | --- |
 | 原始总量 | ， | ， | ~200K |
-| tool-result budget | 把单个 60K 的目录扫描结果截断到 20K | ~40K | ~160K |
-| `HISTORY_SNIP` | 删除 15 条已过时的搜索/读取输出 | ~35K | ~125K |
-| Microcompact（时间路径） | 9 个旧 `tool_result`（共 ~70K）替换为 cleared marker（9 × ~20 token ≈ 0.2K） | ~70K | ~55K |
-| Context Collapse | 归档 55K 中较旧的 ~30K，投影为 ~2K 摘要视图 | ~28K | ~27K（读取视图） |
-| Autocompact（仅当前面仍不够） | session memory / 模型摘要压成 ~5K 摘要 + 保留最近 3 轮 ~8K | ~14K | ~13K + boundary |
+| tool-result budget | 把单个 60K 的目录扫描结果持久化，模型只看约 2K preview + path | ~58K | ~142K |
+| `HISTORY_SNIP` | 删除 15 条已过时的搜索/读取输出 | ~35K | ~107K |
+| Microcompact（时间路径） | 9 个旧 `tool_result`（共 ~70K）替换为 cleared marker（9 × ~20 token ≈ 0.2K） | ~70K | ~37K |
+| Context Collapse | 归档其中较旧的 ~30K，投影为 ~2K 摘要视图 | ~28K | ~9K（读取视图） |
+| Autocompact（若仍超阈值，另一个压力场景） | session memory / 模型摘要压成 ~5K 摘要 + 保留最近 3 轮 ~8K | ~14K | —（按触发时的输入另算） |
 
-> 证据级别，上表数字是**示意估算（inferred）**，不是源码常量，真实会话的分布完全取决于工具输出量。源码能确认的是各层的**阈值本身**，摘要输出预留 `MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000`（`autoCompact.ts:30`）、自动压缩 buffer `AUTOCOMPACT_BUFFER_TOKENS = 13_000`（`autoCompact.ts:62`）、session memory 窗口 `minTokens 10_000 / minTextBlockMessages 5 / maxTokens 40_000`（`sessionMemoryCompact.ts:57-65`）。
+> 证据级别，上表数字是**示意估算（inferred）**，不是源码常量，真实会话的分布完全取决于工具输出量；Autocompact 一行展示的是“仍超阈值时”的另一种场景，不应机械地和前面几行相加。源码能确认的是各层的**阈值本身**，摘要输出预留 `MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000`（`autoCompact.ts:30`）、自动压缩 buffer `AUTOCOMPACT_BUFFER_TOKENS = 13_000`（`autoCompact.ts:62`）、session memory 窗口 `minTokens 10_000 / minTextBlockMessages 5 / maxTokens 40_000`（`sessionMemoryCompact.ts:57-65`）。
 
 三个值得注意的点，
 
-- **越早的层释放越多，成本越低。** 前四行加起来（~145K）都不需要模型参与；只有最后一行才产生一次摘要请求。这就是"四层防御"的性价比所在。
+- **越早的层释放越多，成本越低。** Budget Reduction、HISTORY_SNIP 和 Microcompact 不需要模型参与；Context Collapse 的具体成本受缺失实现限制，Autocompact 的传统 fallback 才明确产生摘要请求。这就是"前置预算 + 四层防御"的性价比所在。
 - **Microcompact 是单层释放最大的。** 工具结果通常是会话里最大的块；把 9 个旧结果换成 marker，比删除 15 条普通消息省得还多。
 - **Autocompact 之后请求依然不小。** ~13K + boundary 不是"回到 1K 初始状态"；保留最近细节和附件是为了让压缩后的会话还能继续执行。
 
@@ -805,15 +873,15 @@ GitHub issue [#42338](https://github.com/anthropics/claude-code/issues/42338) �
 | Autocompact | `createCompactCanUseTool()` 压缩 agent 拒绝工具 | `src/services/compact/compact.ts:1125` | 已确认 |
 | Autocompact | `runPostCompactCleanup()` | `src/services/compact/postCompactCleanup.ts:31` | 已确认 |
 
-> 证据说明，标记 ⚠️ MISSING 的行遵循 [known-gaps.md](reference/known-gaps.md) 的 missing 类别，能确定"怎样接入、返回什么、怎样持久化"，不能确定选择启发式、删除策略或风险评分。另有两类边界，远程配置（`tengu_slate_heron`、`tengu_sm_compact*`）属于 runtime-only，历史事故数字属于 external-version。
+> 证据说明，标记 ⚠️ MISSING 的行遵循 [known-gaps.md](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/main/docs/blog/reference/known-gaps.md) 的 missing 类别，能确定"怎样接入、返回什么、怎样持久化"，不能确定选择启发式、删除策略或风险评分。另有两类边界，远程配置（`tengu_slate_heron`、`tengu_sm_compact*`）属于 runtime-only，历史事故数字属于 external-version。
 
 ## 设计决策｜为什么是四层，而不是一个"压缩按钮"
 
-下面的判断按代码结构与提交历史组织，是对源码的解释，不是官方选型记录。
+源码没有提供官方选型记录，下面的解释依据代码结构与提交历史，不代表官方声明。
 
-**第一，为什么四层而不是一层？** 因为一层机制只能覆盖一种失效模式，消息冗余（HISTORY_SNIP）、工具结果膨胀（Microcompact）、整体接近窗口（Context Collapse）、窗口溢出（Autocompact）。如果只有 Autocompact，每轮压力都触发一次昂贵的模型摘要，1279 会话的失败风暴就是代价；如果只有 snip，工具结果再大也压不下来。四层是"成本阶梯"，删除消息不需要模型，缓存编辑不重写内容，投影归档不破坏历史，只有最后一步才完整重建。每一层拦截上一层漏掉的压力，层内失败就顺延给下一层。
+**第一，为什么四层而不是一层？** 因为一层机制只能覆盖一种失效模式，消息冗余（HISTORY_SNIP）、工具结果膨胀（Microcompact）、整体接近窗口（Context Collapse）、窗口溢出（Autocompact）。如果只有 Autocompact，每轮压力都可能触发昂贵的模型摘要，1279 会话的失败风暴就是代价；如果只有 snip，工具结果再大也压不下来。四层可以理解为一条成本阶梯：HISTORY_SNIP 删除消息、缓存型 Microcompact 编辑缓存都不需要模型；Context Collapse 的具体成本受缺失实现限制；源码明确会调用模型完成结构化重建的是 Autocompact 的传统摘要路径。每一层拦截上一层漏掉的压力，层内不适用时再把请求交给后续机制。
 
-**第二，为什么先试 session memory，再走模型摘要？** 因为 session memory 复用后台 extraction 已经提取的结构化内容，不发起新的摘要请求。它的可用性有前提：memory 文件存在、边界可信、重建后仍在阈值内；任何一个前提不满足，`trySessionMemoryCompaction()` 就返回 `null`，回退到传统路径。这是回退链，不是互斥分支。
+**第二，为什么先试 session memory，再走模型摘要？** 因为 session memory 是**零 API 成本**的，它复用后台 extraction 已经提取的结构化内容，不发起新的摘要请求，速度也快得多。但它的可用性有前提，memory 文件存在、边界可信、重建后仍在阈值内；任何一个前提不满足，`trySessionMemoryCompaction()` 就返回 `null`，干净地回退到传统路径。这是回退链，不是互斥分支，优先复用已有状态，得不到才花钱重建。
 
 **第三，为什么 Context Collapse 是 gated 的？** 数据面上的理由是确定的，它的实现目录不在 2.1.88 source map 中，调用点被 `feature('CONTEXT_COLLAPSE')` 包裹，持久化需要新的"区间 + commit log + snapshot"模型和恢复路径（`restoreFromEntries`），注释还提到 staged/commit 的百分比区间和 risk 评分，这是一套比其它三层复杂得多的状态机。合理推断（inferred），投影归档对一致性要求高，必须先经过实验验证再默认启用，因此以 feature-gated 形式存在。可以确认它是 gated 的，不能确认官方上线它的确切时间表。
 
@@ -855,7 +923,7 @@ GitHub issue [#42338](https://github.com/anthropics/claude-code/issues/42338) �
 
 ## 相关链接
 
-- **上一篇**，[16 项目上下文如何组装并注入](./16-system-prompt-and-project-context.md)，前缀链与缓存边界
-- **下一篇**，[18 生命周期机制如何横切整个运行时](./18-hooks-lifecycle.md)，回答本文的 `/compact` 中断问题
-- **平行阅读**，[40 如何从会话中提炼知识](./40-session-memory.md)，Autocompact 优先路径的产物如何产生
-- **平行阅读**，[20 会话历史如何持久化与恢复](./20-session-history-and-resume.md)，transcript 恢复与 snip 删除链
+- **上一篇**，[16 项目上下文如何组装并注入](/posts/claude-code-source-reading-16/)，前缀链与缓存边界
+- **下一篇**，[18 生命周期机制如何横切整个运行时](/posts/claude-code-source-reading-18/)，回答本文的 `/compact` 中断问题
+- **平行阅读**，[40 如何从会话中提炼知识](/posts/claude-code-source-reading-40/)，Autocompact 优先路径的产物如何产生
+- **平行阅读**，[20 会话历史如何持久化与恢复](/posts/claude-code-source-reading-20/)，transcript 恢复与 snip 删除链
