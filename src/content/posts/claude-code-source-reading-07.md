@@ -7,13 +7,13 @@ category: "AI / Architecture"
 draft: false
 image: "/images/posts/claude-code-source-reading-07/claude-code-source-reading-00.png"
 imagePosition: "left"
-updated: 2026-08-04
+updated: 2026-08-25
 ---
 ## 回答上一篇的问题
 
 上一篇的问题是，Claude Code 里的 `turn` 到底算什么？我发一句用户消息后，后续每次“工具调用 + 结果反馈”的往返都算一个新的 turn 吗？`maxTurns` 这个上限能不能手动设置？
 
-在 Claude Code 的语境里，`turn` 是“一个完整回合”，一次用户输入触发的模型输出结束。输出可以直接以文本收束，也可以包含若干 `tool_use`，等待工具结果后再进入下一次模型决策。每一组 `tool_use` + `tool_result` 回流都会开启下一条 `turn`；最终文本收束则产生最后一个 `turn`。`maxTurns` 主要约束这类工具驱动回合的续航。
+答案先放在前面，在 Claude Code 的语境里，`turn` 是“一个完整回合”，一次用户输入触发的模型输出结束。输出可以直接以文本收束，也可以包含若干 `tool_use`，等待工具结果后再进入下一次模型决策。每一组 `tool_use` + `tool_result` 回流都会开启下一条 `turn`；最终文本收束则产生最后一个 `turn`。`maxTurns` 主要约束这类工具驱动回合的续航。
 
 `turn` 这里对应“完整模型决策周期”（query loop 的一个闭环）。`query loop` 可以理解为“收集输入→调用模型→触发工具→回写结果→下一次决策”的执行骨架。
 
@@ -75,6 +75,8 @@ updated: 2026-08-04
 | 事件投影 | 运行时事件按模型上下文、UI、SDK 与 transcript 的需求保留不同字段 | `normalizeMessages` / `isTranscriptMessage` |
 
 ## 问题｜一次工具往返，消息之间靠什么互相定位
+
+本篇的主线是建立消息的关联规则：角色说明谁产生内容，内容块说明发生了什么，`tool_use_id` 与 `sourceToolAssistantUUID` 把工具请求、结果和来源 assistant 消息重新连起来。只看消息文本会漏掉真正支撑恢复、并发和持久化的身份字段。
 
 循环推进时，**消息之间靠什么互相定位？** 你只交给 Claude Code 一句简短要求，“读一下这段金额换算代码，核对回调字段，先别动生产”。它随后还会陆续产生 assistant 的 `tool_use`、工具返回的 `tool_result`、进度事件和上下文附件。Read 的结果可能进入下一轮模型历史，Spinner 的进度只留在 UI，权限拒绝需要作为合法的工具结果回填。它们都可能上屏，但进入下一轮模型历史的内容并不完全相同。
 
@@ -420,6 +422,38 @@ export function createAttachmentMessage(
 具体 attachment 的 `type` 由该文件中的大型联合及功能开关决定，静态源码只能逐条确认实际路径。attachment 进入 Claude API 前，会由 `normalizeAttachmentForAPI()` 转成一条或多条 user 消息，并在相邻 user 后合并，它在内部 history 中仍保留“附件”身份，但在线路协议上最终要服从 Messages API 的 user/assistant 角色结构。
 
 system 则依靠第二个判别字段 `subtype`。仅 `restored-src/src/utils/messages.ts` 的构造函数就能确认 `informational`、`permission_retry`、`bridge_status`、`scheduled_task_fire`、`stop_hook_summary`、`turn_duration`、`away_summary`、`memory_saved`、`agents_killed`、`api_metrics`、`local_command`、`compact_boundary`、`microcompact_boundary` 与 `api_error` 等值。这些值会按消费者筛选，`normalizeMessagesForAPI()` 过滤 progress 和绝大多数 system，仅把 `local_command` 变成 user 上下文；`QueryEngine` 对外只显式映射部分 system，例如 `compact_boundary` 和由 `api_error` 转换出的 `api_retry`。
+
+### 发给模型前，规范化到底做了什么
+
+这里的“规范化”容易被误解成压缩上下文。它实际做的是，把运行时消息整理成 Claude Messages API 能接受的消息序列；真正负责减少历史 token 的，是后面的 snip、microcompact 和 compact。`normalizeMessagesForAPI()` 的第一步就把消息分成“模型需要知道的”和“宿主自己消费的”。
+
+**第一类，`progress` 是执行中的状态，不是模型上下文。** 工具执行器收到 MCP 或其他工具的进度回调时，会调用 `createProgressMessage()`；Hook 运行前也会直接 yield 一条 `type: 'progress'` 消息。例如 Hook 进度的载荷可以是，
+
+```ts
+{
+  type: 'progress',
+  data: {
+    type: 'hook_progress',
+    hookEvent: 'PreToolUse',
+    hookName: 'check.sh',
+    command: './check.sh',
+  },
+  parentToolUseID,
+  toolUseID,
+  timestamp,
+  uuid,
+}
+```
+
+它服务于 Spinner、工具卡片和 SDK 的实时事件；进入 API 准备阶段时，过滤器直接排除 `type === 'progress'` 的消息。工具最终做了什么，仍由 `tool_use` 与配对的 `tool_result` 表达。
+
+**第二类，`system` 不是一个统一的“发给模型”通道。** 例如 Stop Hook 出错时，`stopHooks.ts` 会创建一条 `informational` 系统消息，内容类似 `Stop hook failed: ...`，它用于向用户报告运行时状态；`normalizeMessagesForAPI()` 会把这类普通 system 消息过滤掉。另一方面，`subtype: 'local_command'` 的本地命令输入和输出需要让模型在后续回合中看见，于是规范化阶段把它转换成 `user` 消息，再与相邻的 user 消息合并。
+
+**第三类，`isVirtual: true` 是 REPL 内部调用的显示投影。** REPL 模式下，模型看到的是外层 `REPL` 工具调用；REPL 内部实际执行的 `Read`、`Grep` 或 `Bash` 可以作为虚拟的 assistant/tool-use 与 user/tool-result 消息流过 UI，让界面展示真实的内部动作。`collapseReadSearch.ts` 的注释直接把这些称为“virtual messages”，而 `normalizeMessagesForAPI()` 会过滤带 `isVirtual` 的 user/assistant 消息，避免把同一层执行重复发送给模型。
+
+随后才是结构整理：连续的 user 消息合并成一条；同一个 API 响应拆出的 assistant 片段按 `message.id` 合并；tool_use 的输入按当前工具 Schema 规范化，并在不支持 tool search 时去掉 `caller` 等扩展字段。最后还会清理孤立 thinking、尾部 thinking、只有空白的 assistant 消息，并校验图片大小。
+
+因此，一次消息从运行时到模型大致经过三次投影：progress 留在实时事件层，普通 system 留在宿主层，virtual 消息留在 REPL/UI 层；只有通过格式整理和角色合并后的 user/assistant 内容才进入 API。这个边界也解释了为什么“界面上看到过”不等于“下一次请求会原样带上”。
 
 ### history 是面向不同消费者的消息投影
 
