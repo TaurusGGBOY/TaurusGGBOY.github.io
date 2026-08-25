@@ -1,5 +1,5 @@
 ---
-title: "Claude Code源码解读49：从 Web Search 到最后一个字"
+title: "Claude Code源码解读48-a：从 Web Search 到最后一个字"
 published: 2026-08-25T20:30:00+08:00
 updated: 2026-08-25
 description: "沿着 Claude Code、NewAPI、SGLang 和 DeepSeek V4 Flash 的源码，追踪一次 Web Search 请求如何变成用户看到的最后一个字。"
