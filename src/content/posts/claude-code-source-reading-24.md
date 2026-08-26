@@ -110,9 +110,9 @@ Read、Grep 这类短调用直接产生 `tool_result`，不创建运行时 Task�
 
 **本篇的答案，沿着 `Agent` tool 的调用链，定义发现决定角色，Schema 决定委派输入，`runAgent()` 建立独立 query loop，前台和后台路径再选择不同的结果回流方式。**
 
-### 面经回看｜单 Agent、多 Agent 与上下文传递
+### 单 Agent、多 Agent 与上下文传递
 
-选择多 Agent 的实用答案是：只有任务边界稳定、子任务低耦合、可以并行或确实需要独立校验时才拆分；若共享副作用、强依赖或汇总验证成本更高，单 Agent 加工具更容易控制。源码能确认普通 subagent 的独立消息历史、工具集合和权限上下文，以及 `context: fork`、`run_in_background`、`isolation: 'worktree' | 'remote'` 等分流；“Supervisor/Worker/Critic”可以作为设计建议，不能说成 Claude Code 固定的三种角色。
+多 Agent 只有在任务边界稳定、子任务低耦合、可以并行或确实需要独立校验时才值得拆分；若共享副作用、强依赖或汇总验证成本更高，单 Agent 加工具更容易控制。源码能确认普通 subagent 的独立消息历史、工具集合和权限上下文，以及 `context: fork`、`run_in_background`、`isolation: 'worktree' | 'remote'` 等分流；“Supervisor/Worker/Critic”可以作为设计建议，不能说成 Claude Code 固定的三种角色。
 
 ## 正文
 
@@ -342,7 +342,7 @@ promptMessages = [createUserMessage({ content: prompt })]
 **代码说明，** 普通 subagent 的"角色"和"任务"分属两个通道，定义正文进入 system prompt，本次委派内容进入第一条 user message。完整代码会捕获 system prompt 增强失败并继续，让 `runAgent()` 有机会重新构造。
 **参数说明，** `selectedAgent.getSystemPrompt()` 对 built-in 可以接收精简的 `toolUseContext`，custom/plugin 定义则通过闭包返回 Markdown 正文。`additionalWorkingDirectories` 来自当前权限上下文，是路径字符串数组。`prompt` 是调用者提供的原始开放字符串，不会自动拼接父会话摘要。
 
-这就是为什么普通 subagent 的 prompt 必须像交接给一个刚加入项目的同事，它不知道主线程前面试过什么，也不知道"这个问题"指的是哪一个问题。上下文隔离节省了噪声，代价是调用者必须明确交接。
+这就是为什么普通 subagent 的 prompt 必须像交接给一个刚加入项目的同事：它不知道主线程前面已经查过什么，也不知道“这个问题”指的是哪一个问题。上下文隔离节省了噪声，代价是调用者必须明确交接。
 
 ### 普通 subagent 与 Fork 的上下文边界不同
 

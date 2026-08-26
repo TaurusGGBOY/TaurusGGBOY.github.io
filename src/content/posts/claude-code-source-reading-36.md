@@ -74,9 +74,9 @@ export const call: LocalJSXCommandCall = async (onDone, context) => {
 
 本文先建立三个概念，**Provider routing**（运行时根据显式开关选择 Anthropic、Bedrock、Vertex 或 Foundry 客户端）、**凭据策略**（OAuth、API key、云身份与辅助脚本各自生成不同认证材料和刷新路径）、**模型身份**（用户别名、Anthropic 模型 ID 与云平台部署名需要分层解析）。它们分别回答"走哪扇前门""拿什么证明身份""把别名解析成哪个部署名"。
 
-### 面经回看｜模型路由能回答选择逻辑，不能冒充线上吞吐
+### 模型路由能回答选择逻辑，不能冒充线上吞吐
 
-面试题问“如何接入多个基座、怎么按任务选模型、如何降低成本”时，本篇能支撑的答案是：把别名、provider、认证材料和能力 gate 分层；再结合上下文压缩、模型 fallback 与 usage/cost 记录做运行时取舍。本文源码不能证明 vLLM 的 KV Cache、Continuous Batching、GPU 显存、线上峰值 QPS 或 P95，也不能用本地成本统计替代真实生产监控。
+接入多个基座、按任务选择模型或降低成本时，关键是把别名、provider、认证材料和能力 gate 分层；再结合上下文压缩、模型 fallback 与 usage/cost 记录做运行时取舍。本文源码不能证明 vLLM 的 KV Cache、Continuous Batching、GPU 显存、线上峰值 QPS 或 P95，也不能用本地成本统计替代真实生产监控。
 
 ## 正文
 

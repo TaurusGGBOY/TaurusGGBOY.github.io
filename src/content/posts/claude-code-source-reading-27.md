@@ -89,7 +89,7 @@ return { worktreePath, worktreeBranch }
 
 本文沿着 MCP client 的生命周期阅读，配置选择 transport，连接状态决定是否发现能力，工具和资源被包装成 Claude Code 的本地对象，调用结果再回到统一的 `tool_result`。
 
-### 面经回看｜Function Calling、Skill 与 MCP 不是同一层
+### Function Calling、Skill 与 MCP 不是同一层
 
 Function Calling/`tool_use` 描述模型如何提出结构化动作；Skill 描述一套可复用的指令和执行方式；MCP 负责外部 server 的连接、能力发现、认证、工具/资源传输。三者可以串在同一条链上，但职责不能互换：配置了 MCP server 不代表工具已连通，Skill 也不等于额外的工具权限。最终仍要经过本地 Schema、权限和结果归一化，再回填 `tool_result`。
 

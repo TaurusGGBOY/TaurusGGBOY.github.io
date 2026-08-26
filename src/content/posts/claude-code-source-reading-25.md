@@ -93,9 +93,9 @@ imagePosition: "left"
 
 **本篇的答案，把 Agent Teams 看成加在 subagent 之上的控制面，Team config 管身份，task list 管所有权，mailbox 管消息，Coordinator 负责把这些状态变成下一步调度。**
 
-### 面经回看｜中心化协调解决的是收敛，不是共识
+### 中心化协调解决的是收敛，不是共识
 
-面试题问“为什么需要中心化编排、Agent 之间怎么通信、如何防止重复执行”时，本篇可以直接回答 Claude Code 的边界：Coordinator、task list 和 mailbox 提供身份、所有权、寻址和回报，让团队知道谁在做什么、什么时候可以收敛；但源码没有给出通用投票、共识或自动合并机制，task list 的锁也不是跨任务事务。冲突仍需 Coordinator 读取结果、独立验证，并在 Git/文件所有权层处理。
+多 Agent 系统需要中心化编排，是因为 Coordinator、task list 和 mailbox 提供了身份、所有权、寻址和回报，让团队知道谁在做什么、什么时候可以收敛；但源码没有给出通用投票、共识或自动合并机制，task list 的锁也不是跨任务事务。冲突仍需 Coordinator 读取结果、独立验证，并在 Git/文件所有权层处理。
 
 ## 正文
 
