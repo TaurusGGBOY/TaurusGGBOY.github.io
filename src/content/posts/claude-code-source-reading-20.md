@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读20：如何恢复、续接与分叉对话"
 published: 2026-07-24T16:47:07+08:00
-updated: 2026-08-04
+updated: 2026-08-26
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -475,6 +475,43 @@ export async function loadConversationForResume(
 **参数说明，** `source` 为 `undefined` 表示 continue 最近会话；为任意字符串时按 session ID 读取；为 `LogOption` 时复用已加载记录。`sourceJsonlFile` 为字符串时优先级高于 `source` 的字符串分支；为 `undefined` 时跳过文件路径。可用 log 或 messages 为空时返回 `null`；读取或恢复异常会记录后重新抛出。
 
 反序列化尤其重要，如果进程在 assistant 发出 `tool_use` 后中断且缺少对应 `tool_result`，源码会检测中断状态、清理未解决调用并生成必要的合成消息，让下一轮模型看到一致的消息协议；工具本身不会被恢复流程重放。
+
+### 部分工具完成后，中断信息怎样进入下一次模型请求
+
+这里要区分两个时刻，**同一个进程里的下一轮 query**，以及**进程退出后重新 resume**。前者会尽量把当前这一批 `tool_use` 收口成成对的消息；后者只相信已经写进 transcript 的记录，不会从工具执行器的内存状态继续。
+
+在同一个 query loop 中，工具执行器把每条结果作为消息更新产出。`query.ts` 先把它交给上层，再把其中的 user 消息归一化后放进 `toolResults`，
+
+```ts
+for await (const update of toolUpdates) {
+  if (update.message) {
+    yield update.message
+    toolResults.push(
+      ...normalizeMessagesForAPI(
+        [update.message],
+        toolUseContext.options.tools,
+      ).filter(_ => _.type === 'user'),
+    )
+  }
+}
+
+const next: State = {
+  messages: [...messagesForQuery, ...assistantMessages, ...toolResults],
+  transition: { reason: 'next_turn' },
+}
+```
+
+> 证据，[source] `restored-src/src/query.ts` 的工具结果收集与递归状态构造（约 1380–1400、1715–1727 行）。代码块省略了与本结论无关的状态字段。
+
+因此，下一次发给 LLM 的协议消息大致是：先保留包含 `tool_use`、`id`、工具名和输入参数的 assistant 消息，再追加一个或多个 user 消息中的 `tool_result`。成功结果带工具实际返回的 `content`；失败或取消结果则至少保留 `tool_use_id`、错误文本和 `is_error: true`。`sourceToolAssistantUUID`、`toolUseResult` 是 Claude Code 用来关联 transcript 和 UI 的内部字段，真正用于 API 配对的关键是 `tool_use_id`。
+
+失败文本来自发生阶段，而不是统一写成一个错误。工具不存在时是 `No such tool available: <name>`；输入 Schema 或工具自校验失败时是 `InputValidationError` 或校验消息；工具抛异常时是 `Error calling tool (<name>): <error>`；权限或 PreToolUse Hook 拒绝时使用拒绝原因。它们都包装成 `tool_result`，并设置 `is_error: true`。用户中断时，非 streaming executor 的兜底路径使用 `Interrupted by user`；StreamingToolExecutor 还会为尚未启动或正在取消的工具生成合成结果，例如 `CANCEL_MESSAGE`、`User rejected tool use`，或并行工具失败后的 `Cancelled: parallel tool call ... errored`。这些信息让下一轮模型知道“这个 tool_use 已经有协议结果，但动作没有成功完成”，而不是把它误认为尚未调用。
+
+中断发生在流式响应尚未完成时，当前请求已经发出的消息不能被原地修改。`query.ts` 会先消费 `getRemainingResults()`，为排队或执行中的工具补齐合成 `tool_result`；没有 streaming executor 时，则由 `yieldMissingToolResultBlocks()` 按每个 `tool_use.id` 生成 `is_error: true` 的结果。这样做的目标是协议闭合，不是重放副作用。
+
+重新启动后再执行 `--continue` 或 `--resume`，路径就不同了。`deserializeMessagesWithInterruptDetection()` 会过滤没有对应 `tool_result` 的未解决 `tool_use`，清除可能跟在它后面的合成消息；如果检测到中途打断，再追加一条元用户消息 `Continue from where you left off.` 作为恢复提示。已经落盘的成功结果仍会保留，已经落盘的失败结果也会保留，但 Bash 子进程、HTTP 流和工具执行器本身都不会恢复。
+
+所以这里的“断点”不是工具内部的指令级 checkpoint，而是**消息协议级 checkpoint**：每个已完成或被终止的 `tool_use` 尽量拥有一个与 ID 对应的 `tool_result`；真正 resume 时，只重建这条可解释的消息链，不自动再次执行工具。
 
 随后，`processResumedConversation()` 决定"继续旧 session"还是"从历史分叉"，
 
