@@ -80,6 +80,12 @@ function hasCommandWithArguments(
 
 本文沿着 Skill 的生命周期阅读，先发现并解析 frontmatter，再生成 prompt command，调用时才展开正文；`context: fork` 只改变后续上下文归属，不改变 Skill 的发现规则。
 
+### 面经回看｜Skill、Tool、Agent 与版本管理各管什么
+
+面试题常把四个词混在一起。源码里的边界是：Skill 由 `createSkillCommand()` 生成 prompt command，`SkillTool.call()` 负责展开指令或启动 fork；Tool 提供可执行的名称、Schema 和权限入口；AgentTool/`runAgent()` 才启动独立 query loop；Workflow 只是这里可以讨论的工程组织方式，不能说成 2.1.88 已有一个统一工作流引擎。
+
+“为什么 Skill 要版本管理”可以回答成工程建议，但要把证据上限说清：源码会解析 Skill frontmatter 中的 `version` 并保留相关元数据；本篇没有证明版本兼容性校验、Prompt/工具 schema/评测集绑定、灰度发布或自动回滚已经由运行时完成。要让 Skill 可回归、可回滚，这些机制应在发布系统和评测系统中补齐。
+
 ## 正文
 
 ### 先把 function calling、tool use、MCP 和 Skill 放回各自的层次

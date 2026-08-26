@@ -119,6 +119,10 @@ if (innerError instanceof FallbackTriggeredError && fallbackModel) {
 
 本文把 transcript 当作事件账本，而不是进程快照，写入端维护 UUID 父链，读取端重建叶子分支，resume 与 fork 再分别决定是否沿用 session ID。
 
+### 面经回看｜首次请求与 follow-up 不能由 resume 代答
+
+面试里把“首次生成和多轮补充路由”问得很具体时，需要把边界说清：本篇源码直接证明的是 JSONL transcript、`parentUuid`、resume、continue 和 fork 如何重建会话分支；它不能推出一个完整的业务意图状态机，也不能凭 `/resume` 证明系统会自动区分改参数、回答澄清问题或开启新任务。那些判断应由业务层保存的任务状态、槽位和版本信息完成。
+
 ## 正文
 
 ### 会话历史是一份可重建的事件日志

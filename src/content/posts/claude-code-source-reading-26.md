@@ -68,6 +68,10 @@ Anthropic 对两类模式的实践区分与源码边界相互印证，orchestrat
 
 本文分别追踪两条控制流，Plan mode 通过 `ToolPermissionContext.mode` 建立审批门，worktree 通过 Git 和 Hook 创建可回收的文件边界；二者只在更高层的工作流里组合。
 
+### 面经回看｜Plan Mode 不等于 Planning 算法
+
+Plan Mode 能回答“如何先计划再执行”：它是权限状态、计划文件和审批流程；Worktree 再隔离目录、分支和 cwd。它不能直接回答“ReAct、Plan-and-Execute 或 BFS 哪种规划算法更好”，也不能从 `EnterPlanModeTool`、`ExitPlanModeV2Tool` 推导出固定的 Planner/Executor/Critic 角色。后者属于更高层的 Agent 设计比较，回答时应明确这是工程选型而非本版本源码事实。
+
 ## 正文
 
 本篇使用 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 还原源码重建控制流。代码块只保留证明当前机制所需的字段，省略无关参数、UI 分支和实验逻辑；每个代码块后标注证据位置。`restored-src/` 只用于定位证据，不表示内部仓库原始目录。

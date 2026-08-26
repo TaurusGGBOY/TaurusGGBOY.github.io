@@ -110,6 +110,10 @@ Read、Grep 这类短调用直接产生 `tool_result`，不创建运行时 Task�
 
 **本篇的答案，沿着 `Agent` tool 的调用链，定义发现决定角色，Schema 决定委派输入，`runAgent()` 建立独立 query loop，前台和后台路径再选择不同的结果回流方式。**
 
+### 面经回看｜单 Agent、多 Agent 与上下文传递
+
+选择多 Agent 的实用答案是：只有任务边界稳定、子任务低耦合、可以并行或确实需要独立校验时才拆分；若共享副作用、强依赖或汇总验证成本更高，单 Agent 加工具更容易控制。源码能确认普通 subagent 的独立消息历史、工具集合和权限上下文，以及 `context: fork`、`run_in_background`、`isolation: 'worktree' | 'remote'` 等分流；“Supervisor/Worker/Critic”可以作为设计建议，不能说成 Claude Code 固定的三种角色。
+
 ## 正文
 
 ### CLAUDE.md 与 Agent 定义不是一回事
