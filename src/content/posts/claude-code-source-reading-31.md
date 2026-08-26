@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读31：共享状态如何贯穿整个系统"
 published: 2026-07-24T16:47:18+08:00
-updated: 2026-08-04
+updated: 2026-08-26
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -31,11 +31,46 @@ imagePosition: "left"
 
 ## 问题现场
 
+本篇把 AppState 读成跨宿主共享的状态边界：store 持有可变快照，selector 决定订阅粒度，工具、任务、权限和 UI 通过更新与事件共享必要切片。它解决的是状态所有权与渲染效率，不是把整个运行时变成一个可随意序列化的对象。
+
 流式消息、权限弹窗、后台任务和外部 MCP 事件会同时改状态。若 React、工具和非 UI 代码各自保存一份副本，终端显示与执行内核迟早出现分叉；若所有数据都塞进 Context，又会让每个小变化触发整棵树刷新。
 
 ![AppState 更新、Selector 与结构共享](/images/posts/claude-code-source-reading-31/31-state-selectors-detail-handdrawn.png)
 
 本文追踪 `createStore()`、`AppStateProvider` 和 selector 的分工，store 负责单一更新入口，Provider 暴露稳定引用，消费者只订阅自己需要的切片。
+
+### 先别找一个 `State` 枚举：Claude Code 同时维护几类状态
+
+用户问“Claude Code 现在处于什么状态”时，源码里没有一个可以直接回答的全局枚举。更准确的读法是先看状态的所有者：进程级基础设施、跨组件共享数据、一次 Query 的循环变量、后台任务生命周期、可恢复的消息历史，以及 REPL 自己的显示状态，各自有自己的存储位置和终止条件。
+
+| 状态层 | 主要实体 | 典型状态或字段 | 谁负责推进 |
+| --- | --- | --- | --- |
+| Bootstrap State | 进程级 `STATE` | `sessionId`、`promptId`、当前目录、成本与 usage | 启动、prompt 处理和进程生命周期 |
+| AppState | 跨消费者共享快照 | 权限、MCP、任务表、文件历史、通知、远程连接 | `setAppState(updater)` 与 change observer |
+| Query State | 一次 Agent Loop 的局部状态 | `messages`、`toolUseContext`、`turnCount`、`transition` | `queryLoop` 的 `while (true)` |
+| Task State | 后台 Bash、Agent、teammate 等任务 | `pending`、`running`、`completed`、`failed`、`killed` | Task 创建、执行回调和 stop/kill |
+| Transcript | 可恢复的消息链 | `parentUuid`、`logicalParentUuid`、`promptId` | session storage 追加与 resume/fork |
+| REPL Local State | 当前界面状态 | 流式消息、输入框、弹窗和渲染中的局部数据 | Ink/React 组件自身 |
+
+这几层可以同时处于不同状态。例如 Query 已经 `completed`，某个后台 Task 仍然是 `running`；AppState 的远程连接可能是 `reconnecting`，而 transcript 已经把上一条 assistant 消息写入磁盘。它们不是同一台状态机，而是通过事件、引用和持久化边界协作。
+
+一次普通请求的主路径可以压缩成下面这条链：
+
+```text
+prompt
+  ↓ 生成 promptId，写入消息与 session transcript
+Query 初始化
+  ↓ 请求模型并接收 assistant message
+  ├─ 纯文本 → stop hook / budget 判断 → completed
+  └─ tool_use → allow / ask / deny
+                    ├─ allow → 执行工具 → tool_result → next_turn
+                    ├─ ask   → 等待用户或 SDK 决策
+                    └─ deny  → 错误 tool_result → 交回模型判断
+                                      ↓
+                         继续循环、压缩恢复、取消或终止
+```
+
+其中 Query State 不是 `thinking`、`callingTool` 这类显式枚举，而是通过下一份数据状态和 `transition.reason` 表达控制流；`turnCount` 只在工具调用后推进。权限也不是一个单独的全局状态：当前 `PermissionMode` 与本次工具调用的 `allow`、`ask`、`deny` 决策共同决定是否进入工具执行。Task 则有明确的终态，`foreground/background` 和 `notified` 是独立维度，不应与 `running/completed` 混为一谈。
 
 ## 正文
 
@@ -438,7 +473,7 @@ Claude Code 的做法是把需要跨消费者一致的引用汇到 AppState，�
 
 ## 设计决策｜为什么是外部 store 而不是全部 Context
 
-下面的判断按代码结构组织，是对源码的解释，不是官方选型记录。
+源码没有提供官方选型记录，下面的解释依据代码结构，不代表官方声明。
 
 **第一，为什么用 external store + `useSyncExternalStore` 而不是把所有状态放 Context？** 因为 Context 的 value 变化会触发**所有**消费者重渲染。AppState 里有每秒都在变的 spinner、任务和权限状态，如果整棵树都订阅同一份 Context value，一次任务更新就会让消息列表、输入框和 footer 一起重建。把快照留在 store 内部、由 selector 决定订阅范围后，更新粒度从"整棵树"降级为"引用变化的切片"。
 
@@ -517,3 +552,9 @@ const mcpConfig = {
 - **下一篇**，[32 Ink TUI 与交互式 REPL 如何渲染与刷新](./32-ink-tui-and-repl.md)，AppState 这层屋顶之上的组件树
 - **平行阅读**，[06 Agent 查询循环如何持续推进](./06-agent-query-loop.md)，`setAppState` 的执行侧来源
 - **平行阅读**，[35 配置如何分层、同步与裁剪](./35-settings-config-and-feature-flags.md)，`applySettingsChange` 怎样通过同一个 `setState` 写回
+
+## 参考资料
+
+- [How the agent loop works](https://code.claude.com/docs/en/agent-sdk/agent-loop)，Claude Code 官方 Agent SDK 文档
+- [Work with sessions](https://code.claude.com/docs/en/agent-sdk/sessions)，Claude Code 官方 Session 文档
+- [Ch 3. State — The Two-Tier Architecture](https://claude-code-from-source.com/ch03-state/)，外部源码解读中的 Bootstrap State/AppState 对照
