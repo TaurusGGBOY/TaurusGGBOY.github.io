@@ -1,199 +1,108 @@
 ---
-title: "Agent主题对比08｜体验层、反馈通道与系列收束"
+title: "Agent主题对比08｜Agent 如何证明任务真的完成"
+description: "用测试、运行态验证、Trace、停止条件和总成本建立 Agent 完成证据链，并比较 Claude Code、Codex、Pi 与 DeepSeek Harness 的验证责任。"
 published: 2026-08-12T10:08:00+08:00
-updated: 2026-08-12
-description: "比较三个 Agent 的 Buddy、语音、提示建议、通知、mailbox、输出风格与最终能力地图。"
-tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi"]
-category: "AI / Architecture"
+updated: 2026-08-28
+verified_at: 2026-08-28
 draft: false
-image: "/images/posts/agent-theme-08-experience-feedback/claude-code-source-reading-00.png"
-imagePosition: "left"
-slug: "agent-theme-08-experience-feedback"
-series: "agent-theme-comparison"
-order: 8
-difficulty: "advanced"
-time: "45 min"
-prerequisites:
-  - "Agent主题对比 05｜宿主、状态与结构化 IO"
-  - "Agent主题对比 07｜记忆与后台智能"
+image: /images/posts/agent-theme-08-experience-feedback/claude-code-source-reading-00.png
+imagePosition: left
+tags:
+  - agent-theme-comparison
+  - ai-agent
+  - agent-evaluation
+  - claude-code
+  - codex
+  - pi
+  - deepseek-harness
+category: "AI / Architecture"
 topics:
-  - "companion experience"
-  - "voice"
-  - "prompt suggestions"
-  - "notifications"
-  - "mailbox"
-  - "output styles"
-source_modules:
-  - "restored-src/src/buddy"
-  - "restored-src/src/voice"
-  - "restored-src/src/services/MagicDocs"
-  - "restored-src/src/context/notifications.tsx"
-  - "restored-src/src/constants/outputStyles.ts"
-  - "codex-rs/app-server"
-  - "packages/coding-agent/src"
-status: "verified"
-verified_at: "2026-08-12"
+  - Agent 完成证据
+  - 测试与运行态验证
+  - Trace 与停止条件
+  - Agent 总成本
+  - Claude Code
+  - Codex
+  - Pi
+  - DeepSeek Harness
+prerequisites:
+  - 能阅读测试输出、日志和代码差异
+  - 了解工具调用与 Agent 循环
+time: 14 分钟
+slug: agent-theme-08-experience-feedback
+series: agent-theme-comparison
+order: 8
 ---
 
+判断 Agent 是否完成任务，不能看它有没有说“完成”，要看一条可复查的证据链：改动通过目标测试，真实运行路径得到验证，Trace 能解释关键动作，停止条件没有掩盖失败，所花时间与 token 也在可接受范围内。四种 harness 的差别，正在于它们替你承担了证据链的哪一段。
 
-> 体验层的价值不是让 Agent 更会聊天，而是让执行中的状态、结果、下一步和等待在正确的时间抵达正确的人或 Agent。
+## 完成是证据链，不是一句回复
 
-本篇覆盖 Claude Code 源码解读 44–48：Buddy、Voice、MagicDocs/Prompt Suggestions、Notifications/Mailbox/Output Styles，以及系列总结。它们属于主循环之外的反馈面；比较的重点是这些旁路如何投影状态、接收输入、传递建议，以及怎样保持可感知、可接管、可继续。
+一个修复可能通过单元测试，却在浏览器里点不开；也可能界面看似正常，却破坏了未覆盖的接口。Agent 的最终回复只是结论，测试结果、运行记录和可追溯过程才是证据。Claude Code 的官方工作流把循环概括为收集上下文、采取行动、验证结果；其中验证可以继续使用测试、检查输出或读取诊断信息，而不是把一次工具成功当成终点。[Claude Code 如何工作](https://code.claude.com/docs/en/how-claude-code-works)
 
-![Agent 体验层、反馈通道与系列收束](/images/posts/agent-theme-08-experience-feedback/agent-theme-08-experience-feedback-handdrawn.png)
+这条证据链可以拆成五问：目标行为有没有测试；真实入口能不能跑通；关键决策能不能回放；失败时会不会诚实停止；完成一次要付出多少时间、token 和人工复核。问题的顺序很重要。没有正确性，低成本没有意义；只有正确性而没有可复查过程，团队也难以信任结果。
 
-## Section 44｜陪伴式体验如何叠加在 Agent 之上
+验收证据还要能对应最初请求。用户要修复导出乱码，Agent 却只证明“项目可以编译”，证据是真的，却没有回答主问题。较好的最终报告会把每条需求映射到一个可观察结果：哪个测试覆盖了乱码样例，哪次实际导出生成了正确文件，未覆盖的平台是什么。这样审查者不用从几十条工具调用中猜测任务是否闭环。
 
-### Claude Code：Buddy 是观察器与 UI，不是第二个主 Agent
+对跨模块任务，可以在开始前写一张小型验收表，完成后逐项附上命令、输出位置和观察时间。证据缺失的项目保持“未验证”，不要用相邻测试的成功代替。
 
-44 把 Buddy 拆成 observer 与 UI，进一步拆为“灵魂”和“骨架”。功能开关和 `/buddy` 决定启动生命周期；主 Agent 只收到一次“它坐在旁边”的说明；回合结束后 observer 才写入临时反馈；AppState 只保存两项短期状态；500 毫秒一个 tick 把状态翻译成动画；同一状态再投影成宽屏、窄屏和全屏布局。
+四个项目给出的默认答案并不相同。Claude Code 提供较完整的工具循环与验证习惯，Codex 更强调把运行态反馈接入 harness，Pi 把验证策略留给扩展和使用者，DeepSeek Harness 则把运行过程组织为可观察、可替换的 runtime。选择之前，要先确认缺失的是验证能力，还是验证纪律。
 
-这个边界很关键：Buddy 观察主 Agent 的状态并提供短期陪伴，不应在用户不知情的情况下创建另一条具有同等副作用的 loop。开关、静音和失败分别处理；`companionIntroText` 还限制发言风格，避免体验组件改变主任务语义。
+## 测试证明已知行为
 
-### Codex CLI：TUI 状态/事件可以提供陪伴，但不是独立决策者
+测试最适合回答“代码是否满足已写明的规则”。修复解析器时，先把复现样例写成失败测试，再改代码并运行相关测试；若改动会影响公共接口，还要跑覆盖面更大的回归集。Claude Code 可以调用项目已有命令并根据结果继续迭代，但官方文档也说明它的行动由工具和权限约束，是否拥有正确测试、运行什么测试，仍取决于仓库与指令。[Claude Code 工具与验证循环](https://code.claude.com/docs/en/how-claude-code-works)
 
-Codex 的客户端可以根据 turn/item/exec 状态展示进度、建议和等待提示；App Server 事件让 UI 能知道工具是否运行、模型是否等待或需要 approval。若要做 Buddy 类组件，它应是事件消费者，任何会改变代码/环境的动作仍需新 turn、tool call 和 approval。
+Codex 的工程团队把测试和代码审查放进同一闭环：Agent 实现后由其他 Agent 审查，再根据评论修复；真正困难的部分是让反馈快速、可靠地回到执行循环。[Harness engineering](https://openai.com/index/harness-engineering/) 这说明“能运行测试”只是起点。harness 还要限制无关测试的成本、保留失败输出，并在测试不稳定时避免把偶然通过写成确定结论。
 
-### Pi：扩展可以观察事件并做轻量 UI
+Pi 走的是更小的核心。官方将它定位为最小 coding-agent harness，并通过 TypeScript 扩展注册工具、命令和事件处理器。[Pi 官网](https://pi.dev/)、[Pi 扩展文档](https://pi.dev/docs/latest/extensions) 好处是团队可以精确实现自己的测试门禁；代价是 Pi 不会替项目发明正确的回归策略。若扩展只检查退出码、不检查断言数量或跳过项，它仍可能产生“绿色但无效”的证明。
 
-Pi 的 TUI/extension 可以订阅 agent events，展示状态、动画、提示或通知。由于扩展同进程运行，必须区分只读观察、向用户发送文本和真正调用工具；后两者不能借“体验扩展”名义绕过 session/permission。
+DeepSeek Harness 允许能力以插件和子系统组合，适合把测试执行、结果提取与策略判断拆开。[DeepSeek Harness 架构](https://www.deepseek.com/harness/en/) 可组合性没有自动提高测试质量：选择了错误测试集，模块化只会更稳定地执行错误策略。
 
-### 对比结论
+## 运行态验证证明真实路径
 
-Claude Code 把陪伴组件的观察、短期状态和主 Agent 决策分开；Codex 通过协议事件自然提供状态面；Pi 把陪伴能力交给扩展。陪伴式 UX 的安全标准是：用户知道它在观察什么、何时发言、能否触发动作。
+用户抱怨“提交按钮点了没有反应”时，单元测试很难单独结案。Agent 应启动应用，走一遍用户路径，查看浏览器控制台、服务日志、网络请求或生成的截图。Codex 团队在公开工程复盘中把应用运行起来，并给 Agent 接入浏览器自动化、日志、指标和截图，让它能直接观察行为是否符合预期。[Harness engineering](https://openai.com/index/harness-engineering/) 这里证明的是具体运行路径，不等同于整个产品没有缺陷。
 
-### 验证动作
+运行态验证还要匹配故障层级。CLI 工具要核对标准输出、错误码和文件副作用；Web 应用要看交互、请求与服务端状态；异步任务要等待可观测的终态，而不是把“请求已接收”当作“处理已完成”。OpenHands 把 Agent 行为和环境反馈放在统一事件流中，论文将这种事件流描述为 Agent 与环境交互的基础。[OpenHands 论文](https://arxiv.org/abs/2407.16741) 事件存在不代表验证完成，但它能让 harness 基于真实反馈继续判断。
 
-开启/关闭、静音、主 Agent 工具运行、取消和失败各测一次；检查 Buddy 是否只观察允许的状态，是否在回合结束前抢占主输出，是否留下不必要的持久化内容。
+Claude Code、Pi 和 DeepSeek Harness 都能通过工具或扩展接入这类检查，默认完整度却不同。Claude Code 有现成的命令与文件工具，Pi 鼓励使用扩展塑造专用工作流，DeepSeek Harness 强调插件化 runtime。团队应记录每个任务类型必须看到的运行证据，避免把“理论上能接入”误写成“默认已经验证”。
 
-## Section 45｜语音如何接入终端 Agent
+## Trace 证明过程可复查
 
-### Claude Code：Voice 把音频收敛成普通文本输入
+Trace 不负责证明结果正确，它回答“Agent 为什么得到这个结果”。有用的 Trace 至少保留模型输入边界、工具调用、环境返回、失败重试和最终产物。SWE-agent 的论文指出，Agent–Computer Interface 会显著影响模型能否有效浏览、编辑和执行代码；它用专门接口和防护规则约束交互。[SWE-agent 论文](https://papers.neurips.cc/paper_files/paper/2024/file/5a7c947568c1b1328ccc5230172e1e7c-Paper-Conference.pdf) 因而回看 Trace 时，不应只责怪模型，还要检查接口是否隐藏了关键信息。
 
-45 的语音链路暴露五个字段给 UI；`/voice` 在录音前检查四层启用条件；“按住说话”由自动重复推断；录音先同步进入 recording，再做异步检查；本地录音按平台选择后端；录音与 WebSocket 并行，先到的音频先缓冲；Interim 只做预览，Final 才成为稳定文本；最终文本按光标位置拼回 prompt。
+DeepSeek Harness 把可追踪运行列为设计能力，并允许不同 provider、插件和子系统参与同一次执行。[DeepSeek Harness 官网](https://www.deepseek.com/harness/en/) 这种设计适合定位“是模型判断错、工具失败，还是权限拒绝”。不过项目当前是 developer preview，README 明示可能出现破坏兼容性的变更；安全说明也写明它未经安全审计，不能把 sandbox 或审批当作处理不可信输入的唯一安全控制。[DeepSeek Harness README](https://github.com/deepseek-ai/deepseek-harness)、[安全边界](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md)
 
-失败按边界分层：设备不可用、权限/配置、连接、转写和取消不能都翻译成“没听清”。语音输入的最终落点仍是普通 user message，因此权限、session、tool loop 不应因为输入来自音频而改变。
+Trace 也有成本。完整保存每段上下文会增加存储、隐私与审阅负担，删得太狠又无法复现。实际做法是保留影响结论的事件和工件，为敏感字段脱敏，并让最终报告指向具体测试、日志片段或运行产物。摘要可以帮助阅读，原始证据仍要能定位。
 
-### Codex CLI：语音属于宿主输入适配层
+## 停止条件决定失败是否诚实
 
-Codex 的 thread/turn 接收结构化 user input；CLI/IDE 可以把语音转成文本或附件，再发送到 app-server。interim transcript 应停留在 UI，只有 final 才提交 turn；音频设备、网络和转写错误不应伪装成模型错误。
+Agent 循环必须知道什么时候成功、失败或请求人工介入。可靠的成功条件应是外部可观察状态，例如“目标测试通过且页面主路径走通”，而不是“模型认为问题已解决”。可靠的失败条件包括重试预算耗尽、权限不足、依赖服务不可用、验证互相矛盾，以及任务边界需要产品决策。
 
-### Pi：扩展可接 provider，再调用普通 agent input
+停止条件太松，Agent 会在未验证时宣布完成；太严，它会反复修改已正确的代码。Claude Code 的子 Agent 拥有独立上下文、工具和权限，并向主会话返回结果摘要。[Claude Code 子 Agent](https://code.claude.com/docs/en/subagents) 主 Agent 因此要把摘要重新接回任务级验收，不能把“子任务已返回”当作整体完成。Codex 的多轮审查同样需要退出规则，否则审查与修复可能循环消耗预算。[Harness engineering](https://openai.com/index/harness-engineering/)
 
-Pi 的 extension/TUI 可以连接本地录音或远程 speech-to-text，把 final 文本交给 agent loop。core 不需要知道音频格式；宿主需要处理设备权限、取消、临时文件和隐私，避免把原始录音永久写入 session。
+遇到不稳定测试时，停止报告应区分三种状态：改动引入的确定失败、与改动无关的已知失败、尚未解释的波动。这个分类比笼统写“测试大体通过”更有用。它保留事实边界，也告诉下一位工程师应该复跑、隔离还是回滚。
 
-### 对比结论
+人工接管也应是正常终态。若修复需要产品选择、生产凭证或不可逆的数据操作，Agent 应停在决策点，列出已确认事实、候选方案和各自影响。继续猜测不会提高自治，只会把缺少授权伪装成技术进展。一个能准确说明“缺什么才能继续”的 harness，通常比不断重试到超时更可靠。
 
-Claude Code 把语音适配做成完整生命周期；Codex 让宿主把语音变成 protocol input；Pi 通过扩展接入。三者共同原则是 interim 不得污染会话，final 才成为可恢复的用户意图。
+## 把成功换算成总成本
 
-### 验证动作
+比较 harness 时，不能只数一次调用的 token。总成本还包括首次成功前的重试、工具等待、人工接管、失败排查和重复验证。VS Code 团队公开的 harness 评估把正确性、Agent effort、token efficiency 和 latency 分开观察，说明速度或 token 只是评价维度之一。[VS Code harness 评估](https://code.visualstudio.com/blogs/2026/05/15/agent-harnesses-github-copilot-vscode)
 
-在录音、转写中间态、最终提交和取消四个时点观察 session/turn；模拟设备失效、WebSocket 断开和空文本，确认不会凭空发起一次模型请求。
+一篇仍处于初步预印本阶段的研究在 3 个 harness、2 个模型和 50 个任务上观察到 harness 会改变结果与成本表现。[The Scaffold Effect](https://arxiv.org/abs/2607.22585) 这个样本能支持“脚手架影响评估”的提醒，不能推出某个 harness 在所有仓库里更强。若要内部选型，应使用自己的任务分布、权限环境和验收规则，报告成功率之外的中位耗时、人工介入次数和失败类型。
 
-## Section 46｜文档生成与提示词建议如何工作
+可以把一次任务的完成记录压缩为四项：交付物是什么，哪些测试和真实路径通过，哪些风险尚未验证，花了多少机器与人工成本。Claude Code、Codex、Pi、DeepSeek Harness 都可以参与这条链，但没有任何一个项目能替团队定义“正确”。harness 的价值，是让定义变成可执行、可观察、可停止的流程。
 
-### Claude Code：两条回合后旁路，不改写主循环语义
+## 本文引用
 
-46 把 MagicDocs 与 Prompt Suggestions 分开。MagicDocs 先用文件头声明“这份文档要被维护”，更新只在主对话空闲时串行发生；上下文合并四个来源；文档更新通过精确路径权限自动决策。Prompt Suggestions 则在生成前判断是否值得调用模型，复用父请求 cache key，候选只保存到临时 AppState，Tab/Enter/继续打字对应三条不同结果，取消和失败保持不可见/可恢复边界。
-
-这两条旁路都不是主 Agent 的 tool loop：一个维护有明确标记的文档，一个预测用户下一句输入。它们不能抢占主会话写入权限，也不能把预测候选当成用户已经确认的 prompt。
-
-### Codex CLI：文档/建议应由 host 或验证工具触发
-
-Codex 的环境可读性和 harness engineering 允许 host 在 turn 后更新索引、生成文档或显示下一步建议；但这些动作应是独立的 job/event，不能混入主 turn 的成功结果。建议文本只有在用户选择后才成为新 turn 输入。
-
-### Pi：扩展可监听 session idle 并生成辅助内容
-
-Pi 的 extension 可以监听 agent/session end，更新 project docs 或给 TUI 候选。由于扩展拥有宿主权限，必须明确路径白名单、空闲条件、是否需要确认以及失败时是否回滚。候选不能自动改变消息树。
-
-### 对比结论
-
-Claude Code 把“维护文档”和“预测输入”设计成两条受限旁路；Codex 由 host/job 组合；Pi 由扩展实现。辅助生成的核心边界是：它可以准备材料，但不能伪装成用户决策或无条件扩大写权限。
-
-### 验证动作
-
-在主 Agent 运行、空闲、失败和用户继续输入四种时点触发旁路，检查文档写入是否串行、建议是否丢弃、主 turn 的 cache/usage 是否被错误合并。
-
-## Section 47｜非核心反馈通道如何协作
-
-### Claude Code：Output Style、Notification、Mailbox 解决三类不同问题
-
-47 先区分输出风格、UI notification/OS notification、Hook 和 Mailbox。Output Style 在生成前决定“怎么说”，通过 system prompt 选择器影响表达；UI Notification 只展示短暂状态，不污染对话；OS Notification 与 Hook 负责把用户唤回；Mailbox 分成进程内队列和团队 inbox；地址先决定受众，再决定传输；目标 Agent 忙时消息排队，空闲时才成为下一轮；TUI 与 SDK 内容相同但宿主协议不同。
-
-这是一条完整反馈闭环：内容产生、投影成不同风格、按受众发送、按忙闲排队、在可接收时进入下一轮。`SendMessage` prompt 先规定可见性，再决定传输。通知不是模型上下文，mailbox 也不是立即执行命令。
-
-### Codex CLI：事件协议天然支持多种反馈消费者
-
-Codex 的 item/turn events 可以被 TUI、IDE、日志和通知服务消费；approval/interrupt/response 仍通过 app-server 控制。要实现 mailbox，必须把“投递消息”和“启动新 turn”分开，目标 thread 忙时先排队，并保留来源和权限。
-
-### Pi：事件、RPC、扩展和 TUI 构成反馈面
-
-Pi 的 event stream 可以给 TUI/SDK；扩展可以发桌面通知、写 inbox 或把消息放入下一轮。没有统一的 mailbox/notification 安全协议，应用必须明确消息可见性、队列、目标 session 和是否触发工具。
-
-### 对比结论
-
-Claude Code 的反馈通道层次最明确；Codex 的事件协议适合多消费者；Pi 的事件面最灵活。最容易犯的错误是把通知、消息和命令混成同一个字符串：它们的受众、持久化和副作用都不同。
-
-### 验证动作
-
-让一个长任务产生 UI 状态、OS 通知、团队消息和下一轮 prompt，分别检查是否污染 transcript、是否在忙时排队、是否重复发送、是否需要用户确认。
-
-## Section 48｜系列总结与能力清单
-
-### Claude Code：从一条 loop 走到一套产品系统
-
-48 用总地图回收 00–47：循环、消息、执行、可组合能力、宿主和产品层逐步叠加；系列验收清单要求读者能画出 loop、定位关键符号、解释权限、运行压缩实验、读取 trace、实现最小 harness、说明静态证据边界。它还把 mailbox 与 A2A 区分开：前者是实现，后者是互操作契约。
-
-这个收束让前面“功能章节”重新变成能力链：模型请求只是起点，工具/权限/上下文/恢复/扩展/宿主/反馈共同决定 Agent 是否可用。源码能确认的事实、产品设计推断和实验观察必须分开。
-
-### Codex CLI：控制平面、协议和执行 substrate 的闭环
-
-Codex 的对应闭环是 core/app-server、thread/turn/item、host protocol、approval/sandbox、exec runtime、context compaction、结构化 events 和多客户端。它的优势是把宿主复用和事件可观察做成一等接口；它的边界是很多产品体验由客户端/host 组合而来，不能只看 core。
-
-### Pi：最小 harness 作为可组合基线
-
-Pi 的闭环是 agentLoop、tools/extensions、AgentSession/tree/compaction、TUI/RPC 和 provider adapters。它说明一个最小可嵌入内核足以启动工作流；同时也提醒我们，sandbox、权限、远程、团队协作和后台治理不是自动出现的，需要宿主补齐。
-
-### 对比结论
-
-三者都可以从“模型—工具—结果”开始，但最终产品的形状不同：Claude Code 将治理策略写进运行时，Codex 将多宿主协议和执行边界拆层，Pi 将内核保持可替换并把产品责任外置。没有“功能更多所以更先进”的简单结论；应按任务需要选择控制强度、可嵌入性和宿主复杂度。
-
-### 验证动作
-
-用本文最后的覆盖表任选一个 section，回到对应固定源码快照，完成“符号—调用方—状态—失败边界—用户可观察结果”五步追踪。能完成一次闭环，才算读完一个主题。
-
-## 最终统计：8 个主题，50 个独立 sections
-
-为了避免把几十篇文章重新压成一篇大杂烩，最终只保留以下 8 篇主题文章；每个旧 Claude Code 章节恰好出现一次：
-
-| 主题文章 | 主题 | 覆盖章节 | sections |
-| --- | --- | --- | ---: |
-| 01 | 控制平面与主循环 | 00-a、00–06 | 8 |
-| 02 | 消息、工具与副作用 | 07–15 | 9 |
-| 03 | 上下文、安全、恢复与会话 | 16–20 | 5 |
-| 04 | 扩展、委派与多 Agent | 21–30 | 10 |
-| 05 | 宿主、状态与结构化 IO | 31–34 | 4 |
-| 06 | 配置、Provider、远程与运维 | 35–39 | 5 |
-| 07 | 记忆与后台智能 | 40–43 | 4 |
-| 08 | 体验层、反馈通道与系列收束 | 44–48 | 5 |
-| **合计** |  | **00-a、00–48** | **50** |
-
-这里的“50 篇”指原 Claude Code 源码解读文章的章节覆盖数；最终发布物是 8 篇主题文章，每篇包含若干独立 comparison section。旧的 6 篇 `agent-comparison-*` 文章不再保留，也不参与新的统计。
-
-## 读者最后应该带走的五个判断
-
-1. Agent 的核心不是一次模型调用，而是可暂停、可恢复、可授权、可验证的控制循环。
-2. 工具、权限、sandbox、回滚和消息回填必须形成闭环，单项功能不能代表全链路安全。
-3. 上下文压缩和 session 恢复是在重建控制状态，不是简单保留聊天文字。
-4. 扩展、subagent、team 和远程客户端要有发现、能力、信任、生命周期四类契约。
-5. 体验、通知、记忆和后台智能只有回到主控制平面、保持可见和可取消，才不会变成隐形副作用。
-
-## 参考材料与写作方法
-
-本系列的外部研究先收集 10 篇 Agent/harness 对比与架构材料，再用源码快照核对，不采用“单篇文章一句话决定结论”的写法。重点参照了 [What makes a harness a harness?](https://arxiv.org/abs/2606.10106) 的定义法、[Harness-native software engineering](https://research.chaitanya.science/papers/harness-native-software-engineering.pdf) 的控制面拆分法、[Unrolling the Codex agent loop](https://openai.com/index/unrolling-the-codex-agent-loop/) 的请求展开法、[The harness matters](https://www.masonjames.com/blog/the-harness-matters-codex-claude-code-pi-amp-hermes-compared/) 的维度对比法，以及 [SWE-agent ACI](https://arxiv.org/html/2405.15793) 的实验/消融写法。
-
-在发布前，所有章节都按同一检查表复核：固定源码窗口、明确证据边界、写出参数/状态分支、区分观察与执行、给出失败验证动作、确认章节只出现一次。这样写对比文章慢一些，但读者可以沿着代码和协议回到结论，而不是只能接受作者的印象分。
-
-## 系列结束
-
-如果下一步要继续深挖，最值得做的不是再加一张功能表，而是选一条跨系统实验：相同仓库、相同只读任务、相同工具失败和相同上下文压力，比较三个 harness 的状态事件、权限决策、恢复结果和最终可审计性。
+- [Claude Code：How Claude Code works](https://code.claude.com/docs/en/how-claude-code-works)
+- [Claude Code：Create custom subagents](https://code.claude.com/docs/en/subagents)
+- [OpenAI：Harness engineering](https://openai.com/index/harness-engineering/)
+- [Pi：Minimal coding agent harness](https://pi.dev/)
+- [Pi：Extensions](https://pi.dev/docs/latest/extensions)
+- [DeepSeek Harness：Architecture](https://www.deepseek.com/harness/en/)
+- [DeepSeek Harness：README](https://github.com/deepseek-ai/deepseek-harness)
+- [DeepSeek Harness：Safety](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md)
+- [SWE-agent: Agent–Computer Interfaces Enable Automated Software Engineering](https://papers.neurips.cc/paper_files/paper/2024/file/5a7c947568c1b1328ccc5230172e1e7c-Paper-Conference.pdf)
+- [OpenHands: An Open Platform for AI Software Developers as Generalist Agents](https://arxiv.org/abs/2407.16741)
+- [VS Code：Evaluating Agent Harnesses for GitHub Copilot](https://code.visualstudio.com/blogs/2026/05/15/agent-harnesses-github-copilot-vscode)
+- [The Scaffold Effect](https://arxiv.org/abs/2607.22585)

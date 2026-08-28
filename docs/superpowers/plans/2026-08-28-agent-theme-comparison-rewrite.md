@@ -60,7 +60,7 @@
 
 **Files:**
 
-- Inspect: `src/content.config.ts`
+- Inspect: `src/content/config.ts`
 - Inspect: `src/content/posts/agent-theme-01-control-plane.md`
 - Inspect: `src/content/posts/agent-theme-09-a2a-interoperability.md`
 - Inspect: `src/utils/content-utils.ts`
@@ -74,11 +74,11 @@
 
 - [ ] **Step 1: 核对 content schema 与首页排序**
 
-  读取实际 schema、首页文章选择和排序逻辑，记录 `published`、`updated`、`series`、`order`、`draft`、`image`、`slug` 等字段的允许类型与排序影响。确认保留原始 `published` 不会使九篇离开当前系列位置。
+  读取实际 schema、首页文章选择和排序逻辑，记录 `published`、`updated`、`draft`、`image` 等 schema 字段，以及 `series`、`order`、`slug` 等额外 frontmatter 的真实作用。确认首页只按 `published` 倒序、每页 8 篇；保留原始 `published` 意味着九篇不会被重新置顶。
 
 - [ ] **Step 2: 核对当前公开 URL 与产物验证器**
 
-  从现有 slug 和 Astro 路由规则得出九个目标 URL；读取 `verify-dist.mjs` 和 Playwright 用例，确认构建后需要检查的首页标题、文章 H1、链接和资源断言。
+  从九个现有文件名和 Astro 路由规则得出九个目标 URL；读取 `verify-dist.mjs` 和 Playwright 用例，确认构建后需要检查的首页无回归、归档或搜索可发现性、文章 H1、链接和资源断言。
 
 - [ ] **Step 3: 建立九篇 frontmatter 契约**
 
@@ -284,7 +284,7 @@
 
   Run: `pnpm verify:dist`
 
-  Expected: exit 0；首页、文章数量、标题、series/order 和必要资源满足验证器。
+  Expected: exit 0；首页、文章数量、标题、既有归档路由和必要资源满足验证器。`series/order` 不作为运行时排序断言，因为当前 schema 和页面逻辑不消费这两个字段。
 
 - [ ] **Step 5: 检查九篇生成 HTML**
 
@@ -331,7 +331,7 @@
 
   Expected: build 与 deploy jobs 均成功；不能用其他 SHA 的绿色 run 证明本次发布。
 
-### Task 8: 线上首页与九篇逐页验证
+### Task 8: 线上站点发现性与九篇逐页验证
 
 **Files:**
 
@@ -340,11 +340,11 @@
 **Interfaces:**
 
 - Consumes: Task 7 成功部署的 commit SHA 与公共站点 URL。
-- Produces: 首页发现性和九篇线上内容的最终完成证据。
+- Produces: 首页无回归、归档或搜索发现性和九篇线上内容的最终完成证据。
 
-- [ ] **Step 1: 验证线上首页**
+- [ ] **Step 1: 验证线上首页与系列发现性**
 
-  先截图再检查 DOM。确认首页显示重写后的系列标题，排序仍按 series/order 预期，封面没有在正文预览中重复。
+  先截图再检查 DOM。确认首页正常加载且近期文章列表无结构回归；再通过归档或站内搜索找到重写后的系列标题。九篇保留原始 `published`，因此不要求全部出现在首页第一页。
 
 - [ ] **Step 2: 逐篇打开九个公共 URL**
 

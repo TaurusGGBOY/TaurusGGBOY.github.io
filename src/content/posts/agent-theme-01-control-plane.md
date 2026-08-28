@@ -1,9 +1,9 @@
 ---
-title: "Agent主题对比01｜控制平面与主循环"
+title: "Agent主题对比01｜为什么不能只比模型"
 published: 2026-08-12T10:01:00+08:00
-updated: 2026-08-12
-description: "比较 Claude Code、Codex CLI 与 Pi 的控制平面、harness 和主循环，覆盖 00-a 到 06 的源码证据。"
-tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi"]
+updated: 2026-08-28
+description: "模型只负责提出下一步，Harness 决定它看见什么、能调用什么、怎样验证以及何时停下。本文建立 Claude Code、Codex、Pi 与 DeepSeek Harness 的统一比较单位。"
+tags: ["agent-theme-comparison", "ai-agent", "agent-harness", "claude-code", "codex", "pi", "deepseek-harness"]
 category: "AI / Architecture"
 draft: false
 image: "/images/posts/agent-theme-01-control-plane/claude-code-source-reading-00.png"
@@ -11,323 +11,109 @@ imagePosition: "left"
 slug: "agent-theme-01-control-plane"
 series: "agent-theme-comparison"
 order: 1
-difficulty: "advanced"
-time: "45 min"
+difficulty: "intermediate"
+time: "18 min"
 prerequisites:
-  - "读过 Claude Code 源码解读 00 导读"
-  - "知道模型、工具调用和上下文窗口分别是什么"
+  - "知道语言模型可以输出文本和工具调用"
+  - "正在使用或评估至少一种 coding agent"
 topics:
-  - "agent harness"
-  - "agent loop"
+  - "Agent Harness"
   - "Claude Code"
-  - "Codex CLI"
+  - "Codex"
   - "Pi"
-source_modules:
-  - "restored-src/src/entrypoints/cli.tsx"
-  - "restored-src/src/query.ts"
-  - "restored-src/src/main.tsx"
-  - "codex-rs/core/src"
-  - "packages/agent/src/agent-loop.ts"
+  - "DeepSeek Harness"
+  - "Coding Agent 评估"
 status: "verified"
-verified_at: "2026-08-12"
+verified_at: "2026-08-28"
 ---
 
+同一个模型装进不同 Agent，可能走不同工具路径、消耗不同 token，也可能在不同位置停下。答案很直接：模型名不能代表完整 Agent。有效能力来自“模型 × Harness × 运行环境 × 任务”，选型和评测都要同时控制这四项。
 
-> 这不是“哪个 Agent 更强”的排行榜，而是一个控制平面比较：谁把模型选择变成动作，谁把结果放回下一轮上下文，谁决定这一轮如何结束。
+你可以把模型想成每一回合提出下一步的人。谁把文件送进上下文，谁真正执行命令，失败后回填哪些信息，怎样限制权限，又凭什么宣布完成，这些工作由模型外面的系统承担。这个系统就是 Harness。
 
-## 先给结论：Agent 的差异，首先不在模型名
+## 一个模型名遗漏了三件事
 
-功能勾选表能回答“有什么”，却不能解释一个系统如何处理取消、恢复、压缩或权限边界。本篇固定比较单位，沿控制平面追踪这些动作落在哪个模块、由什么状态承接，以及哪些判断只能停留在设计推断。
+假设团队要让 Agent 修复一个横跨 API、数据库迁移和前端页面的缺陷。两位同事都选择同一型号的模型。一位在可写工作区、受限网络和完整测试环境中运行；另一位只能读文件，缺少数据库工具，测试输出还被截断。两次结果不同，不能简单归因于“模型发挥不稳定”。
 
-10 篇外部材料用于定义比较维度和写法；Claude Code、Codex CLI 与 Pi 的架构判断仍回到固定源码快照。总览、源码论文、安全文章、实验论文和功能矩阵的证据角色不同，不能互相替代。
+差异至少来自三处：Harness 为模型准备了什么信息，提供了哪些行动通道，运行环境又允许这些行动触达什么资源。论文 [What makes a harness a harness](https://arxiv.org/abs/2606.10106) 把 Harness 概括为包裹语言模型、让它能在代码仓库中行动的那一层；[AI Harness Engineering](https://arxiv.org/abs/2605.13357) 则把软件工程能力放在模型、Harness 与环境组成的系统中讨论。这两个定义都把“能回答代码问题”和“能完成代码任务”分开了。
 
-本文只处理第一组问题：控制平面是什么、一次 turn 怎样运行、启动怎样把环境装配出来，以及 QueryEngine 和 agent loop 的边界在哪里。对应 Claude Code 源码系列的 00-a、00、01、02、03、04、05、06，共 8 个独立 section。
+这里的环境也不是电脑配置表。工作目录是否干净、依赖能否安装、凭据是否暴露、网络是否可达、测试要跑多久，都会改变 Agent 可观察的世界。任务同样需要固定：修一个有明确失败用例的函数，与迁移一个缺少验收标准的系统，不应放进同一分数里比较。
 
-![Agent 控制平面与主循环](/images/posts/agent-theme-01-control-plane/agent-theme-01-control-plane-handdrawn.png)
+## Harness 会把差距放大到任务结果
 
-## 证据边界：三个固定快照，十篇材料只做参照
+Harness 不是提示词外壳。它决定模型每一回合收到哪些高信号信息、能否组合工具、失败是否可见、上下文何时压缩，以及完成声明前有没有验证。模型给出相同意图时，一个 Harness 可能把它翻译成受限命令并回传完整 stderr；另一个可能只返回“执行失败”。下一回合的判断自然会分叉。
 
-Claude Code 以本仓库 `restored-src/` 的源码快照为准；Codex CLI 以 `/Users/gaoguobin/project/codex-cli` 中 `.source-commit=4ef836f883c38ba6d39e6920f335ce6452b7de33` 标记的快照为准；Pi 以 `/Users/gaoguobin/project/pi-mono` 中 `.source-commit=534bcbffb7e1e7551d9ee3572dfeb278e203e493` 标记的快照为准。外部文章帮助我们提出比较维度，不用来替代本地源码证据。
+[The Scaffold Effect in Coding Agents](https://arxiv.org/abs/2607.22585) 专门把 Harness 当作编码 Agent 评测中的隐藏变量。论文在其受控任务和配置内报告，同一模型因 Harness 不同，解决任务所需 token 可相差到 40 倍。这个数字不能外推成某个产品永远更省 token；它能支持的结论是：不记录 Harness，就连“每个已解决任务的成本”也无法只归因于模型。
 
-外部材料大致分成四种写法。第一种是“概念先行”：先说明 coding agent 和 harness 的区别，再拆工具、上下文、执行环境。第二种是“请求展开”：从一个简化 while-loop 开始，逐层加上 API payload、SSE、tool result 和 compaction。第三种是“边界问题”：从审批疲劳、prompt injection 或执行风险切入，再落到沙箱和代理。第四种是“实验/矩阵”：先给评估维度和数据，再用表格或消融实验支撑判断。我们后面的 section 会明确标记：哪一句是源码可以直接确认的，哪一句只是设计上的比较结论。
+更早的 [SWE-agent 研究](https://papers.neurips.cc/paper_files/paper/2024/file/5a7c947568c1b1328ccc5230172e1e7c-Paper-Conference.pdf) 也显示，面向语言模型设计交互界面会影响下游任务表现。工具的参数、观察结果的格式、一次允许编辑多少内容，看似是界面细节，实际都进入了模型的决策回路。
 
-## 十篇外部材料：内容、写法与使用边界
+因此，看到“模型 A 在 Agent X 中优于模型 B”时，先问四个问题：两个模型是否使用同一 Harness，权限和资源是否一致，任务集合是否相同，停止和计分规则是否相同。少一个，结论就只能描述那次组合。
 
-下面不是“参考链接堆砌”，而是这次研究真正借用的写作样本。每篇材料承担的任务不同：有的负责定义比较对象，有的负责展示源码路径，有的负责提供评估维度。它们的评分、体验和案例数据不会被直接移植成 Claude Code、Codex 或 Pi 的总排名。
+## 四个项目把责任放在不同位置
 
-| 材料 | 它主要讲什么 | 它怎么写 | 本系列怎样借用、边界在哪里 |
-|---|---|---|---|
-| [Pawel Jozefiak：AI coding harnesses](https://thoughts.jock.pl/p/ai-coding-harness-agents-2026) | 比较 Claude Code、Codex CLI、Aider、OpenCode、Pi、Cursor，先区分 pair programmer 与 autonomous orchestrator。 | 先定义最小循环，再按使用场景和人在不在场拆产品，最后给选择建议。 | 借用“监督式开发 / 后台编排”的坐标；价格、体验和 benchmark 是作者当时的观察，不能当作固定事实。 |
-| [Mason James：The harness matters](https://www.masonjames.com/blog/the-harness-matters-codex-claude-code-pi-amp-hermes-compared/) | 用 verification、context/memory、safety、workflow、delegation 等九维度比较多个 harness。 | 先声明没有控制变量的代码质量实验，再公开权重、评分规则和并列结论。 | 借用“先写评分边界”的纪律；九维分数不是本系列的测量结果。 |
-| [disler：Pi vs Claude Code](https://github.com/disler/pi-vs-claude-code/blob/main/COMPARISON.md) | 用逐行矩阵盘点源码开放性、默认工具、权限、记忆、子 Agent、团队协作和 provider。 | 高密度表格配少量 winner/差异结论，读者可以快速横向扫描。 | 借用“built-in / extension / 外部宿主”三分法；矩阵中的版本、数量和 winner 仍需回到源码核对。 |
-| [What makes a harness a harness?](https://arxiv.org/abs/2606.10106) | 定义 harness 的必要条件、充分条件和 inclusion/exclusion test，并用多个系统验证分类。 | 先定义对象，再给分类测试，最后讨论设计张力；明确不做排行榜。 | 借用“先固定比较单位”；本文比较控制平面，不把模型、IDE 或单个工具误当成完整 harness。 |
-| [Harness-Native Software Engineering](https://research.chaitanya.science/papers/harness-native-software-engineering.pdf) | 把 control plane 拆成 context ingress、action mediation、execution、state、verification、recovery、delegation、governance。 | 定义八个槽位，再放入系统矩阵和威胁映射，最后提出可验证命题。 | 借用八类控制点组织 50 个 section；威胁映射是分析框架，不是三个固定快照的运行测试。 |
-| [Dive into Claude Code](https://arxiv.org/abs/2604.14228) | 从公开 TypeScript 源码归纳设计原则，追踪 while-loop、权限、compaction、扩展、subagent 和 session。 | 先提出反复出现的设计问题，再把模块和行为映射回问题，保留推断边界。 | 借用“问题 → 控制流 → 设计取舍”的主线；本文的 Claude Code 事实仍以本仓库快照为准。 |
-| [Unlocking the Codex harness](https://openai.com/index/unlocking-the-codex-harness/) | 解释 Codex core、长生命周期 App Server、双向 JSON-RPC，以及 thread/turn/item 如何服务多个宿主。 | 从 CLI 到 IDE/Web 的演化动机切入，再定义稳定原语和客户端形态。 | 借用“事件与宿主协议”视角；协议文章不能单独证明 sandbox 或 approval 的安全效果。 |
-| [Harness engineering](https://openai.com/index/harness-engineering/) | 说明日志、UI、指标、worktree、lint 和结构测试怎样让 agent 能读取环境并验证结果。 | 采用“约束现场 → 环境改造 → 可观察反馈 → 不变量”的工程案例叙事。 | 借用“把反馈面暴露给 Agent”；PR 数量、效率和团队案例不可外推为普遍生产结论。 |
-| [SWE-agent 的 Agent-Computer Interface](https://swe-agent.com/0.7/background/aci/) | 设计面向模型的 viewer、编辑器、搜索和 lint 反馈，而不是把原始 shell 原样交给模型。 | 先给总判断，再列少数会改变模型行为的接口设计点，细节回指论文。 | 借用“输出格式也是控制面”；SWE-agent 的 ACI 结果不能直接等同于 Claude Code、Codex 或 Pi 的工具实现。 |
-| [OpenHands CodeActAgent](https://docs.openhands.dev/openhands/usage/agents) | 把动作空间压成对话/确认或代码执行两类动作，展示统一动作空间的可解释性。 | 用一个抽象、两类动作和一个 demo 迅速建立心智模型。 | 借用“动作空间复杂度”的比较角度；该页面不覆盖完整权限、恢复和持久化，所以不据此评价整体安全。 |
+这组文章比较 Claude Code、Codex、Pi 与 DeepSeek Harness，不按功能数量打分。我们关心它们把上下文、工具、权限、会话和验证责任放在哪里。
 
-这十篇材料合在一起，给出的不是一个冠军，而是一套写作顺序：先定义“比什么”，再展开共同 loop，然后逐个追踪 action、state、verification 和 recovery，最后才谈适用场景。后面的每个 section 都沿用这个顺序，并把“源码事实 / 官方协议事实 / 设计推断 / 外部体验”分开标注。
+| 项目 | 公开资料呈现的设计取向 | 选型时真正要问的问题 |
+| --- | --- | --- |
+| Claude Code | 集成式 Agent 开发工作台 | 团队是否需要一套已经组合好的代码理解、工具、权限和工作流体验 |
+| Codex | 跨 CLI、IDE、应用与自动化表面的执行层 | 多个客户端能否驱动同一套 Agent 语义，并保留一致的任务状态 |
+| Pi | 可塑的最小 Harness | 团队是否愿意自己选择扩展、隔离和工作流约束 |
+| DeepSeek Harness | 可重组的运行时与异构编排底座 | 团队是否真的需要替换运行时部件，并能承担预览期变化与安全责任 |
 
-## Section 00-a｜一篇逆向论文怎样拆开生产级 Agent
+[Claude Code 的工作原理](https://code.claude.com/docs/en/how-claude-code-works) 把它描述为读取代码库、采取行动并根据反馈继续工作的 Agent；工具结果会回到循环，影响下一步。它的公开产品文档覆盖上下文、工具、权限与多种工作流，因此本文把它视为集成式工作台。这是产品形态判断，不代表它在所有任务上质量最高。
 
-### Claude Code：先把研究方法变成系统地图
+[OpenAI 对 Codex agent loop 的说明](https://openai.com/index/unrolling-the-codex-agent-loop/) 把核心循环定义为对用户、模型与工具交互的编排。[App Server 的工程文章](https://openai.com/index/unlocking-the-codex-harness/) 说明 IDE 等客户端可以驱动同一 Harness，而不用各自重写循环。这里比较的是 Codex 的执行语义，不把某一个客户端拥有的界面功能算成模型能力。
 
-00-a 不是普通的产品介绍，它先讨论公开 source map、证据分层和五个价值，再把价值落实为权限、上下文、扩展、subagent 和 resume 等问题。这个顺序很重要：它告诉读者不要从函数名直接跳到“设计意图”，而是先问证据来自哪里、能确认到哪一层。
+[Pi 官方首页](https://pi.dev/) 直接将它定位为 minimal agent harness；其 [coding agent README](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/README.md) 强调以扩展塑造工作方式。较少的内建选择给了使用者更大的改造空间，也把更多组合、隔离和维护责任交给使用者。少并不自动等于更安全，也不自动等于更高效。
 
-本地源码把这个方法落到了可追踪的控制流：`restored-src/src/query.ts` 的 `queryLoop` 是主要循环；工具调用会进入权限判断和执行路径；上下文接近上限时会进入压缩；会话恢复后还要重新走本次运行的环境和权限装配。也就是说，论文里谈的 harness，不是某个单独的类，而是一组跨模块的控制关系。
+[DeepSeek Harness 架构文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md) 将模型适配器、工具注册表、会话日志和 Agent loop 都设计成插件。它适合用来观察“连循环本身都可替换”的运行时思路。项目 [README](https://github.com/deepseek-ai/deepseek-harness) 同时写明它处于 developer preview，可能出现破坏兼容性的变化；[SAFETY.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md) 说明它未经安全审计，不能视为生产就绪。可重组是架构主张，不是已经得到独立验证的性能优势。
 
-### Codex CLI：更像“请求协议的剖面图”
+## 比较单位要落到一张任务卡
 
-Codex 的源码和官方文章把 harness 讲得更协议化。`core` 侧把 thread、turn、item 和 tool call 组织成可观察的事件；请求的一次推进会经历模型输出、工具执行、结果回填和下一次请求。外部写作中常见的优点是把 JSON payload 或 SSE 事件展示出来，读者能看见抽象概念如何落成协议。
+“模型 × Harness × 运行环境 × 任务”不是学术装饰。真正做选型时，可以把一次试验写成下面这张任务卡：
 
-这个角度的代价也很明显：如果只看请求对象，容易漏掉宿主进程、权限决策和 sandbox transform。Codex 的控制平面不等于 Responses API；API 只是模型交互面，真正把动作限制在工作区和网络策略内的部分在本地运行时。
+| 变量 | 需要固定或记录的内容 |
+| --- | --- |
+| 模型 | 精确版本、推理档位、上下文限制 |
+| Harness | 产品与版本、启用的工具、扩展、停止规则 |
+| 运行环境 | 操作系统、仓库状态、权限、网络、依赖与资源限制 |
+| 任务 | 输入、允许修改范围、验收测试、超时和人工介入规则 |
 
-### Pi：用最小内核把变量压到最低
+比如比较四个项目修复同一缺陷，应给它们相同的起始提交、失败测试、依赖缓存和网络策略。若 Pi 被放进容器，Claude Code 在宿主机运行，Codex 获得外网，而 DeepSeek Harness 只能读取本地文件，这次试验仍有使用价值，但它回答的是“四套完整部署怎样表现”，不能回答“哪个 Harness 更好”。
 
-Pi 的写法和实现都更克制。`packages/agent/src/agent-loop.ts` 里，`agentLoop` 负责准备上下文、请求模型、收集 tool calls、执行工具并继续；`executeToolCalls` 则把多个工具调用按顺序推进。它把“一个最小可工作的 harness”展示得很清楚，因此很适合用来和大型系统做差分。
+记录人工介入也很关键。一个 Agent 用较少 token 完成任务，却要求人反复批准、解释环境和修复中间状态，成本只是从模型账单移到了工程师时间。相反，更多工具调用也可能是在运行测试、检查差异和收集证据。脱离 Trace 看调用次数，很容易奖励乐观的提前停止。
 
-但最小并不自动等于完整。Pi 把会话树、压缩、分支摘要、扩展和工具注册放在上层 `AgentSession` / coding-agent runtime；README 也明确说明它不内置 sandbox。比较时必须把“核心 agent loop”与“产品运行时”分开，否则会把未提供的安全边界误读成 loop 的缺陷。
+重复试验时，还要保存每轮的最终补丁、工具轨迹和人工决定。只保留一个通过率，无法判断失败来自模型推理、工具缺失、环境抖动，还是验收脚本本身。若要替换其中一个变量，最好保持另外三项不动，再比较结果分布。这样得到的是某个改变在当前任务集里的影响，不会把一次偶然成功包装成产品结论，也方便团队复查。
 
-### 对比结论
+版本也要进入记录。云端产品可能在试验期间更新模型路由或默认工具，本地 Harness 也可能升级扩展和策略。无法锁定服务端版本时，至少记录日期、可见配置、任务输入和完整产物，并把复测结果当作新的时间截面。否则，两周后用同一名称重跑，差异究竟来自模型、Harness 更新还是环境变化，仍然无法解释。
 
-三者都可以画成“模型—工具—结果—模型”的环，但论文式分析真正有价值的地方在环外：
+这份时间记录也是复盘异常结果时最便宜的线索。
 
-- Claude Code 把权限、hook、压缩、恢复和扩展都拉回 query 控制流，强调生产边界。
-- Codex 把 thread/turn/item 作为稳定的宿主协议，强调多客户端和事件可观察性。
-- Pi 把最小 loop 保持得很薄，把 session、扩展和 coding-agent 能力放在可组合的上层，强调可改造性。
+## 把设计证据和效果证据分开
 
-这不是功能数量的差异，而是控制平面“中心化、协议化、可组合化”的不同取舍。
+公开文档足以支持设计层结论：某个项目是否内建沙箱，工具反馈会不会进入下一回合，运行循环能否被多个客户端驱动，插件能插入哪一层。文档还可以说明项目自己声明的成熟度和限制。
 
-### 验证动作
+效果证据需要另一套材料。官方写着“支持沙箱”，只说明有这项控制，不等于所有配置都能抵挡不可信输入；官方写着“可扩展”，也不代表扩展后的组合已经稳定运行。任务质量和平均成本需要共同任务、明确版本、相同资源和可检查的方法。安全效果还需要威胁模型、隔离边界与绕过测试。
 
-在 Claude Code 源码目录执行一次 `rg -n "queryLoop|tool_use|compact|permission" restored-src/src/query.ts restored-src/src`，再分别在 Codex 的 `core` 和 Pi 的 `agent-loop.ts` 查找 turn/tool loop。若一个结论无法落到这些控制点，就把它标成假设，而不是源码事实。
+这也是本系列不设总冠军的原因。Claude Code 的整合度、Codex 的跨表面执行、Pi 的最小核心、DeepSeek Harness 的运行时可替换性，各自解决不同的组织问题。把它们压成一排勾选框，会丢掉最影响结果的责任分配。
 
-## Section 00｜从源码泄露开始，读懂 Claude Code
+## 接下来应该观察什么
 
-### Claude Code：导读本身也是 harness 教程
+读完一份产品介绍，先别问“用了什么模型”。问它如何完成一轮真实工作：需求怎样变成上下文，工具怎样执行，错误怎样回填，越权动作怎样停下，最后用什么证据结束。后面八篇会沿这条路径依次讨论任务循环、人工接管、长任务恢复、宿主状态、扩展、多 Agent、完成证明和条件式选型。
 
-00 导读把 Claude Code 放到“模型负责选择，harness 负责把选择变成动作”的框架中，并把事故时间线、证据分层和阅读路线放在正文前面。它还提醒读者：源码泄露可以帮助理解实现，但不能凭一个快照推断所有线上行为。这个证据纪律是后面对比 Codex 和 Pi 时必须保留的前提。
+如果你只想带走一个判断方法，就保存那张任务卡。任何看似绝对的产品结论，都应该能还原到模型、Harness、环境和任务。还原不了，它更像一次演示印象，不是可复用的选型证据。
 
-从实现看，Claude Code 的入口不是直接调用模型。CLI 会先分流交互式、print、SDK 或 bridge 等宿主模式，再完成配置、信任、工具池、会话和扩展的装配，最后才把消息交给 QueryEngine。启动阶段做的这些工作，决定了“模型能看到什么、能调用什么、调用后谁来拦截”。
+## 本篇引用来源
 
-### Codex CLI：系统边界落在 app-server 与 host protocol
-
-Codex 的官方 harness 设计把核心拆成 CLI/UI、App Server 和更底层的执行组件。App Server 用双向 JSON-RPC 承载 thread、turn、item；客户端可以是 CLI，也可以是 IDE 或其他宿主。这样，控制平面不再只属于一个终端界面，而是通过协议对多个前端保持一致。
-
-这个设计特别适合解释“同一个 agent 如何被不同产品调用”。但读者不能因此把 JSON-RPC 当作安全边界：真正的文件系统和网络限制仍由 sandbox、approval 和宿主运行时决定。
-
-### Pi：核心库和 coding-agent 应用分层
-
-Pi 的仓库把 agent core、coding-agent、tui 和扩展运行时拆得很清楚。核心 loop 不知道“项目设置”“会话树”或“通知 UI”的全部细节，coding-agent 再把这些能力组合起来。它的边界更接近一个可嵌入库：你可以替换 provider、注册工具、加载扩展，也可以换掉交互层。
-
-这让 Pi 很适合验证一个问题：如果只保留模型请求和工具执行，系统能否运行？答案是能；但要成为完整 coding agent，还需要把信任、会话、压缩、工作区和体验层逐一补回来。
-
-### 对比结论
-
-Claude Code 的导读最强调“事故和证据如何反推架构”；Codex 最强调“宿主协议如何复用控制平面”；Pi 最强调“最小内核如何被上层组合”。对实际排错而言，第一种写法帮助找边界，第二种帮助找进程/协议，第三种帮助判断一个能力应该放在 core 还是 application。
-
-### 验证动作
-
-给三个系统各画一条边界：模型请求前、工具执行前、会话落盘后分别由谁负责。画不出负责者的区域，就是最容易出现“表面支持、实际没有闭环”的区域。
-
-## Section 01｜从系统地图开始，认识整体架构
-
-### Claude Code：四区地图对应真实调用链
-
-01 把系统拆成 Query Core、Host/UI、Context & Model、Execution & State，再把 Extensions 作为横向扩展面。这个地图不是目录树复述：`query.ts` 把宿主输入转成内部消息，context/model 决定系统提示和模型请求，execution/state 处理工具、权限、会话和运行状态，extensions 则通过 MCP、plugin、skill、hook 等入口增加能力。
-
-地图的价值在于定位失败。例如恢复会话后的 prompt cache 问题属于 Context 与 Query Core 的交界；权限绕过属于 Execution 边界；压缩重试失控则属于 Query Core 的状态机。生产系统的故障往往不是某个函数“错了”，而是两个区域对状态归属理解不一致。
-
-### Codex CLI：四区可以换成 thread、host、sandbox、model
-
-Codex 的对应地图更接近：App Server/thread state、client/host protocol、model request、sandboxed execution。thread 和 turn 是外部可观察的业务状态；client 负责展示和发起请求；模型产生 item/tool call；执行器在 sandbox 和 approval 策略下运行命令。
-
-它的一个强项是 item 级事件：reasoning、message、tool call、tool result 可以成为统一的观测单位。一个需要警惕的点是，事件模型能说明“发生了什么”，但不能单独说明“为什么允许发生”；后者要追 approval 与 sandbox profile。
-
-### Pi：模块地图更薄，组合关系更直接
-
-Pi 可以对应为 agent core、coding-agent session、tools/extensions、TUI/host。`registerTool` 把工具描述和执行函数加入 runtime，`AgentSession` 把消息树、模型设置和 compaction 连接起来，TUI 只消费事件和状态。没有强制的 sandbox 层，也没有像 Codex App Server 那样的统一跨客户端协议。
-
-这种结构让扩展成本低，但治理责任更多落在宿主：工具是不是安全、扩展是不是可信、子进程能访问哪些文件，不是 Pi core 自动替你完成的。
-
-### 对比结论
-
-Claude Code 的地图适合做“故障归因”；Codex 的地图适合做“事件和宿主解耦”；Pi 的地图适合做“内核复用和能力拼装”。如果要设计自己的 agent，最先应确定的不是类名，而是四个问题：谁持有 turn 状态，谁生成模型输入，谁授权副作用，谁保存可恢复历史。
-
-### 验证动作
-
-拿一个简单任务“读取文件并修改一行”，分别标出三个系统中四个动作的归属：输入装配、模型调用、工具授权、结果持久化。任何动作被两个模块同时“顺便负责”，都值得继续查。
-
-## Section 02｜一次请求如何走完 Claude Code
-
-### Claude Code：入口可以变，QueryEngine 不变
-
-02 的主线是从 `cli.tsx` / `main.tsx` 的 fast-path 和完整入口，经过 REPL、SDK 或 print 模式，最后汇入同一个 QueryEngine。`submitMessage` 负责把用户输入、附件、系统初始化和运行参数装配起来；`queryLoop` 再把模型输出中的 tool use 编排成执行、回填和下一轮请求。
-
-这条链把“入口差异”和“执行内核”分开了。交互式入口需要状态展示和中断，headless 入口需要结构化输出，但模型看到的消息配对、工具结果和停止条件不能因为 UI 不同而各自实现一套。
-
-### Codex CLI：turn 是一次可观察的请求单元
-
-Codex 的 turn 也不是一次 HTTP 请求。一次 turn 可能含有多次模型推理和工具调用；每次工具结果都会作为新的 item 进入后续请求，直到模型输出最终消息或控制逻辑结束。SSE 事件让客户端可以实时看到这个过程，App Server 则把它包装成更稳定的 thread/turn 语义。
-
-与 Claude Code 的共同点是“结果回填后继续”，不同点是 Codex 更明确地把中间状态公开给宿主协议。对 IDE 来说，这意味着可以在不解析终端文本的情况下渲染工具调用、审批和最终结果。
-
-### Pi：agentLoop 是清楚但不臃肿的请求管线
-
-Pi 的 `agentLoop` 先把系统提示、历史消息和工具定义交给 provider，再处理流式 assistant message。若有 tool calls，就执行并追加 tool result；若没有，就结束本轮。coding-agent 层再把这个 loop 接到 session JSONL、分支和 UI。
-
-Pi 的优势是阅读成本低：你能很快看见一次 turn 的必要步骤。它没有替你补齐每个生产边界，所以取消、失败恢复、权限确认和持久化策略需要看上层代码，不能只读 core loop。
-
-### 对比结论
-
-三者都不是“请求—响应”脚本，而是“请求—工具—结果—请求”的可暂停流程。Claude Code 把大量生产策略内嵌到 QueryEngine；Codex 通过 turn/item 协议把过程暴露给客户端；Pi 把最小流程保留为库能力，再让 coding-agent 决定产品策略。
-
-### 验证动作
-
-不要只打印最终答案。让任务调用一次工具，在日志中确认至少出现：assistant tool call、工具执行、tool result、下一次模型输入、终止事件。这五个节点缺一个，系统就可能只是“看起来像 agent”。
-
-## Section 03｜如何完成引导与初始化
-
-### Claude Code：启动是能力和边界的装配期
-
-03 展示了 Claude Code 在第一次提问前做的工作：CLI 分流、并发预取、配置迁移、初始化、当前项目 setup、工具池、信任、会话恢复和 REPL/print 出口。`main()` 不只是把参数交给函数，而是给本次运行建立一份带标签、可观测、可恢复的环境。
-
-这里有一个很容易被忽略的设计：启动阶段确定的 cwd、配置、模型、权限模式、MCP/插件和 memory，会共同影响后续系统提示和可用工具。因此启动耗时不只是 UX 指标，也是在测量控制平面复杂度。
-
-### Codex CLI：bootstrap 主要围绕 workspace 和 instructions
-
-Codex 启动时要解析工作目录、sandbox/approval 选项、模型和 provider 配置，并收集目录层级的 `AGENTS.md` 等 instructions。官方 harness 文章将这些说明视为初始输入的一部分；它们不是工具调用之后才临时读取的注释，而是模型作出第一步决定前就要进入上下文的约束。
-
-Codex 的 bootstrap 还需要让不同客户端共享同一套 thread/turn 能力。这样做的关键不是把所有初始化塞进 CLI，而是由 app-server/runtime 提供稳定的环境描述和事件协议。
-
-### Pi：启动让 provider、settings、session 和 extensions 汇合
-
-Pi 的 coding-agent 启动会读取项目/全局设置，确定 provider/model，加载资源文件和扩展，创建 session，再启动 TUI 或 headless 模式。项目 trust 会影响资源加载；扩展如果未被信任，不应因为它出现在目录里就自动执行。
-
-它的初始化更像“可组合工作台”：你可以换模型和主题，也可以通过扩展增加工具。但由于没有统一 sandbox，启动阶段的信任配置和运行用户权限尤其重要。
-
-### 对比结论
-
-Claude Code 把启动做成性能可观测的多阶段流水线；Codex 把启动重点放在 workspace/instructions 与多宿主协议；Pi 把启动重点放在 provider、session 和扩展组合。三者共同说明：agent 的第一轮质量，在模型收到第一条用户消息之前就已经被决定了一半。
-
-### 验证动作
-
-冷启动时记录 cwd、配置来源、加载的 instruction、工具数量、扩展数量和 session 路径。不要只记录总耗时；只有拆开这些输入，才能解释“同一句 prompt 为什么在两个项目里行为不同”。
-
-## Section 04｜一套内核如何支持多种入口
-
-### Claude Code：REPL、print、SDK、bridge 共享契约
-
-04 说明 main 先识别宿主，再决定业务出口。REPL 持有交互状态，print 和 Agent SDK 走 headless 管道，MCP server 复用工具执行契约，bridge/direct-connect 则把进程边界显式化。不同入口的差异集中在输入输出和权限控制，不应复制一套新的 agent loop。
-
-这个设计让“同一任务三种出口”的行为可以比较：交互式模式显示过程，print 模式输出结构化结果，SDK 模式把事件交给调用者。只要共用 QueryEngine，工具结果和停止条件就不会因为展示层不同而漂移。
-
-### Codex CLI：客户端是控制平面的第一等公民
-
-Codex 的 App Server/JSON-RPC 设计天然支持 CLI、IDE 和其他客户端。客户端订阅 thread/turn/item 事件，向宿主请求审批或发送输入；执行和状态不必绑定到终端。这个协议化入口比单一 CLI 更适合嵌入开发工具，但也要求协议向后兼容、事件顺序和背压明确。
-
-### Pi：TUI 与 headless 都围绕同一个事件流
-
-Pi 的 coding-agent 把 TUI、RPC/脚本入口和 agent core 分层。TUI 消费 agent events 并展示流式文本、工具调用和状态；headless 调用可以直接使用同一套 session/agent 能力。扩展事件也能穿过这层，因此 UI 不需要理解每个扩展的内部实现。
-
-不过 Pi 的入口统一主要是库层约定，而不是强制的远程协议或系统级安全边界。部署到不可信环境时，需要宿主另外提供隔离和授权。
-
-### 对比结论
-
-入口复用有三种成熟形态：Claude Code 是内核契约复用，Codex 是 app-server 协议复用，Pi 是事件和库组合复用。选择哪一种，取决于你是否需要多个独立客户端、远程进程和长期兼容，而不只是是否支持 `--print`。
-
-### 验证动作
-
-用同一任务分别走交互式和 headless 入口，比较工具调用序列、权限事件、最终结果和会话落盘。若只有输出格式不同，说明边界健康；若决策顺序也不同，说明入口层偷偷复制了控制逻辑。
-
-## Section 05｜如何编排会话与无头调用
-
-### Claude Code：QueryEngine 是会话状态的门面
-
-05 把 QueryEngine 的职责拆开：构造时保存完整会话状态；`submitMessage` 先处理输入并判断是否请求模型；system init 向宿主和模型声明能力；内部消息映射为 SDK 事件；`result` 给出结构化终止报告；interrupt、setModel 和读取接口负责生命周期控制。
-
-这说明 QueryEngine 不是“调用一次 API 的 helper”。它要知道当前 session、模型、工具、权限、消息和终止原因，还要让 REPL 与 SDK 看到一致的事件。无头调用只是没有 TUI，不是没有状态机。
-
-### Codex CLI：Thread/Turn/Item 将状态外显
-
-Codex 把 QueryEngine 类似的职责拆成 thread、turn、item 和 app-server 管理。thread 表示可继续的会话，turn 表示一次用户驱动的推进，item 表示消息、推理、工具调用和结果等事件。这个划分让客户端可以精确订阅和恢复，也让并发队列、取消和 backpressure 有了明确的承载点。
-
-它和 Claude Code 的差异不是“有无会话”，而是状态是否以协议对象公开给多个消费者。公开状态会带来更强的可组合性，也带来 schema 演进和客户端兼容成本。
-
-### Pi：AgentSession 把 loop 变成可恢复会话
-
-Pi 的核心 loop 可以无状态地运行，但 `AgentSession` 会把模型、消息树、settings、compaction 和 branch 操作组合成可继续的 coding session。session 采用 JSONL/tree 记录事件和父子关系，切换分支不必复制整份历史。
-
-对于一次性脚本，直接调用 agent loop 就够了；对于交互式开发，必须使用 session 层，否则 `/resume`、`/tree`、压缩和 fork 都没有可靠的状态来源。
-
-### 对比结论
-
-Claude Code 把会话编排集中在 QueryEngine；Codex 把它拆成协议可见的 thread/turn/item；Pi 把它拆成 core loop + AgentSession。三种方案都在回答同一个问题：如何让“这一次模型调用”成为可以暂停、继续、观察和解释的业务过程。
-
-### 验证动作
-
-检查无头调用是否仍然能拿到结构化的 result、tool events、usage 和中断原因；再检查进程重启后能否从持久化记录恢复。如果只能恢复文字而不能恢复控制状态，所谓 session 只是聊天记录。
-
-## Section 06｜代理循环如何持续推进
-
-### Claude Code：`queryLoop` 是真正的生产级状态机
-
-06 的核心不是“有一个 while(true)”，而是这个循环在每一轮如何准备 state、调用模型、收集 `tool_use`、执行并回填 `tool_result`，再根据 hook、预算、取消、错误和停止条件决定下一步。源码中 `query()` 更像外壳，状态真正留在 `queryLoop()`。
-
-尤其要注意四层预算检查：请求前后的 token/context 约束、工具和 turn 预算、模型或服务错误的重试，以及最终 stop hook/结果收口。取消时还要补齐消息配对，错误恢复也需要把内部异常转成调用者可理解的结果。生产 harness 的复杂度，正是这些“模型没说出来但系统必须处理”的情况。
-
-### Codex CLI：循环被拆成 turn 事件和执行器
-
-Codex 的 agent loop 同样是模型—工具—结果的闭环，但它更倾向于让每一步成为 item/event，再由 runtime 负责调度和 sandbox transform。统一执行器先根据安全策略选择 sandbox，再变换命令、启动 PTY，收集输出后把结果交回 turn。这样的结构便于多个客户端观察中间状态，也便于把本地执行和协议层分开。
-
-Codex 的 sandbox preference 有 `Auto`、`Require`、`Forbid` 等取值；可用 sandbox 类型包括 macOS Seatbelt、Linux Seccomp 和 Windows Restricted Token 等，具体可用项取决于平台和编译能力。这个参数不是模型 prompt，而是循环进入副作用阶段前的控制分支。
-
-### Pi：最小 loop 让“必要步骤”一眼可见
-
-Pi 的 `agentLoop` 和 `executeToolCalls` 让主路径很短：请求模型，发现工具调用，执行工具，追加结果，继续或结束。它也支持流式事件和多工具调用，但不会在 core 中强行塞入 Claude Code 那样的全部生产政策。
-
-因此 Pi 很适合做实验：先替换工具执行器、provider 或 session，再观察 loop 的基本不变量。但要达到生产级，需要宿主明确补上审批、资源隔离、重试、预算、日志和恢复；不补，就不能把“代码短”误写成“系统简单”。
-
-### 对比结论：三条循环，三种工程哲学
-
-Claude Code 把异常路径和治理策略压进主循环，换取边界完整但阅读成本更高；Codex 把循环拆成 turn/item、host protocol 与 sandbox executor，换取多宿主和可观察性；Pi 保持 loop 最小，把复杂度交给上层，换取可嵌入性。
-
-一个有用的评价办法是数不变量，而不是数功能：tool call 必须有匹配 result；取消后不能留下半条消息；恢复不能绕过权限；压缩后必须还能继续；执行输出必须回到下一次模型输入。谁把这些不变量写进控制平面，谁才真正拥有可控的 agent。
-
-### 验证动作
-
-做四个故障注入：工具失败、用户取消、上下文接近上限、模型输出没有 tool call。记录每个系统是否有明确终止 reason、是否能继续、是否留下可恢复 session，以及是否在再次执行前重新确认权限。
-
-## 把十篇外部文章的写法变成一套阅读方法
-
-这 10 篇材料没有告诉我们“唯一正确的 Agent 架构”，却提供了可以复用的写作方法：
-
-1. 先定义对象。把 coding model、tool、harness、host、sandbox 分开，否则后面的比较会把不同层级混成一张表。
-2. 再展开一条路径。用一次 turn 解释消息、工具、结果、状态和停止条件，比堆概念更容易发现遗漏。
-3. 对边界单独取证。权限、网络、文件系统、凭证和恢复不能从“支持工具”推断出来。
-4. 最后才做评分或结论。实验论文可以报告 benchmark，产品文章可以报告体验，但不能把一项结果外推成所有任务上的总排名。
-
-这也是本系列的固定格式：每个 Claude Code 章节都有对应的 Codex、Pi、对比结论和验证动作；后文不会再把 50 个章节压成一张“大而全”的表。
-
-## 本主题覆盖清单
-
-本篇覆盖 Claude Code 源码解读系列的 8 个章节：00-a、00、01、02、03、04、05、06。整个新系列共 8 篇主题文章、50 个独立 comparison sections；每篇旧 Claude Code 文章只出现一次。剩余主题依次处理消息与副作用、上下文与恢复、扩展与委派、宿主与结构化 IO、配置与运维、记忆与后台智能、体验与反馈。
-
-## 参考材料：先读它们怎样写，再读它们写了什么
-
-- [How Claude Code works](https://code.claude.com/docs/en/how-claude-code-works)：官方总览，先定义 agentic harness，再按 tools、context、execution、session 展开。
-- [Beyond permission prompts: making Claude Code more secure and autonomous](https://www.anthropic.com/engineering/claude-code-sandboxing)：从审批疲劳和 prompt injection 切入，再解释文件系统、网络和凭证代理边界。
-- [Unrolling the Codex agent loop](https://openai.com/index/unrolling-the-codex-agent-loop/)：从 while-loop 展开到 Responses API、SSE、turn 和 compaction。
-- [The harness matters: Codex, Claude Code, Pi & Hermes compared](https://www.masonjames.com/blog/the-harness-matters-codex-claude-code-pi-amp-hermes-compared/)：按九个维度加权比较，但明确不是代码质量排行榜。
-- [What makes a harness a harness?](https://arxiv.org/abs/2606.10106)：用必要条件和充分条件区分不同系统，避免把“能调用工具”直接等同于 harness。
-- [Harness-native software engineering](https://research.chaitanya.science/papers/harness-native-software-engineering.pdf)：把控制平面拆成 context、action、execution、state、verification、recovery、governance 等能力。
-- [Dive into Claude Code](https://arxiv.org/abs/2604.14228)：源码级追踪 while-loop、权限、压缩、扩展、subagent 和 session。
-- [Unlocking the Codex harness](https://openai.com/index/unlocking-the-codex-harness/)：从 core、App Server、JSON-RPC、thread/turn/item 解释多宿主架构。
-- [Harness engineering](https://openai.com/index/harness-engineering/)：强调环境可读性、日志、UI、指标、worktree 和结构化验证。
-- [SWE-agent 的 Agent-Computer Interface](https://arxiv.org/html/2405.15793)：用实验说明面向模型设计的搜索、查看、编辑和 lint 接口为何重要。
-
-## 下一篇
-
-控制平面回答了“谁在推进循环”。下一篇会继续追问：模型究竟通过什么消息和工具契约改变世界，工具副作用怎样经过权限、沙箱和回滚，三套系统又怎样把执行结果重新变成上下文。
+- [What makes a harness a harness](https://arxiv.org/abs/2606.10106)
+- [AI Harness Engineering](https://arxiv.org/abs/2605.13357)
+- [The Scaffold Effect in Coding Agents](https://arxiv.org/abs/2607.22585)
+- [SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering](https://papers.neurips.cc/paper_files/paper/2024/file/5a7c947568c1b1328ccc5230172e1e7c-Paper-Conference.pdf)
+- [How Claude Code works](https://code.claude.com/docs/en/how-claude-code-works)
+- [Unrolling the Codex agent loop](https://openai.com/index/unrolling-the-codex-agent-loop/)
+- [Unlocking the Codex harness](https://openai.com/index/unlocking-the-codex-harness/)
+- [Pi Coding Agent](https://pi.dev/)
+- [Pi coding agent README](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/README.md)
+- [DeepSeek Harness Architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)
+- [DeepSeek Harness README](https://github.com/deepseek-ai/deepseek-harness)
+- [DeepSeek Harness Safety](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md)

@@ -1,9 +1,9 @@
 ---
-title: "Agent主题对比05｜宿主、状态与结构化 IO"
+title: "Agent主题对比05｜CLI、IDE 与云端由谁持有状态"
 published: 2026-08-12T10:05:00+08:00
-updated: 2026-08-12
-description: "比较三个 Agent 的共享状态、TUI、键盘交互、SDK、App Server 与结构化输入输出。"
-tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi"]
+updated: 2026-08-28
+description: "比较 Claude Code、Codex、Pi 与 DeepSeek Harness 在 CLI、IDE、桌面端和云端中如何持有会话、事件、审批与运行生命周期。"
+tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi", "deepseek-harness", "app-server", "runtime-state"]
 category: "AI / Architecture"
 draft: false
 image: "/images/posts/agent-theme-05-host-runtime/claude-code-source-reading-00.png"
@@ -12,143 +12,101 @@ slug: "agent-theme-05-host-runtime"
 series: "agent-theme-comparison"
 order: 5
 difficulty: "advanced"
-time: "35 min"
+time: "17 min"
 prerequisites:
-  - "Agent主题对比 01｜控制平面与主循环"
-  - "Agent主题对比 04｜扩展、委派与多 Agent"
+  - "Agent主题对比 02｜一次 Agent 任务怎样跑完"
+  - "Agent主题对比 04｜长任务怎样保持上下文并恢复"
 topics:
-  - "AppState"
-  - "TUI"
-  - "keybindings"
-  - "headless SDK"
-  - "structured IO"
-source_modules:
-  - "restored-src/src/state"
-  - "restored-src/src/components"
-  - "restored-src/src/keybindings"
-  - "restored-src/src/entrypoints/sdk"
-  - "restored-src/src/cli/structuredIO.ts"
-  - "codex-rs/app-server"
-  - "packages/coding-agent/src/modes"
+  - "host runtime"
+  - "CLI and IDE"
+  - "App Server"
+  - "RPC and SDK"
+  - "session ownership"
+  - "remote recovery"
+  - "DeepSeek Harness"
 status: "verified"
-verified_at: "2026-08-12"
+verified_at: "2026-08-28"
 ---
 
+答案是：状态由真正运行 Agent loop、保存会话并发出事件的一侧持有，不一定是你眼前的窗口。宿主会决定任务能否在关掉 UI 后继续、审批从哪里返回、多个客户端能否看到同一时间线，以及断线后由谁恢复。CLI、IDE 和云端绝不是三套皮肤。
 
-> Agent 的“产品体验”是把执行状态、输入焦点、取消、进度和结构化结果可靠地翻译给人或另一个程序。
+你在终端发起重构，随后打开 IDE 看 diff，午饭时又想让云端继续跑测试。如果三个入口各自保存一份聊天，它们只是看起来像同一个 Agent；如果都连接同一条持久 thread，才可能共享进度。判断关键不在界面数量，而在状态的所有者和事件协议。
 
-本篇覆盖 Claude Code 源码解读 31–34：共享 AppState、Ink TUI/REPL、键绑定/Vim mode、headless SDK 与 structured IO。它们共同回答一个运行时问题：谁能观察和改变 agent 的状态，状态如何跨宿主边界流动。
+所谓“状态”，不只是聊天记录。
 
-![Agent 宿主、共享状态与结构化 IO](/images/posts/agent-theme-05-host-runtime/agent-theme-05-host-runtime-handdrawn.png)
+一次运行至少包含四类状态：会话历史、正在执行的 turn、审批与用户输入的等待点、承载文件和进程的环境。客户端可以显示这些信息，也可以拥有其中一部分；只有运行时知道工具是否仍在执行、某个审批是否已过期、网络断开后任务是否继续。
 
-## Section 31｜共享状态如何贯穿整个系统
+因此，判断宿主边界时要问：关闭界面会不会终止任务？新客户端能否从稳定标识恢复？历史事件由谁保存？审批请求由谁发起并暂停执行？客户端与服务端版本不一致时如何协商？这些问题比“有没有桌面端”更接近真实控制权。
 
-### Claude Code：AppState 是一张外部状态平面
+## Claude Code：多个工作台，各有会话边界
 
-31 把 AppState 拆成五类共享状态：会话/模型、工具与任务、UI/交互、权限/运行模式以及扩展/连接。默认状态既提供缺省值，又保留运行时分支；store 不分发 action，而是接受函数式 updater；Provider 提供稳定 store，selector 决定谁重新渲染；任务更新利用结构共享，`onChangeAppState` 按字段输出 diff；恢复只映射可外部化字段。
+Claude Code 覆盖 CLI、VS Code、桌面端和 Web，但官方会话文档明确说明，桌面端、Web 和 VS Code 扩展分别维护自己的 session history；CLI 会话则持续写入本地 transcript。[Manage sessions](https://code.claude.com/docs/en/sessions) 这意味着“产品表面很多”不等于任意表面都在实时驱动同一份本地状态。
 
-这个设计对终端 Agent 很关键：查询循环、任务系统、工具进度和 UI 不必互相持有组件实例。状态更新有来源，渲染只订阅所需切片，headless 也可以复用同一份 AppState 而不创建 TUI。
+云端会话有自己的远程环境。官方文档区分 `--resume` 与 `--teleport`：前者恢复这台机器上的本地历史，后者把云端会话的分支和完整对话带回终端。[Claude Code on the web](https://code.claude.com/docs/en/claude-code-on-the-web) 这种切换需要连同仓库分支与会话一起处理，因为对话连续而代码环境错位，仍会恢复到错误现实。
 
-### Codex CLI：Thread/Turn 状态由 App Server 持有
+Claude Code 更像一组相互衔接的产品工作台。它提供明确的本地和云端迁移入口，但不能从统一品牌推断所有入口天然共享一个在线 session。适合它的验收方式，是分别测试本地恢复、云端恢复和跨环境 teleport，而不是只看界面能否打开同一仓库。
 
-Codex 的 app-server 把 thread、turn、item、approval、exec 状态通过 JSON-RPC 事件暴露给多个客户端。CLI UI 只是一个消费者；IDE、自动化脚本或测试客户端可以订阅同一状态。这样的外部状态平面比把状态藏在终端组件里更适合远程和多宿主。
+## Codex：App Server 把 Harness 变成可驱动服务
 
-Codex 的状态更新还要面对慢客户端和重连，因此 bounded queues、事件顺序和可恢复 thread 是状态架构的一部分。
+OpenAI 设计 App Server 的目的，是让 IDE 等客户端驱动同一个 Codex Harness，而不在每个 UI 里重写 agent loop。[Unlocking the Codex harness](https://openai.com/index/unlocking-the-codex-harness/) 中，App Server 既是双向 JSON-RPC 协议，也是托管 Codex core threads 的长生命周期进程。
 
-### Pi：session 与 UI 状态分层
+它把会话拆成 thread、turn 和 item。thread 是可持久化的会话容器；turn 是一次用户输入触发的工作；item 表示消息、工具执行、审批、diff 等有生命周期的单元。客户端请求可以产生多个服务端通知，服务端也能主动发起审批请求并暂停当前 turn，直到客户端允许或拒绝。[App Server conversation primitives](https://openai.com/index/unlocking-the-codex-harness/)
 
-Pi 的 AgentSession 持有消息树、模型、settings、compaction 和 branch；TUI 维护输入、显示和事件消费状态；扩展可以读取/更新有限的 session 状态。core agent loop 不要求 React/Ink 这样的 UI，因此可以嵌入别的宿主。
+在 Web 场景中，OpenAI 明确把服务端作为状态真相源：浏览器标签页和网络都可能消失，任务进度留在服务端，新会话重连后再追上事件。[App Server web runtime](https://openai.com/index/unlocking-the-codex-harness/) 这比“把 TUI 包进 WebView”多了一层承诺：客户端可以短命，thread 必须持久。
 
-### 对比结论
+这种结构也有代价。协议要维护版本与能力协商，客户端要正确处理事件顺序、重复通知、审批等待和断线重连。App Server 证明了统一 Harness 可以被多个客户端驱动，不能据此推出每个 Codex 产品表面都共享同一执行环境或同一权限配置。
 
-Claude Code 用外部 store 把复杂终端应用的共享状态集中管理；Codex 用 App Server 把状态变成跨客户端协议；Pi 用 session/core/TUI 分层保持轻量。状态平面越外部化，越容易做无头、恢复和多客户端，但越需要 schema 与事件版本治理。
+## Pi：TUI、RPC 与 SDK 暴露不同集成合同
 
-### 验证动作
+Pi 把自己定位为 minimal agent harness，并提供交互式 TUI、基于 stdin/stdout JSONL 的 RPC 模式，以及可嵌入 Node.js 进程的 SDK。[Pi 文档首页](https://pi.dev/docs/latest) 这三种入口分别适合人直接操作、跨语言子进程集成和同进程编程控制。
 
-触发一次工具进度、一次任务状态变化、一次模型切换和一次权限更新，观察 UI、日志、SDK/协议客户端是否得到同一事实。若某个事实只存在于组件局部 state，headless 很可能看不到。
+RPC 模式会把 Agent 运行事件流式写到 stdout，客户端通过命令读取状态、提交 prompt，并处理扩展触发的交互请求。需要确认、选择或输入时，RPC 使用带 ID 的请求/响应子协议；部分强依赖 TUI 的自定义界面能力会降级或不可用。[Pi RPC mode](https://pi.dev/docs/latest/rpc) 这正说明宿主不是透明层：同一个扩展放进不同宿主，交互合同可能变化。
 
-## Section 32｜Ink TUI 与交互式 REPL 如何渲染与刷新
+SDK 则允许调用方直接访问 agent state、选择工具并装载 extensions；官方建议，同进程、需要类型安全和直接状态访问时用 SDK，跨语言或需要进程隔离时用 RPC。[Pi SDK](https://pi.dev/docs/latest/sdk) 选择 SDK 也意味着宿主进程要承担更多生命周期责任，例如何时创建 session、怎样传播取消、怎样清理扩展资源。
 
-### Claude Code：React 负责语义，Ink 负责终端输出
+Pi 的会话仍以 JSONL 文件保存，可恢复、分叉和树形导航。[Pi Sessions](https://pi.dev/docs/latest/sessions) 但“多个入口都能读会话格式”不等于允许多个客户端安全地同时写同一文件。并发所有权需要调用方自己设计和验证。
 
-32 先区分 REPL、React 和 Ink。根组件只在交互模式创建；REPL 用组件树组织输入、消息、工具进度和状态；PromptInput 决定提交目标；查询事件回到 React state；`messagesRef` 解决执行时序，React state 负责显示；token 流和完整消息走两条显示路径，Messages 先整理语义再渲染行。
+## DeepSeek Harness：profile 在启动时组装运行时
 
-这不是把 stdout 当画布。组件树让加载、错误、取消、弹窗和异步工具状态可以重新渲染；终端最终只看到差量，但运行时保留的是结构化状态。
+DeepSeek Harness 公开架构把一次运行描述为由有序层在启动时组成的 Cordis plugin tree。官方提供 `web`、`headless`、`sdk`、`sdk-minimal` 和 `acp` 等 profile；其中多数 profile 共享 `dsh-base`，再加上浏览器应用、一轮运行器或 JSON-RPC 服务等不同宿主组件。[DeepSeek Harness Architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)
 
-### Codex CLI：TUI 是 App Server 事件的渲染器
+这个设计把 UI 与运行时组合变成配置问题：profile 决定装入哪些 session、agent loop、工具、持久化、审批和 sandbox 服务。Web profile 可以实时重载 patch，而 headless、SDK 和 ACP profile 在启动时应用配置一次，因为持有任务后替换依赖会破坏生命周期。这里的“可替换”是官方架构主张，不是兼容性或可靠性实测结论。[Architecture：profiles and bundles](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)
 
-Codex 的 CLI/TUI 消费 thread/turn/item、approval、exec 和 token 事件，再把它们渲染成终端视图。因为事件来自 app-server，UI 不应该自己推断工具是否完成；它只依据结构化状态更新。多客户端也意味着同一事件必须能被不同显示层解释。
+它与 Codex App Server 的侧重点不同。Codex 先固定 thread/turn/item 和客户端协议，再让多个产品表面复用 Harness；DeepSeek Harness 先把运行时本身拆成可组合服务，再由 profile 决定宿主。前者更关注稳定驱动面，后者更关注运行时可重组性。两者都需要实测断线、并发和审批语义，不能凭架构图推导质量排名。
 
-### Pi：TUI 消费 agent events 和 session
+DeepSeek Harness 目前仍是 developer preview，README 提醒会有兼容性破坏；`SAFETY.md` 明确表示尚未经过安全审计，不能视为安全或生产就绪。[README](https://github.com/deepseek-ai/deepseek-harness)；[SAFETY.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md) profile 中出现 sandbox 与 approval 插件，也不能替代外部隔离和生产安全评估。
 
-Pi 的 TUI 订阅流式 agent events，把 assistant delta、tool call、progress、compaction 和错误显示出来；session 负责长期历史，UI 负责当前视图。它的实现更接近“事件驱动终端”，可以替换主题、组件或宿主。
+## 谁负责等待、断线和并发
 
-### 对比结论
+宿主状态最容易在三种时刻暴露问题。第一种是审批：如果运行时在等待，UI 必须准确展示请求、来源和作用范围；客户端消失后，服务端要决定继续等、超时还是取消。Codex 的双向协议让服务端能主动请求审批并暂停 turn；Pi RPC 把扩展 UI 交互建模为请求/响应。[Codex App Server](https://openai.com/index/unlocking-the-codex-harness/)；[Pi RPC](https://pi.dev/docs/latest/rpc)
 
-Claude Code 把 React/Ink 组件树用于复杂交互；Codex 把 App Server 事件作为 UI 协议；Pi 用轻量事件与 session 维持可替换 TUI。三者都避免让模型输出的文本直接成为终端状态机。
+第二种是断线。真正的远程运行不能把浏览器内存当真相源。保存 thread 只解决事件恢复，还要检查工作环境是否存活、工具是否可重试、审批是否仍有效。第三种是并发：两个客户端同时向同一会话发送输入时，系统必须定义排队、拒绝或分叉，而不是让事件静默交错。
 
-### 验证动作
+状态所有权还决定取消语义。用户在 IDE 点击停止时，究竟只停止界面流式显示，还是取消服务端 turn 和正在运行的子进程？取消消息若在断线后迟到，运行时又怎样避免把已经完成的结果误标为中断？这些行为需要从事件记录和实际进程中核对，不能只凭按钮动画判断。
 
-在 token 流进行中触发一个工具进度，再取消；确认中间文本、工具状态、取消提示和最终结果不会互相覆盖，也不会因终端刷新丢掉 session 记录。
+Claude Code 的会话文档甚至提醒，同一 session 在两个终端同时恢复而不分叉时，消息会交错写入同一 transcript。[Claude Code Sessions](https://code.claude.com/docs/en/sessions) 这是一个很具体的边界：能同时打开，不代表具备安全的多客户端并发控制。
 
-## Section 33｜终端编辑状态如何解析
+## 选择宿主时看责任归属
 
-### Claude Code：按键是状态机输入，不是字符替换
+如果你主要在一个终端里工作，优先看本地会话是否透明、进程中断后能否恢复、文件状态是否容易核对。频繁在 CLI 与 IDE 之间切换时，要确认两者是否驱动同一 thread，还是各自复制上下文。要把任务放到云端运行，则应验证关闭客户端后谁继续执行、怎样重连、凭据与代码环境由谁保存。
 
-33 处理字符与控制信息、绑定与组件动作、候选前缀线性扫描、全局 ChordInterceptor、上下文/终端保留键冲突校验，以及 Vim 的两个顶层模式。Esc 由 Vim 模式直接处理；operator-pending 推进动作，motion 计算与文本修改分开，两套 pending 状态避免互相踩踏。
+可以用一次故意断线做最小验收。在入口 A 发起会修改两个文件并运行测试的任务，等它进入工具执行后关闭窗口；从入口 B 重连，检查 thread 标识、已完成 item、未决审批和工作树是否一致。随后同时打开两个客户端，各提交一条互斥指令，观察系统是排队、拒绝、分叉还是交错执行。最后重启承载进程，再确认它能否区分“历史可读”和“任务仍在运行”。
 
-这样做的价值是：compact、interrupt、history、completion 等命令都能在明确的交互状态下触发，不会把一个控制序列误当成普通文本。按键系统也是宿主控制平面的一部分，因为它决定何时把输入送给模型、何时改变本地运行状态。
+这组测试会暴露界面演示看不到的问题。若新客户端只能看到最终文字，却看不到工具与审批事件，它无法可靠接管；若 thread 恢复了，临时进程和凭据却已经消失，运行状态也没有真正恢复；若两个客户端都能写入但没有并发规则，所谓共享状态反而增加误操作概率。把这些结果记录下来，再谈跨端体验是否成立。
 
-### Codex CLI：快捷键改变宿主状态，不改变模型权限
+Claude Code 提供集成式工作台与明确的本地、云端迁移入口；Codex 用 App Server 把持久 thread 和事件协议放到客户端之下；Pi 给集成者 TUI、RPC、SDK 三种合同；DeepSeek Harness 允许 profile 重组宿主与运行时。[Claude Code Sessions](https://code.claude.com/docs/en/sessions)；[Codex App Server](https://openai.com/index/unlocking-the-codex-harness/)；[Pi Documentation](https://pi.dev/docs/latest)；[DeepSeek Harness Architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md) 选择结果取决于你愿意承担哪一层状态管理，而不是哪家界面最多。
 
-Codex CLI 的键绑定/命令层负责输入编辑、取消、审批、切换视图和终止 turn。无论用户通过键盘还是协议请求触发取消，最终都要进入同一 host/runtime 控制路径；快捷键本身不能绕过 approval 或 sandbox。
+下一篇会沿着这个边界继续：当你要加入数据库工具、项目规则或自定义审批时，应该扩展既有 Harness，还是替换运行时的一部分。
 
-### Pi：TUI/扩展提供可配置输入层
+## 资料来源
 
-Pi 的交互层支持命令、编辑、历史和扩展快捷键，输入事件再决定是本地操作还是提交 agent。它的可配置性适合不同工作流，但如果扩展注册冲突键或直接调用高权限工具，宿主需要提供冲突检查与确认策略。
-
-### 对比结论
-
-Claude Code 对 chord/Vim 状态建模最细；Codex 把按键视为 host protocol 的一个入口；Pi 把编辑器能力留给 TUI/扩展。好的快捷键实现必须有明确的“本地处理”和“送入 agent”分界。
-
-### 验证动作
-
-在普通输入、Vim normal/operator-pending、工具运行中和权限弹窗中分别按 Esc、Ctrl-C、compact 与自定义 chord，检查每种状态下动作是否一致且可取消。
-
-## Section 34｜无头 SDK 与结构化输入输出如何工作
-
-### Claude Code：headless 仍保留 AppState 和同一个 ask()
-
-34 把 `claude -p`、SDK 和 structured IO 拆开：入口先决定是否挂载 REPL，用户输入统一成 SDK user message，中间仍通过同一个 `ask()`，三种输出格式共享执行逻辑。`stream-json` 必须保护 stdout，把日志/诊断和协议输出分开；非交互权限按宿主类型分流。
-
-无头运行没有 UI 替用户做确认，因此安全责任交给调用方。结构化输出还要求使用者处理 tool events、result reason、usage、错误和取消，而不是只取最后一段文字。AppState 被保留，是为了让无头与交互模式使用同一套状态语义。
-
-### Codex CLI：App Server/JSON-RPC 原生适合无头调用
-
-Codex 的 thread/turn/item 协议本身就是结构化 IO：客户端发送请求，订阅事件，处理 approval、exec、message 和终态。CLI 只是一个客户端，其他程序可以用同一协议构造自动化流程。背压、取消和错误要作为协议事件处理，而不是混入 stdout。
-
-### Pi：agent loop 可嵌入，coding-agent 提供脚本/服务入口
-
-Pi 的 core 可以由 Node/TypeScript 宿主直接调用，事件流和 session 记录提供结构化结果；coding-agent 再提供 TUI、RPC 或脚本入口。调用方可以只订阅最终 message，也可以完整处理 tool/usage/error 事件，取决于可靠性要求。
-
-### 对比结论
-
-Claude Code 把交互与 headless 收敛到 QueryEngine/AppState；Codex 把无头能力直接做成 App Server/JSON-RPC；Pi 把可嵌入 loop 与应用入口分开。三者都提醒我们：headless 不是“去掉 UI”，而是把 UI 隐含承担的取消、权限、输出分流和错误处理显式交给调用者。
-
-### 验证动作
-
-用脚本调用一次会产生工具调用的任务，严格解析 stdout；注入一条诊断日志、一次权限询问和一次取消，确认结构化协议没有被普通文本污染，调用方能区分终态 reason。
-
-## 这一主题的共同答案：宿主是控制平面的观察面
-
-TUI、IDE、SDK 和远程客户端并不是 Agent 的装饰层，它们决定了用户能否看到并改变以下状态：当前 turn、工具进度、权限询问、后台任务、取消、压缩、错误和最终结果。Claude Code 用 AppState + Ink/SDK 共享内核，Codex 用 App Server + JSON-RPC 共享事件，Pi 用 core/session/events 共享能力。
-
-如果结构化 IO 只输出最终答案，外部程序就不能可靠地编排、重试和审计；如果 TUI 自己猜测状态，显示就会和执行脱节。宿主的第一原则是：展示层可以投影状态，但不应创造另一套状态。
-
-## 本主题覆盖清单
-
-本篇覆盖 31、32、33、34，共 4 个独立 comparison sections。主题 01–05 累计覆盖 36 个 Claude Code 章节。
-
-## 下一篇
-
-宿主边界清楚后，继续看系统如何被配置和运维：provider、认证、模型路由、远程连接、成本与日志，以及升级时哪些状态必须迁移。
+- [Claude Code：Manage sessions](https://code.claude.com/docs/en/sessions)
+- [Claude Code：Use Claude Code on the web](https://code.claude.com/docs/en/claude-code-on-the-web)
+- [OpenAI：Unlocking the Codex harness](https://openai.com/index/unlocking-the-codex-harness/)
+- [Pi：Documentation](https://pi.dev/docs/latest)
+- [Pi：RPC Mode](https://pi.dev/docs/latest/rpc)
+- [Pi：SDK](https://pi.dev/docs/latest/sdk)
+- [Pi：Sessions](https://pi.dev/docs/latest/sessions)
+- [DeepSeek Harness：Architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)
+- [DeepSeek Harness：README](https://github.com/deepseek-ai/deepseek-harness)
+- [DeepSeek Harness：SAFETY.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md)

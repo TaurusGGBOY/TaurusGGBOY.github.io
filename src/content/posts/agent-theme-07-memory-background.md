@@ -1,9 +1,9 @@
 ---
-title: "Agent主题对比07｜记忆与后台智能"
+title: "Agent主题对比07｜多 Agent 是委派工具还是组织系统"
 published: 2026-08-12T10:07:00+08:00
-updated: 2026-08-12
-description: "比较三个 Agent 的 session memory、团队记忆、压缩摘要与后台 Agent 边界。"
-tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi"]
+updated: 2026-08-28
+description: "区分上下文隔离、并行委派、持续团队与 A2A 跨产品协作，并比较 Claude Code、Codex、Pi、DeepSeek Harness 的适用边界。"
+tags: ["agent-theme-comparison", "ai-agent", "multi-agent", "claude-code", "codex", "pi", "deepseek-harness"]
 category: "AI / Architecture"
 draft: false
 image: "/images/posts/agent-theme-07-memory-background/claude-code-source-reading-00.png"
@@ -12,150 +12,97 @@ slug: "agent-theme-07-memory-background"
 series: "agent-theme-comparison"
 order: 7
 difficulty: "advanced"
-time: "40 min"
+time: "22 min"
 prerequisites:
-  - "Agent主题对比 03｜上下文、安全、恢复与会话"
-  - "Agent主题对比 06｜配置、Provider、远程与运维"
+  - "Agent主题对比 04｜长任务怎样保持上下文并恢复"
+  - "Agent主题对比 06｜扩展能力应该装插件还是改运行时"
 topics:
-  - "session memory"
-  - "team memory"
-  - "background agents"
-  - "AutoDream"
-  - "Kairos"
-source_modules:
-  - "restored-src/src/services/SessionMemory"
-  - "restored-src/src/memdir"
-  - "restored-src/src/services/autoDream"
-  - "restored-src/src/assistant"
-  - "codex-rs/core/src"
-  - "packages/coding-agent/src"
+  - "multi-agent delegation"
+  - "context isolation"
+  - "agent teams"
+  - "A2A interoperability"
+  - "Claude Code"
+  - "Codex"
+  - "Pi"
+  - "DeepSeek Harness"
 status: "verified"
-verified_at: "2026-08-12"
+verified_at: "2026-08-28"
 ---
 
+多 Agent 没有一个通用开关。把搜索结果移出主上下文、同时派出三个任务、维持一支长期团队、调用另一家公司托管的 Agent，是四种不同问题。先判断你需要哪一层，再选择 subagent、workflow 或 A2A；层次选错，增加的往往是冲突、等待和审计成本。
 
-> 记忆不是把旧聊天全部塞回 prompt，后台 Agent 也不是另一个隐形主循环。两者都需要作用域、触发门槛、持久化格式、失败边界和用户可见的回路。
+想象一次跨仓库升级：主 Agent 让一个助手查兼容性，让另一个助手改代码，再让第三个助手审查。看起来像“三人团队”，但三个助手可能只运行几分钟，结束后也不保留共同目标、成员关系或持续任务状态。这里真正发生的只是委派。
 
-本篇覆盖 Claude Code 源码解读 40–43：session memory、Memdir/team memory、AutoDream、Kairos/assistant mode。比较的重点是主 Agent 结束后哪些状态可以被提炼、谁能在后台继续运行，以及这些结果如何回到下一次会话。
+## 四种协作解决四种事故
 
-![Agent 记忆与后台智能](/images/posts/agent-theme-07-memory-background/agent-theme-07-memory-background-handdrawn.png)
+把“多 Agent”拆开，选型会清楚很多。
 
-## Section 40｜如何从会话中提炼知识
+| 层次 | 要防的事故 | 最小机制 |
+| --- | --- | --- |
+| 上下文隔离 | 搜索日志、测试输出挤掉主任务约束 | 独立上下文，只回传摘要或结果 |
+| 并行委派 | 可独立子任务串行执行，白白等待 | 并发运行、结果汇合、取消和超时 |
+| 持续团队 | 多个执行者重复劳动、互相覆盖或无人收尾 | 共享目标、任务所有权、消息、冲突处理 |
+| 跨产品互操作 | 不同组织和技术栈无法发现、调用、跟踪彼此 | 可发现身份、任务生命周期、认证和产物协议 |
 
-### Claude Code：Session Memory 是受限的项目记忆管道
+这四层可以叠加，却不能互相替代。独立上下文不会自动解决文件冲突；同时启动多个进程也不会产生团队责任；给内部 subagent 套上网络协议，更不会补出可靠的任务分配。
 
-40 的 Session Memory 以项目和会话划定作用域；启动时只注册 hook，不立刻生成记忆；是否提炼受 token 等硬条件控制；文件第一次出现时先建立结构，再让 agent 编辑；更新由受限 fork 独立执行；完成后用两个游标记录写到哪里；压缩时记忆文件再回到上下文。
+## 上下文隔离适合一次性委派
 
-这条链把“记忆”放在会话日志之外：它是从已发生对话提炼出的辅助上下文，不是对 transcript 的替代。恢复会话时文件仍在，但边界可能已经变了，因此记忆读取不能绕过当前 project trust、权限和上下文预算。失败时记忆应退化为缺失，不应阻塞主任务。
+最常见的 subagent 价值很朴素：让副任务产生的噪声留在另一个上下文里。Claude Code 的[官方 subagent 文档](https://code.claude.com/docs/en/subagents)明确写到，每个 subagent 使用自己的上下文窗口、系统提示、工具和权限，完成后把结果交回主会话。它适合代码搜索、日志分析、测试排查这类“过程很长，结论很短”的工作。
 
-### Codex CLI：AGENTS/skills 是持久说明，自动记忆要另行核验
+隔离也会丢信息。主 Agent 若只收到“已检查，没有问题”，无法知道助手查了哪些文件、跳过了哪些假设。可靠的委派需要写清输入、期望产物和失败条件。结果最好是可核对的文件、命令输出或引用，而不是一句信心很足的总结。
 
-Codex 的固定源码和官方材料明确支持项目级 `AGENTS.md`、skills 元数据与 thread history，它们可以把团队约定带入后续 turn。但“自动从会话提炼并写回 memory”的完整产品链不能只从 agent loop 推断；应以具体实现和配置为准。
+一个实用判断是看副任务的“过程与结论之比”。阅读几十份日志后只需返回三条异常，适合隔离；修改核心接口并持续响应调用方反馈，则不适合切断上下文。委派说明还应包含禁止触碰的范围、可用工具、验证命令和回传格式。这样做不是为了写更长提示，而是让主 Agent 能判断结论来自完整检查、局部抽样，还是工具受限后的推断。上下文隔离节省的是注意力，不能同时省掉证据。
 
-这个区别很重要：静态项目 instructions 是用户维护的事实来源，自动 memory 是模型加工后的二手资料，二者的可信度和更新策略不同。
+Pi 选择把核心保持在较小范围。[Pi 官方定位](https://pi.dev/)是“minimal agent harness”，而[扩展示例](https://pi.dev/docs/latest/extensions)把 subagent 放在可选 extension 中。这个取舍适合愿意自己定义委派语义的人：你能决定子进程、工具和返回格式，也要自己承担超时、取消、权限继承和结果合并。
 
-### Pi：session history 与 compaction summary 是可追踪记忆
+## 并行不等于团队
 
-Pi 的 session JSONL/tree、CompactionEntry 和 BranchSummaryEntry 会保留目标、决策、文件和下一步，是一种显式的工作记忆。coding-agent 也可以通过项目资源、skills 或扩展维护长期说明。Pi core 没有强制一个后台“自动提炼记忆”服务。
+并行委派只有在任务真正独立时才省时间。让三个 Agent 同时研究三个库，通常合理；让三个 Agent 同时修改同一配置文件，合并成本可能高过串行执行。开始并发前，应给每个任务一个互不重叠的写入边界，或者让研究者只读、实现者独占写入、审查者等待变更完成。
 
-因此 Pi 的默认记忆更透明：用户知道哪些 entry 被写入，想要自动归纳可以增加扩展；但扩展生成的知识必须标明来源，不能把摘要当作未经验证的事实。
+Claude Code 的公开文档把单会话 subagent、独立后台会话和 agent team 分成不同入口，[subagent 页面](https://code.claude.com/docs/en/subagents)也明确提示：多个独立会话并行、跨会话传递消息、由 Claude 组织团队，属于不同能力。这个区分很重要。一次 Agent 工具调用可以隔离上下文，却不必然拥有持续成员、团队邮箱或共同待办。
 
-### 对比结论
+并行之前还要识别隐藏依赖。两个 Agent 即使修改不同文件，也可能同时改动同一数据库迁移顺序、生成同一份锁文件，或基于不同版本的接口假设工作。任务图比 Agent 数量更值得先画：没有依赖的节点可以同时开始，消费上游产物的节点必须等待，可能争用共享状态的节点需要独占或明确合并者。取消同样是并行机制的一部分；上游方案被否决后，继续运行的下游 Agent 只会制造过期产物和额外费用。
 
-Claude Code 把 session memory 变成受限后台管道；Codex 主要依赖显式 instructions/thread，需要区分已确认和未确认能力；Pi 把 session/summary 做成可审计基础，自动化留给扩展。记忆系统的第一指标是“能否删掉/纠正”，而不是“记住得越多越好”。
+OpenAI 分享的 Codex 工程实践更接近围绕交付物编排工作流：Agent 本地自审，再请求特定 Agent 审查，处理反馈，循环到审查通过。[这是一项特定仓库与工具环境中的工程案例](https://openai.com/index/harness-engineering/)，OpenAI 也提醒其效果依赖仓库结构，不能直接外推成 Codex 在任意项目上都能自治。它说明“多 Agent”可以由测试、评审和反馈循环组成，不要求把参与者包装成一支常驻团队。
 
-### 验证动作
+## 持续团队需要状态和责任
 
-完成一个包含失败和修复的任务，检查下一次会话带入的是经过验证的结论、来源文件和时间范围，而不是把中间猜测原样写进长期记忆。再删除 memory 文件，确认主 Agent 仍能正常启动。
+当工作跨越数小时、多个分支或多次人工介入，问题从“能否启动助手”变成“谁拥有下一步”。持续团队至少要回答四件事：任务由谁领取，成员如何报告进度，冲突由谁裁决，成员退出后状态留在哪里。
 
-## Section 41｜Memdir 与团队记忆如何检索和同步
+这也是组织系统比并行工具昂贵的地方。每个成员都需要上下文和模型调用；共享消息会进入新的上下文；主 Agent 要等待、重试和整合。团队规模扩大后，最稀缺的资源可能不再是生成 token，而是人能否看懂每个成员做过什么。
 
-### Claude Code：目录、索引与主题文件构成存储协议
+持续团队还需要一个可恢复的事实面。聊天记录可以解释过程，却不适合单独承担任务状态；分支和文件保存产物，却不说明谁在等待谁。较稳妥的组合是把目标、负责人、依赖、验收和阻塞原因写进结构化任务状态，把讨论留在消息里，把可交付结果落到版本化工件中。成员重启后应先读取这些事实，再决定是否继续，而不是凭一段压缩摘要猜测团队现状。
 
-41 把 memdir 拆成目录、索引和主题文件。项目作用域由路径决定；两个开关分别控制总能力和共享能力；prompt 要求模型区分 private/team；prompt 里还包含创建、更新、索引和引用的小型存储协议。注入通过索引与相关记忆两条路径限流，年龄只触发复核提示；Team Memory 启动先 pull，再 watch。
+责任边界也要覆盖失败。负责实现的人不能同时以“我已经完成”为唯一验收者；审查者发现问题后要把任务退回明确负责人；两名成员产生冲突时，要有一个能够选择方案或请求人工决策的角色。没有这些规则，所谓团队只是多条会话并排运行，失败会在汇总阶段集中暴露。
 
-Pull 与 Push 使用不同冲突语义；密钥扫描和路径校验守住共享边界；失败时可以继续主流程但应报告记忆同步缺失。这比“把一个团队 Markdown 放到 system prompt”更像一个小型数据库：有作用域、索引、冲突和安全规则。
+DeepSeek Harness 把 subagent 后端抽象成 provider。[官方 subagent 文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/subagent.md)说明多个 provider 可以并存，provider 可代表进程内 spawn、继承历史的 fork 或远程 ACP 传输，并在启动前声明能力，不支持的请求应直接失败。这给异构编排留下了接口，也把兼容性、生命周期和错误语义带进了运行时。
 
-### Codex CLI：共享知识通常由仓库/指令和 host 维护
+这项能力受项目状态约束。DeepSeek Harness 的 [README](https://github.com/deepseek-ai/deepseek-harness)仍将项目标为 developer preview，并明确提示会发生破坏性兼容变更；[安全说明](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md)称项目尚未经过安全审计，不能视为安全或生产就绪，也不能作为不可信任务的唯一安全控制。可重组 provider 是公开设计，不是已经证明优于其他团队机制的结果。
 
-Codex 的 `AGENTS.md`、skills、仓库文档和 worktree 让团队约定随着项目版本控制；多客户端/thread 可以共享 app-server 状态，但固定源码不足以证明一个等价的 memdir/team sync 产品。若要实现，应把 pull/push、冲突、secret 扫描和权限作为独立层。
+## A2A 只处理跨产品边界
 
-### Pi：项目资源与扩展可以实现团队记忆
+当采购 Agent、代码 Agent 和工单 Agent 分属不同厂商，调用方无法共享内部进程、工具注册表或完整会话。这时才进入 A2A 的问题域。[A2A 官方说明](https://a2a-protocol.org/latest/)把它定义为独立 Agent 之间的通信层，并明确说它不是内部 subagent 或工具调用协议。
 
-Pi 可以读取项目资源和扩展维护的文件，session branch 让团队共享任务轨迹；但 core 不内置一个强制的 pull/watch/team memory 协议。共享记忆的同步、密钥扫描、路径白名单和冲突解决由宿主设计。
+A2A 关心的是远程 Agent 如何公布身份与能力、接受有状态任务、返回消息和产物，以及调用方怎样认证和跟踪进度。它不决定远程 Agent 内部用 Claude Code、Codex、Pi 还是 DeepSeek Harness，也不替远程系统设计沙箱、任务拆解或完成验证。
 
-### 对比结论
+因此，单仓库内的研究助手没有必要为了“标准化”先上 A2A。只有当边界两侧需要独立部署、独立升级、独立授权，协议成本才有回报。把内部函数调用过早升级成跨产品协议，会增加版本协商、认证、重试和观测面，却没有防止新的具体事故。
 
-Claude Code 在源码中把 private/team memory 的作用域与同步边界写得最具体；Codex 更依赖 Git/AGENTS/host 这一类显式来源；Pi 提供可实现的扩展点但不预设治理。团队记忆不是普通上下文，必须有写入资格和冲突规则。
+## 选择从最小层次开始
 
-### 验证动作
+如果副任务只会污染主上下文，使用一次性 subagent；如果几项工作互不写同一状态，再增加并发；如果成员要跨会话协作，补上任务所有权、消息和恢复；如果边界跨越团队或厂商，再评估 A2A。
 
-让两个会话同时修改同一主题记忆，另一个会话 pull；检查是否能检测冲突、拒绝密钥、限制路径并保留来源。再关闭共享能力，确认 private memory 不会被推送。
+落地时可以从一次两小时内能验收的任务试起。记录主 Agent 等待了多久、子任务返回了什么证据、是否发生重复搜索或写入冲突、失败后能否取消和恢复。若一次性委派已经稳定完成工作，就没有必要为了“更像组织”引入成员目录和共享消息；若人工一直在转发状态、协调所有权，才说明机制需要上升一层。每次升级都应对应一个已经出现或高度可预见的事故。
 
-## Section 42｜AutoDream 如何在后台自动整合记忆
+四个项目的取向也由此变得具体：Claude Code 提供从 subagent 到团队的集成入口；Codex 的公开案例强调围绕测试和评审构成执行循环；Pi 把编排留给 extension 与操作者；DeepSeek Harness 把异构 child transport 纳入可替换 provider。没有哪一种抽象天然更高级。能用最小机制防住当前事故，才是合适的层次。
 
-### Claude Code：Dream 有五道门和四阶段提示词
+## 本文引用
 
-42 先区分本地 Team Memory 与远端同步，再检查 `TEAMMEM` 构建能力、账号灰度开关和第一方 OAuth。真正触发 Dream 时，还要通过运行模式/开关、距离上次成功时间、十分钟扫描节流、最近会话变化量和跨进程锁五道门。
-
-Dream 用四阶段 prompt 维护记忆，后台 Agent 复用内核但更换权限和持久化边界；DreamTask 把不可见 fork 变成可取消状态；成功、失败和终止都要正确处理锁；结果再进入未来会话。它不是“每次退出都总结”，而是一个带节流、锁和失败回收的维护任务。
-
-### Codex CLI：后台维护需要由 host 明确调度
-
-Codex 的 turn/exec/session 结构可以支持后台总结或维护任务，但固定源码与官方材料主要证明 agent loop、compact 和 host protocol，不自动证明一个 AutoDream 等价物。若宿主实现，必须重新定义 sandbox、模型调用预算、锁、可取消性和结果写入权限。
-
-### Pi：后台 compaction/branch 机制可扩展，但默认不隐式运行
-
-Pi 的 compaction 和 branch summary 是明确触发的 session 操作，扩展可以在 session event 后启动整理任务。由于扩展同进程运行且没有内置 sandbox，后台写入 memory、调用网络或运行 shell 的风险必须由宿主控制。
-
-### 对比结论
-
-Claude Code 把后台记忆维护做成受门槛和锁保护的 task；Codex 提供可编排的 runtime primitives；Pi 提供扩展点而不隐式替用户启动后台 Agent。后台智能的可信度来自“什么时候不运行”以及“运行后能写到哪里”。
-
-### 验证动作
-
-连续结束两次会话、跨过节流窗口、模拟并发进程和中途取消，检查 Dream/后台任务是否只运行一次、是否释放锁、是否留下可解释状态，主 Agent 是否完全可用。
-
-## Section 43｜辅助模式如何区别于主 Agent
-
-### Claude Code：Kairos 把主动规划接回主 Agent，而不是伪装成新产品
-
-43 把辅助模式拆成开关、显式设置与目录信任；主动规划的本质是给同一个 Query Loop 更多再次运行机会；记忆先读取蒸馏结果，新事实写 daily log；提醒由 Cron 保存未来 prompt；后台 Agent 完成后，主 Agent 还要再次判断；SendUserMessage 提供用户出口；执行端与 Viewer 分开。
-
-权限、优先级和失败边界仍与主 Agent 分开说明。Sleep 的 prompt 是把等待交给调度器，不是让模型无限循环。辅助模式的价值是提高长期任务的连续性，风险则是后台动作可能在用户离开后改变环境，所以必须有明确通知、权限和停止点。
-
-### Codex CLI：后台/远程控制要保持 host 可见
-
-Codex 的 app-server 让 turn、exec、approval 和结果对客户端可观察；若宿主安排后台 turn，必须保留 thread ownership、sandbox/approval profile、取消和事件回流。模型自行决定再次唤醒，不能替代 host 的调度政策。
-
-### Pi：扩展可以实现 assistant mode，但责任更外置
-
-Pi 的事件、session、cron/RPC 和 extension API 足以组合长期助手；扩展可以在未来 prompt 到达时启动 agent loop，并把结果写入 session 或通知用户。默认 core 不会为后台模式提供完整的权限、隔离和远程控制，部署者需明确补上。
-
-### 对比结论
-
-Claude Code 把 Kairos 的主动性仍挂在主 Query Loop、memory、task 和用户消息边界上；Codex 用 thread/host protocol 保持后台 turn 可见；Pi 让扩展自由组合。辅助 Agent 的判定标准不是“能不能自动运行”，而是用户能否知道它为何运行、改了什么、怎样停止。
-
-### 验证动作
-
-创建一个只读提醒和一个会修改文件的后台任务，分别测试定时触发、用户通知、取消、权限和断线。确保后台任务不能借用主会话的临时授权，也不会把结果静默写回生产目录。
-
-## 这一主题的共同答案：记忆和后台任务必须彼此制约
-
-记忆决定未来会话看见什么，后台任务决定现在会发生什么；如果两者没有边界，错误会被自动写入并自动执行。一个可信实现至少要有：
-
-- 作用域：项目、会话、用户、团队和远端空间分别是什么。
-- 触发：token、时间、变化量、显式命令或调度器何时满足。
-- 写入：能写哪些文件，是否扫描 secret，是否需要用户确认。
-- 恢复：失败、取消、锁冲突和重启后如何继续或放弃。
-- 可见性：用户怎样看到来源、变更、权限和后台状态。
-
-Claude Code 源码在这组能力上最接近完整后台系统；Codex 的核心更像可编排的线程/执行基础设施；Pi 的核心最适合搭建实验性后台 Agent，但默认不替应用承担隔离和治理。
-
-## 本主题覆盖清单
-
-本篇覆盖 40、41、42、43，共 4 个独立 comparison sections。主题 01–07 累计覆盖 45 个 Claude Code 章节。
-
-## 下一篇
-
-最后一篇处理 44–48：Buddy、voice、MagicDocs、通知/mailbox、输出风格和系列收束。它会把剩下 5 个章节放进体验层，并给出 8 个主题、50 个 section 的完整目录。
+- [Claude Code：Create custom subagents](https://code.claude.com/docs/en/subagents)
+- [OpenAI：Harness engineering](https://openai.com/index/harness-engineering/)
+- [Pi Coding Agent](https://pi.dev/)
+- [Pi Extensions](https://pi.dev/docs/latest/extensions)
+- [DeepSeek Harness：Subagent subsystem](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/subagent.md)
+- [DeepSeek Harness README](https://github.com/deepseek-ai/deepseek-harness)
+- [DeepSeek Harness Safety](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md)
+- [A2A Protocol](https://a2a-protocol.org/latest/)

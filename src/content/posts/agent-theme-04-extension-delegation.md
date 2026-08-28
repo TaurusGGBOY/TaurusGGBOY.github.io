@@ -1,9 +1,9 @@
 ---
-title: "Agent主题对比04｜扩展、委派与多 Agent"
+title: "Agent主题对比04｜长任务怎样保持上下文并恢复"
 published: 2026-08-12T10:04:00+08:00
-updated: 2026-08-12
-description: "比较三个 Agent 的 commands、skills、tasks、subagents、teams、MCP、plugins、LSP 与宿主扩展。"
-tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi"]
+updated: 2026-08-28
+description: "比较 Claude Code、Codex、Pi 与 DeepSeek Harness 如何压缩上下文、保存会话、分叉路径并让长任务安全恢复。"
+tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi", "deepseek-harness", "context-engineering", "session-recovery"]
 category: "AI / Architecture"
 draft: false
 image: "/images/posts/agent-theme-04-extension-delegation/claude-code-source-reading-00.png"
@@ -12,294 +12,112 @@ slug: "agent-theme-04-extension-delegation"
 series: "agent-theme-comparison"
 order: 4
 difficulty: "advanced"
-time: "60 min"
+time: "18 min"
 prerequisites:
-  - "Agent主题对比 02｜消息、工具与副作用"
-  - "Agent主题对比 03｜上下文、安全、恢复与会话"
+  - "Agent主题对比 01｜为什么不能只比模型"
+  - "Agent主题对比 02｜一次 Agent 任务怎样跑完"
 topics:
-  - "commands"
-  - "skills"
-  - "subagents"
-  - "agent teams"
-  - "MCP"
-  - "plugins"
-  - "LSP"
-source_modules:
-  - "restored-src/src/commands"
-  - "restored-src/src/tools/AgentTool"
-  - "restored-src/src/services/mcp"
-  - "restored-src/src/utils/plugins"
-  - "restored-src/src/services/lsp"
-  - "codex-rs/core/src"
-  - "packages/coding-agent/src/core/extensions"
+  - "context engineering"
+  - "session persistence"
+  - "compaction"
+  - "resume and fork"
+  - "handoff artifacts"
+  - "memory trust"
+  - "DeepSeek Harness"
 status: "verified"
-verified_at: "2026-08-12"
+verified_at: "2026-08-28"
 ---
 
+答案很明确：长任务不能只靠更大的上下文窗口。真正能让工作跨越数小时、进程中断和多次会话的，是高信号上下文、持续保存的会话记录、可检查的交接物，以及能恢复也能分叉的执行路径。记忆可以帮忙，但必须允许人查看、修正和删除。
 
-> 扩展系统的核心不是“再加几个工具”，而是把能力接进控制平面，并说明它从哪里来、什么时候可见、能改变什么、失败后谁负责。
+想象一次数据库迁移：Agent 已改完三处调用，测试还剩两组，窗口却接近上限；你合上电脑，第二天再继续。如果它只“记得聊过什么”，却不知道哪些文件已验证、哪个假设被推翻、下一步应运行什么命令，恢复出来的只是一次看似连续的新任务。
 
-本篇覆盖 Claude Code 源码解读 21–30：command、skill、task、subagent、team、plan/worktree、MCP、plugin、LSP，以及浏览器/IDE 外部宿主。重点是比较这些扩展和委派机制各自引入的契约：路由、能力发现、信任、生命周期和失败责任。
+## 大窗口装不下任务的真实状态
 
-![Agent 扩展、委派与多 Agent](/images/posts/agent-theme-04-extension-delegation/agent-theme-04-extension-delegation-handdrawn.png)
+上下文窗口保存的是当前一次模型调用能看到的材料，不等于项目状态。长任务至少有四类信息：需求与禁区、已经采取的动作、外部环境的当前结果、下一次接手所需的进度说明。它们的寿命不同，也不该全塞进聊天记录。
 
-## Section 21｜用户如何进入不同执行流程
+Anthropic 对 context engineering 的定义强调寻找“尽可能小的一组高信号 token”，而不是把能找到的材料全部装进去；其长任务实践则要求当前会话为下一次会话留下清晰产物，例如进度文件、提交记录和可运行的测试状态。[Effective context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)；[Effective harnesses for long-running agents](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)
 
-### Claude Code：Command 首先是一种显式路由
+这给出一个实用分工：窗口负责眼前决策，会话记录负责追溯，仓库或任务系统里的交接物负责接班，测试和运行结果负责证明现实。压缩只能缩短第一类信息，无法代替后三类。
 
-21 说明 command 不是“把斜杠文本替换成 prompt”。命令表由内置、插件、skill 等多类来源装配；解析器先拆名字和原始参数，再根据交互/无头/远程模式判断斜杠是否有特殊含义；查找同时接受内部名、显示名和别名。handler 可能直接处理、改写输入、打开交互流程，或把请求送入 Query Loop。
+| 载体 | 适合保存 | 失效方式 |
+| --- | --- | --- |
+| 当前上下文 | 眼前目标、相关文件、最近反馈 | 达到窗口上限或被无关输出淹没 |
+| 会话记录 | 消息、工具动作、事件顺序 | 记录仍在，但重要状态难以定位 |
+| 显式交接物 | 已完成项、未决风险、复现命令 | 没有及时更新，内容与现实脱节 |
+| 外部验证 | 测试、构建、运行态与提交 | 环境变化后旧结果不再成立 |
 
-参数替换遵循固定占位符规则，不能把任意字符串当成结构化参数。无头和远程模式还会裁掉不能承接的命令。把 Command、Skill 与 Query Loop 分开，保证入口路由不会偷偷复制一套 agent loop。
+## 四种会话设计保留了什么
 
-### Codex CLI：命令是 host/client 控制面
+四个项目都能延长工作，但它们保存状态的方式不同。差异不在“有没有历史记录”，而在记录的结构、恢复入口和分叉语义。
 
-Codex 的 slash command、CLI flag 和 app-server request 共同形成入口路由。部分命令改变 thread/turn、模型、sandbox 或 approval，部分命令只是查询或展示。真正执行代码的工具调用仍要经过 turn/runtime，而不是因为用户输入以 `/` 开头就绕过安全策略。
+### Claude Code：连续 transcript，加可重载的说明
 
-### Pi：commands 由 coding-agent 和扩展提供
+Claude Code 把 CLI 会话持续写入本地 transcript，支持继续、按名称恢复和从既有历史分叉；恢复沿用原会话，分叉则复制历史并产生新会话 ID。[Claude Code 会话文档](https://code.claude.com/docs/en/sessions) 还把 `/compact` 定义为用摘要替换较早历史，而 `/clear` 会开启空上下文并保留旧会话可供恢复。
 
-Pi 的 TUI/coding-agent 有内置命令、session 命令和扩展命令；扩展可以注册新的命令或响应事件。命令可以只操作 UI/session，也可以把文本送回 agent loop。它的自由度高，宿主需要明确哪些命令改变会话、哪些命令会触发模型或工具。
+这里有一个容易忽略的差别：会话历史说明“发生过什么”，`CLAUDE.md` 和 auto memory 保存的是跨会话仍可能有用的项目知识。官方文档说明项目根目录的 `CLAUDE.md` 会在压缩后重新注入，auto memory 是可读写的 Markdown，用户可以检查、修改或删除。[Claude Code memory](https://code.claude.com/docs/en/memory) 这让记忆可纠正，却不保证其中每条判断都正确。
 
-### 对比结论
+### Codex：持久 thread 与可重放事件
 
-Claude Code 把命令做成受模式约束的路由表；Codex 把命令放进 host/thread 控制面；Pi 把命令作为应用和扩展的组合点。命令系统的安全边界在于：一条入口是否能无意中跳过权限、session 或审计。
+Codex App Server 把持续会话建模为 thread，一次用户请求是 turn，消息、工具执行、审批和 diff 等中间产物是 item。thread 可以创建、恢复、分叉和归档，事件历史会持久化，让客户端重连后重建一致时间线。[OpenAI 对 App Server 的说明](https://openai.com/index/unlocking-the-codex-harness/)
 
-### 验证动作
+这个结构适合把“恢复”拆成两个问题：服务端是否仍持有 thread，以及新客户端是否能接收历史与后续事件。它并不自动证明跨机器、跨产品的每种切换都无缝；能否继续还受运行环境、仓库版本、凭据和客户端能力约束。
 
-分别在 REPL、print 和远程/脚本模式输入同一个命令，记录它是本地处理、送入 loop 还是被禁用。再检查命令改变 model/permissions/session 后，下一次 tool call 是否真的使用了新状态。
+### Pi：JSONL 会话树把岔路留在原地
 
-## Section 22｜提示词如何变成可执行能力
+Pi 将每个会话保存为带树结构的 JSONL 文件。条目带有父子关系，当前叶子代表正在使用的路径；用户可以在同一文件里回到早先节点继续，也可以 fork 或 clone 到新文件。[Pi Sessions](https://pi.dev/docs/latest/sessions) 还允许在离开一条分支时生成摘要，把被放弃路径中仍有用的信息带到新位置。
 
-### Claude Code：Skill 是可发现、可展开的能力说明
+树结构的价值很具体：当方案 A 失败、方案 B 可行时，你不必覆盖原对话才能继续。但分支仍共享同一工作目录中的现实状态。若代码已被方案 A 改过，跳回旧消息并不会自动把文件系统也恢复到那个时刻。
 
-22 把 Skill 拆成发现、frontmatter 元数据、目录清单、用户/模型调用、权限判断、正文展开、参数和 shell 处理、inline/fork 上下文边界。模型先看到目录，不先看到全文；动态发现让 skill 能随文件位置出现；SkillTool 自己也有 prompt budget。
+### DeepSeek Harness：append-only 事件日志
 
-这意味着 skill 不是“多一段 system prompt”，而是一种延迟加载的任务协议。它告诉模型何时调用、需要什么参数、正文展开后怎样影响当前上下文。调用 skill 仍需权限判断，fork 也不会把父上下文和副作用无条件复制给子流程。
+DeepSeek Harness 的 Core 文档把 session 定义为 append-only 的 `SessionEvent` 日志；默认 loop 会把模型可见的事实继续追加到日志，而不是改写既有事件。[Core subsystem](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/core.md) 架构文档同时声明 session log、model adapter、tool registry 和 agent loop 都是可替换插件。[Architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)
 
-### Codex CLI：skills 是 instructions 的可选能力层
+这只是公开架构主张：事件日志有利于追踪顺序和重放，不等于长任务成功率、恢复正确性或性能已经得到独立验证。项目 README 将当前版本标为 developer preview，明确会有破坏兼容性的变化；`SAFETY.md` 说明它尚未经过安全审计，不能视为安全或生产就绪。[README](https://github.com/deepseek-ai/deepseek-harness)；[SAFETY.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md)
 
-Codex 把 skill 元数据放进初始环境说明，模型在需要时读取对应文件/资源并按其中流程工作。官方文章把 skills 与 AGENTS.md 一起视为 harness 提供的可发现能力，而不是模型天然知道的知识。
+## 恢复、回退和分叉不是同一个动作
 
-Codex 的重点是让 skill 与项目环境、cwd 和验证命令配套。若 skill 只提供长文本而没有输入/输出、验证和权限边界，它更像提示词，不像可执行能力。
+凌晨断网后继续原任务，和发现两小时前方向错了，不是同一种恢复。前者要接上原状态，后者要保留证据后另走一条路。再往前一步，如果磁盘、进程或远端环境已经改变，仅恢复对话也不够。
 
-### Pi：skills/资源通过 coding-agent 与扩展组合
+恢复原会话时，应核对工作目录、分支、未提交差异、进程和凭据是否仍与记录一致。分叉时，要明确新路径继承了哪些历史、是否继承权限，以及两条路径会不会同时修改同一份文件。回退则必须有代码快照、版本控制或外部检查点参与，不能从“聊天回到了旧消息”推断“项目也回到了旧状态”。
 
-Pi 的 coding-agent 可加载项目资源、skills、prompt templates 和扩展提供的能力。扩展可以在事件上注入说明，或注册工具完成 skill 所描述的动作。由于 Pi 不强制一种 SkillTool 协议，项目可以保持轻量，也需要自定义发现、信任和参数约定。
+这套能力最好用故障演练验收。让 Agent 在测试执行到一半时退出进程，隔天从新窗口恢复；要求它先报告当前分支、未提交差异、最近验证和下一步，再允许继续。随后从同一检查点分叉两条方案，确认会话标识与工作目录不会混用。只有聊天连续、代码状态却对不上，恢复功能仍不合格。
 
-### 对比结论
+Claude Code 的 resume 与 fork、Codex 的 thread resume 与 fork、Pi 的 tree 与 fork，都在公开界面上表达了这层区别。[Claude Code Sessions](https://code.claude.com/docs/en/sessions)；[Codex App Server](https://openai.com/index/unlocking-the-codex-harness/)；[Pi Sessions](https://pi.dev/docs/latest/sessions) DeepSeek Harness 的 append-only log 则为保留事件顺序提供了结构，但实际回退策略仍取决于装入 profile 的会话、工具和环境插件。[DeepSeek Harness Architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)
 
-三者都在把“领域流程”从主循环里分离出来。Claude Code 的 Skill 协议最完整，Codex 强调环境可读性和按需加载，Pi 强调自由组合。好的 skill 应该同时给出目标、前置条件、动作、验证和失败出口，而不是只写一篇背景介绍。
+## 交接物要比总结更接近现实
 
-### 验证动作
+好的交接不是一段“我做了很多工作”的摘要。接手者需要马上知道：目标是否变化，哪些约束不可破坏，当前仓库处于什么状态，最近一次验证是什么，下一步动作是什么，哪些结论仍只是猜测。
 
-写一个最小 skill，只允许读取两个文件并运行一个测试；检查模型在未调用 skill 时是否能看到完整正文，调用后是否获得正确参数、工具范围和验证要求。
+一个实用的长任务交接物可以很短：任务目标与非目标、已完成变更、失败尝试及原因、未解决问题、精确验证命令、最近结果的时间与环境。它最好放在可版本化、可由人审核的位置，并随着关键状态变化更新。Anthropic 的长任务实践把“给下一会话留下清晰产物”视为连续工作的核心条件，而不是依赖模型从旧对话中自己猜进度。[Effective harnesses for long-running agents](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)
 
-## Section 23｜前台、后台与状态机如何协作
+交接物也不该冒充证据。“测试待跑”不能被压缩成“实现完成”，“怀疑缓存导致失败”不能变成“根因是缓存”。摘要会丢细节，所以其中的状态词必须能回到测试输出、diff、issue 或事件记录。
 
-### Claude Code：Task 描述执行实例与协作事项两条轴
+## 记忆必须能被质疑
 
-23 区分 Task 的执行实例和协作事项：统一状态规定生命周期，但不规定执行算法。创建时生成安全 ID 并注册到 AppState；前台等待和后台运行共用执行实例；状态放内存，大输出放文件；结果优先读取 output file；终态通知再把后台结果送回模型；取消按类型派发；`notified` 控制终态消费。
+跨会话记忆最适合保存稳定且复用频繁的信息，例如构建命令、目录约定、已确认的接口限制。它不适合单独保存一次任务的完成状态、临时环境值或未经验证的根因。这些信息变化太快，错误记忆反而会让下一次会话更自信地走错。
 
-这个设计避免把“后台”误解为 fire-and-forget。后台任务仍必须可观察、可取消、可回收，并且终态只被消费一次。Task prompt 规定的是状态推进协议，不是让模型自己管理进程。
+判断一种记忆机制是否可靠，可以问四件事：谁写入，何时加载，作用域多大，人能否审计和纠正。Claude Code 的 auto memory 采用可编辑 Markdown，并记录项目级加载边界；Pi 的 session 文件和分支结构可直接追踪会话路径；Codex 的持久 thread 服务于客户端重连；DeepSeek Harness 的事件日志强调追加和可追踪。[Claude Code Memory](https://code.claude.com/docs/en/memory)；[Pi Sessions](https://pi.dev/docs/latest/sessions)；[Codex App Server](https://openai.com/index/unlocking-the-codex-harness/)；[DeepSeek Core](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/core.md)
 
-### Codex CLI：turn、exec process 和 queue 是不同状态
+这些设计各自解决一部分问题，没有一个能替代现实检查。恢复后的第一步不应是继续写代码，而应重读目标、检查工作树、重跑最小验证，再决定日志里的“下一步”是否仍然成立。
 
-Codex 的一个 turn 可以等待多个执行进程；进程有自己的 running/exited/cancelled 状态，item/turn 则有更高层的生命周期，App Server 队列还受背压影响。把这几层合成一个 boolean，会丢失“命令结束但结果尚未发送”或“客户端断开但执行仍在”的情况。
+## 选择标准：看一次中断后能否可信地继续
 
-### Pi：工具执行与 session event 连接
+如果任务通常在一个终端、一两个小时内完成，清晰的会话保存和手动进度说明已经够用。若任务经常跨天、并行或跨客户端，应该额外验证事件是否持久化、恢复是否重建审批状态、分叉是否隔离工作目录、交接物是否可由人审核。
 
-Pi 可以执行长任务并通过事件流报告 progress，coding-agent 再把输出保存或展示。后台化能力通常由宿主/扩展提供，而不是 agent core 默认承诺。若要在 UI 关闭后继续，需要明确持有进程、session 和结果文件的组件。
+Claude Code 提供面向产品使用的会话、压缩和可编辑记忆；Codex 把 thread 与事件持久化放进可被客户端驱动的 Harness；Pi 让会话树保持显式；DeepSeek Harness 把 session 也纳入可重组插件树。[Claude Code Sessions](https://code.claude.com/docs/en/sessions)；[Codex App Server](https://openai.com/index/unlocking-the-codex-harness/)；[Pi Sessions](https://pi.dev/docs/latest/sessions)；[DeepSeek Harness Architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md) 这里没有脱离任务环境的胜负。真正的验收题只有一个：在你刻意中断一次任务之后，新会话能否用可检查的证据说明它在哪里、做过什么、接下来为何这样做。
 
-### 对比结论
+下一篇继续追问：当任务从 CLI 移到 IDE 或云端时，究竟是谁在持有这份状态。
 
-Claude Code 把 task 生命周期作为应用级状态机；Codex 把 turn/item/process/queue 分层；Pi 把长任务控制留给宿主。判断后台能力时应问：谁持有进程，谁保存大输出，谁发送终态，谁处理客户端断连。
+## 资料来源
 
-### 验证动作
-
-启动一个超过 30 秒的只读命令，分别测试前台等待、转后台、取消、客户端退出后重新连接。确认结果不会重复回流，也不会因为 UI 消失而丢失。
-
-## Section 24｜如何隔离上下文并委派任务
-
-### Claude Code：Subagent 是独立 Query Loop
-
-24 明确区分 `CLAUDE.md` 与 Agent 定义：前者是项目上下文，后者描述可委派的角色、模型、system prompt、工具集合和权限。Agent 工具把委派意图变成明确输入，`createSubagentContext()` 隔离可变状态但保留必要回路；普通 subagent 与 Fork 的上下文边界不同。
-
-前台路径边运行边汇报，最后返回 tool_result；后台路径先注册 `LocalAgentTask`，结果稍后回流。工具集合和权限是两道门，父 Agent 不应把自己的全部上下文和临时授权无条件复制给子 Agent。子任务 prompt 还规定工具清单和 context cache 边界。
-
-### Codex CLI：subtask 更像新的 turn/runtime
-
-Codex 可以通过 app-server 或宿主启动新的 thread/turn，让子工作获得独立上下文和 sandbox/approval profile。关键是新 thread 是否继承 workspace、instructions、环境和权限，以及结果如何回到父 turn；这些必须由 host protocol 明确，而不是用一段 prompt 模拟隔离。
-
-### Pi：subagent 可由扩展或 coding-agent 组合
-
-Pi 的 core 没有把多 Agent 绑定成单一产品策略；扩展可以创建另一个 agent loop，给它不同 provider、tools 和 context，再将结果作为 tool/event 返回。它的灵活性适合研究和定制，但隔离程度取决于是否真正创建新 session、工具集合和进程边界。
-
-### 对比结论
-
-委派的关键不在“开了几个模型”，而在四个边界：上下文是否独立、工具是否收窄、权限是否重建、结果是否结构化回流。Claude Code 对四点都有明确运行时位置；Codex 依赖 thread/host protocol；Pi 依赖上层组合。
-
-### 验证动作
-
-委派一个只读审查任务，检查子 Agent 是否能看到父任务的私密上下文、能否写文件、是否能访问同一网络、返回后父 Agent 是否能区分事实与建议。
-
-## Section 25｜多个智能体如何协作与协调
-
-### Claude Code：Team 在 subagent 之上增加持久控制面
-
-25 的 Team config 建立身份和共享命名空间；成员后端可以不同但协作协议一致；Task list 把讨论变成所有权；Mailbox 同时承载业务消息和控制协议；Coordinator 受工具白名单约束并负责综合；最终收敛由依赖、验证结果和成员终态共同决定。
-
-Team prompt 不是“请大家合作”一句口号，而是命名、领取、汇报、阻塞和交接的协议。父 Agent 最后必须验收成员结果，不能把“所有成员都说完成”当成系统正确。
-
-### Codex CLI：多 Agent 更依赖宿主编排
-
-Codex 的 thread/turn/app-server 适合让宿主管理多个独立 thread；共享工作区、worktree、审批和结果合并由 host 层决定。官方 harness engineering 的 worktree、日志和结构化验证思路可以作为协调基础，但不能把多个 turn 自动等同于 team protocol。
-
-### Pi：Mailbox/任务列表通常由扩展实现
-
-Pi 的扩展可以注册 team/task 工具，或把多个 agent session 连接起来。共享文件、消息和结果聚合由应用负责，核心 loop 只保证各自的请求—工具—结果闭环。好处是可以尝试不同协调算法；代价是没有一个默认的“所有权/依赖/终态”标准。
-
-### 对比结论
-
-Claude Code 把多 Agent 协作做成带命名空间和消息协议的控制面；Codex 提供适合编排的 thread/turn 基础；Pi 提供可自定义的 agent primitives。多 Agent 的主要风险是共享状态冲突和结果责任不清，而不是并发数量不足。
-
-### 验证动作
-
-创建两个有依赖的任务，让一名成员修改、另一名成员审查；强制出现一次阻塞和一次重复领取，检查系统是否能识别所有权、传递阻塞原因、禁止冲突写入并要求 coordinator 验收。
-
-## Section 26｜Plan Mode 与 Worktree 如何隔离规划与执行
-
-### Claude Code：两种隔离解决两个问题
-
-26 把 Plan Mode 的权限状态隔离和 Worktree 的独立目录隔离分开。Plan mode 先保存旧模式，再切到 `plan`；只读不仅是提示词，还叠加工具权限；`/plan` 与模型工具走同一状态；退出时普通会话问用户，teammate 询问 leader。Worktree 创建前验证 slug，优先 Hook、回退 Git，进入新 cwd 后让依赖缓存失效，清理 fail-closed。
-
-Plan 是“暂时不允许副作用”，worktree 是“允许副作用但不污染主目录”。把两者组合起来，才能先产出计划，再在隔离目录执行；任一机制都不能替代另一机制。
-
-### Codex CLI：approval/sandbox 与 worktree 是不同层
-
-Codex 可以通过 approval profile、sandbox profile 或宿主工作树隔离控制执行范围。sandbox 限制进程能做什么，worktree 限制文件改动落在哪里；计划文本和 AGENTS.md 约束模型如何推进。若只换 cwd 而不重建缓存/指令，模型仍可能带着旧环境认知工作。
-
-### Pi：plan/worktree 通常由命令和扩展提供
-
-Pi 的 session branch、project command 和 Git/worktree 工具可以组成规划—执行流程；但 core 不强制 plan mode 或独立目录。宿主需要把“只读计划”和“可写实现”设置成不同的工具集合/权限，再在切换 cwd 后刷新 session/context。
-
-### 对比结论
-
-Plan Mode 是控制权限和意图，Worktree 是隔离文件状态。Claude Code 把两者写进运行时；Codex 由 host/sandbox/workspace 组合；Pi 由应用编排。不要把“模型先输出计划”误写成真正的只读阶段，真正的判断在工具授权。
-
-### 验证动作
-
-在计划阶段尝试写文件、启动网络命令和修改配置；在 worktree 阶段执行同样动作并检查主目录。再切换目录后确认 cwd、缓存、工具输出和验证命令全部更新。
-
-## Section 27｜如何连接外部工具与资源
-
-### Claude Code：MCP 是带生命周期的协议连接
-
-27 先按配置决定 transport 和作用域，再用五态连接状态管理启动/握手/可用/断开/失败；server tool 变成本地 Tool，资源不直接塞进 system prompt，而是按需读取；调用仍要过工具权限和 MCP 自身边界。认证、断线和失败也有独立出口。
-
-MCP prompt 的“空壳”不能直接当作 server 能力。只有连接状态、工具清单、资源读取和权限都闭环，外部能力才真正存在。
-
-### Codex CLI：MCP/外部工具进入 host protocol
-
-Codex 可以让宿主把外部工具、远程服务或 MCP-like provider 暴露给 thread；工具调用仍需经过 approval、sandbox、网络 proxy 和结果回填。将远程工具接入 JSON-RPC 的好处是客户端无需知道连接细节，代价是要处理超时、认证、断线、版本和背压。
-
-### Pi：扩展/API 连接点更开放
-
-Pi 可以通过 extensions 注册远程 API、文件资源或项目工具，统一成 tool/event。它不强制某一个外部协议，因此集成成本低；安全、重试、secret 和连接生命周期则必须由扩展和宿主自己维护。
-
-### 对比结论
-
-外部工具的集成难点不是“能不能发 HTTP”，而是如何把连接状态、能力发现、认证、失败、权限和审计接回本地 agent loop。Claude Code 提供最完整的协议适配层；Codex 提供可跨宿主的执行/事件边界；Pi 提供最自由的扩展面。
-
-### 验证动作
-
-让外部 server 在启动、握手、工具调用、资源读取、断线和重新连接时分别失败一次，观察 agent 是否得到可区分的状态，而不是一个含糊的“工具不可用”。
-
-## Section 28｜插件系统如何扩展能力并守住信任边界
-
-### Claude Code：插件生效需要三层状态
-
-28 把 plugin 状态分成安装/来源作用域、版本化缓存/manifest、当前会话 reload。manifest 是受约束的组件索引，从插件目录可以得到 command、skill、MCP server、LSP 等六类运行时组件；安装成功后还要 reload，当前会话才看得到。
-
-信任边界分布在来源、文件和组件运行时：插件不是一份无害 Markdown，里面可能注册工具、启动 server、改变 prompt。更新和禁用也需要完整生命周期，不能只删除一个目录或修改一行配置。
-
-### Codex CLI：插件/skills 的信任由 host 与项目约束承担
-
-Codex 的能力可以由项目 instructions、skills、外部工具和宿主插件提供；是否自动加载、是否允许执行、怎样缓存版本取决于 host。最重要的设计是把“发现了组件”和“当前 turn 可以使用组件”分开。
-
-### Pi：扩展加载简单，但同进程信任风险直接
-
-Pi 的 extensions loader 发现并加载模块，`registerTool`/事件 API 让能力进入 runtime。项目 trust 可以控制资源加载，但已加载扩展通常与 agent 共享进程权限。因此扩展包来源、依赖、版本和可禁用性需要应用明确治理。
-
-### 对比结论
-
-Claude Code 把插件当成生命周期对象；Codex 把插件/skills 当作 host 能力来源；Pi 把扩展当作可组合代码。越接近同进程加载，越需要在“安装、启用、运行、升级、卸载”五个阶段分别做审计。
-
-### 验证动作
-
-安装一个只提供 skill 的插件和一个注册工具的插件，分别观察 manifest、缓存、reload、permission 和 disable 是否更新。卸载后重启并确认旧工具不会从缓存残留。
-
-## Section 29｜LSP 如何为 Agent 提供代码智能
-
-### Claude Code：LSP 是插件提供的语义辅助证据
-
-29 明确区分文本匹配与语言语义。LSP 配置只来自已启用插件，Manager 先建路由，第一次使用时才启动 server；spawn、initialize、initialized 构成握手；didOpen/didChange 同步文档；主动操作最终变成 tool_result；publishDiagnostics 则进入 attachment 收集。失败时 LSP 只是可降级辅助证据。
-
-LSP prompt 固定坐标与操作契约，避免模型把“定义跳转”理解成任意搜索。诊断版本不强求完全一致，是为了在异步 editor/server 环境中保持可用性。
-
-### Codex CLI：代码智能可由工具与环境提供
-
-Codex 的 harness engineering 重点是可读环境和验证；语言服务可以作为 app/IDE host 或外部 tool 接入。IDE 负责文档同步和诊断，agent 通过结构化结果使用；CLI 没有 IDE 时可降级为 grep、编译器和测试。
-
-### Pi：LSP 通常是扩展或外部工具
-
-Pi 的扩展可以连接语言 server，注册 definition/reference/diagnostics 工具，再把结果作为 tool_result 或附件回流。由于 core 不强制 LSP 协议，项目可以选择轻量文本搜索，也可以接完整语言服务。
-
-### 对比结论
-
-LSP 的价值是提供结构语义和可定位证据，不是替代搜索。Claude Code 把它做成受插件和生命周期管理的辅助面；Codex 让 IDE/host 提供代码智能；Pi 把它留给扩展生态。三者都应有降级路径，不能让语言 server 一次启动失败拖垮主 loop。
-
-### 验证动作
-
-对同一符号分别做文本搜索、definition、references 和 diagnostics；让 server 延迟/崩溃一次，确认 agent 仍能使用搜索、编译或测试继续工作，并且错误说明了证据可靠性下降。
-
-## Section 30｜浏览器与 IDE 如何接入运行时
-
-### Claude Code：宿主差异停在协议边缘
-
-30 先区分 Grep、LSP、RAG，再让 IDE 通过 lockfile 发现连接，自动连接只是添加动态 MCP 配置；握手后能力才存在；选区和文件上下文通过通知更新；反向操作通过 RPC 发送，结果重新解释。Chrome 复用 MCP，但连接拓扑不同，配对、权限模式、站点权限是三道门。
-
-普通外部客户端共享协议，不共享信任。浏览器消息和工具结果仍需经过结构化边界，不能因为来自 UI 就跳过 agent 工具契约。
-
-### Codex CLI：App Server 让 IDE 成为一等客户端
-
-Codex 的 JSON-RPC/App Server 本身就是 IDE 接入层：客户端订阅 thread/turn/item，发送用户输入、审批和取消，宿主提供当前文件/选区等 context。执行仍留在受控 runtime，UI 只展示或发起控制请求。
-
-### Pi：TUI、RPC 和扩展共同构成宿主边缘
-
-Pi 的事件流和扩展 API 可以让 IDE/browser 把现场翻译成 tool/input，再把结果渲染回编辑器。由于没有统一的远程安全边界，接入方必须处理配对、origin、凭证、权限和进程隔离。
-
-### 对比结论
-
-Claude Code 通过 MCP/bridge 把外部宿主隔离在协议边缘；Codex 通过 App Server/JSON-RPC 把多客户端正式化；Pi 通过事件与扩展保持自由。外部宿主的真正难题是“谁拥有信任”，不是“能不能传一条消息”。
-
-### 验证动作
-
-让 IDE 选区、浏览器页面和普通 RPC 客户端分别发起同一个工具调用，确认它们的身份、权限、资源范围和结果回流路径不同且可审计。
-
-## 这一主题的共同答案：扩展要有四个契约
-
-一个扩展、skill 或 subagent 只有在四个契约都清楚时才算完成接入：
-
-1. 发现契约：从哪里发现、何时加载、版本和作用域是什么。
-2. 能力契约：模型能看到什么 schema、prompt、资源和事件。
-3. 信任契约：哪些文件、网络、进程和用户操作可以被影响。
-4. 生命周期契约：启动、调用、失败、取消、reload、禁用和恢复怎样发生。
-
-Claude Code 把这些契约做成较完整的产品运行时；Codex 把一部分放进 host protocol 和 sandbox；Pi 给开发者最大的组合自由，也把治理责任推回宿主。
-
-## 本主题覆盖清单
-
-本篇覆盖 21、22、23、24、25、26、27、28、29、30，共 10 个独立 comparison sections。主题 01–04 累计覆盖 32 个 Claude Code 章节。
-
-## 下一篇
-
-扩展和多 Agent 解决“能力从哪里来、怎样协作”。下一篇把镜头拉回宿主：AppState、TUI、快捷键和结构化 IO 怎样把运行时状态变成用户可操作的产品。
+- [Anthropic：Effective context engineering for AI agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
+- [Anthropic：Effective harnesses for long-running agents](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)
+- [Claude Code：Manage sessions](https://code.claude.com/docs/en/sessions)
+- [Claude Code：How Claude remembers your project](https://code.claude.com/docs/en/memory)
+- [OpenAI：Unlocking the Codex harness](https://openai.com/index/unlocking-the-codex-harness/)
+- [Pi：Sessions](https://pi.dev/docs/latest/sessions)
+- [DeepSeek Harness：Architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)
+- [DeepSeek Harness：Core subsystem](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/core.md)
+- [DeepSeek Harness：README](https://github.com/deepseek-ai/deepseek-harness)
+- [DeepSeek Harness：SAFETY.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md)
