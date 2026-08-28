@@ -1,8 +1,8 @@
 ---
-title: "Agent主题对比05｜CLI、IDE 与云端由谁持有状态"
+title: "Agent主题对比05｜从 CLI 切到 IDE 或云端，状态会不会断"
 published: 2026-08-12T10:05:00+08:00
 updated: 2026-08-28
-description: "比较 Claude Code、Codex、Pi 与 DeepSeek Harness 在 CLI、IDE、桌面端和云端中如何持有会话、事件、审批与运行生命周期。"
+description: "Claude Code 通过工作台与 teleport 迁移会话，Codex 用 App Server 持有 thread，Pi 提供 TUI/RPC/SDK，DeepSeek Harness 用 profile 重组宿主。"
 tags: ["agent-theme-comparison", "ai-agent", "claude-code", "codex-cli", "pi", "deepseek-harness", "app-server", "runtime-state"]
 category: "AI / Architecture"
 draft: false
@@ -12,93 +12,89 @@ slug: "agent-theme-05-host-runtime"
 series: "agent-theme-comparison"
 order: 5
 difficulty: "advanced"
-time: "17 min"
+time: "15 min"
 prerequisites:
-  - "Agent主题对比 02｜一次 Agent 任务怎样跑完"
-  - "Agent主题对比 04｜长任务怎样保持上下文并恢复"
+  - "需要在终端、IDE、浏览器或内部系统间切换 Agent"
+  - "能区分客户端状态与任务执行状态"
 topics:
-  - "host runtime"
-  - "CLI and IDE"
-  - "App Server"
-  - "RPC and SDK"
-  - "session ownership"
-  - "remote recovery"
-  - "DeepSeek Harness"
+  - "宿主状态"
+  - "Claude Code"
+  - "Codex App Server"
+  - "Pi RPC 与 SDK"
+  - "DeepSeek Harness Profiles"
+  - "断线与并发"
 status: "verified"
 verified_at: "2026-08-28"
 ---
 
-答案是：状态由真正运行 Agent loop、保存会话并发出事件的一侧持有，不一定是你眼前的窗口。宿主会决定任务能否在关掉 UI 后继续、审批从哪里返回、多个客户端能否看到同一时间线，以及断线后由谁恢复。CLI、IDE 和云端绝不是三套皮肤。
+四者都有不止一种入口，但状态所有权完全不同。Claude Code 把不同工作台当成有边界的产品会话，并提供特定迁移通道；Codex 让长生命周期 App Server 持有 thread；Pi 让集成者在 TUI、RPC 和 SDK 三种合同中选择；DeepSeek Harness 用 profile 决定整套运行时怎样装配。界面能打开同一任务，不代表界面消失后任务仍属于同一个系统。
 
-你在终端发起重构，随后打开 IDE 看 diff，午饭时又想让云端继续跑测试。如果三个入口各自保存一份聊天，它们只是看起来像同一个 Agent；如果都连接同一条持久 thread，才可能共享进度。判断关键不在界面数量，而在状态的所有者和事件协议。
+## Claude Code 对 Codex：迁移会话，还是让客户端只是窗口
 
-所谓“状态”，不只是聊天记录。
+Claude Code 覆盖 CLI、VS Code、桌面端与 Web，但 [Sessions 文档](https://code.claude.com/docs/en/sessions) 明确指出，不同表面分别维护自己的 session history。CLI 的本地 transcript、桌面端历史和 Web 会话不是天然共享的一份实时状态。相比 Codex，这种设计更像多个完整工作台，而不是所有 UI 都连接同一后台 thread。
 
-一次运行至少包含四类状态：会话历史、正在执行的 turn、审批与用户输入的等待点、承载文件和进程的环境。客户端可以显示这些信息，也可以拥有其中一部分；只有运行时知道工具是否仍在执行、某个审批是否已过期、网络断开后任务是否继续。
+Claude Code 的优势是迁移路径面向用户。[Web 文档](https://code.claude.com/docs/en/claude-code-on-the-web) 区分本地 `--resume` 与把云端会话带回终端的 `--teleport`；后者连同分支和对话处理。用户不必设计客户端协议，但必须理解“在哪个表面继续”会改变会话与代码环境，随意从另一入口打开并不等于无缝接管。
 
-因此，判断宿主边界时要问：关闭界面会不会终止任务？新客户端能否从稳定标识恢复？历史事件由谁保存？审批请求由谁发起并暂停执行？客户端与服务端版本不一致时如何协商？这些问题比“有没有桌面端”更接近真实控制权。
+Codex 的 [App Server](https://openai.com/index/unlocking-the-codex-harness/) 把状态切得更像服务：长生命周期进程托管 threads，客户端通过双向 JSON-RPC 驱动 turn 与 item。浏览器标签页或 IDE 可以短命，服务端 thread 才是状态真相源。与 Claude Code 的 teleport 相比，Codex 的优势是客户端不必拥有任务；重连后可以追赶服务端事件。
 
-## Claude Code：多个工作台，各有会话边界
+短板也落在服务化边界。Codex 不替集成者完成连接恢复、认证、租户隔离、事件去重和 UI 状态机；Claude Code 用户接受官方迁移语义，少维护这些协议。只需要在官方工作台间移动时，Claude Code 更省工程；要让多个自建入口观察同一后台任务时，Codex 更适合作为底座。
 
-Claude Code 覆盖 CLI、VS Code、桌面端和 Web，但官方会话文档明确说明，桌面端、Web 和 VS Code 扩展分别维护自己的 session history；CLI 会话则持续写入本地 transcript。[Manage sessions](https://code.claude.com/docs/en/sessions) 这意味着“产品表面很多”不等于任意表面都在实时驱动同一份本地状态。
+## Pi 对 Codex：三种集成合同，还是一套共享执行语义
 
-云端会话有自己的远程环境。官方文档区分 `--resume` 与 `--teleport`：前者恢复这台机器上的本地历史，后者把云端会话的分支和完整对话带回终端。[Claude Code on the web](https://code.claude.com/docs/en/claude-code-on-the-web) 这种切换需要连同仓库分支与会话一起处理，因为对话连续而代码环境错位，仍会恢复到错误现实。
+Pi 同时提供交互式 TUI、stdin/stdout JSONL 的 RPC 和可嵌入 Node.js 的 SDK。[文档首页](https://pi.dev/docs/latest) 把三者作为不同使用方式，[RPC 文档](https://pi.dev/docs/latest/rpc) 让外部进程收发事件与交互请求，[SDK 文档](https://pi.dev/docs/latest/sdk) 则允许同进程直接访问 Agent 状态。相比 Codex，Pi 给集成者更轻、更直接的选择，不必先接受一套服务端产品模型。
 
-Claude Code 更像一组相互衔接的产品工作台。它提供明确的本地和云端迁移入口，但不能从统一品牌推断所有入口天然共享一个在线 session。适合它的验收方式，是分别测试本地恢复、云端恢复和跨环境 teleport，而不是只看界面能否打开同一仓库。
+Pi RPC 的优势是跨语言与进程隔离，SDK 的优势是类型安全和直接控制；两者之间并非无成本切换。某些依赖 TUI 的自定义界面在 RPC 下会降级，SDK 宿主还要自己传播取消、创建 session、释放 extension 资源。Codex App Server 把这些概念集中到 thread/turn/item，协议更重，却更适合多个客户端围绕共同语义协作。
 
-## Codex：App Server 把 Harness 变成可驱动服务
+Pi 的短板在并发与持久服务责任。它的 JSONL session 可以恢复和分叉，但“多个入口能读同一格式”不意味着它们可以同时安全写同一文件。Codex 明确把服务端设为状态持有者，Pi 则要求集成者决定谁启动进程、谁拥有 session、客户端断开后是否继续、第二个客户端怎样接管。
 
-OpenAI 设计 App Server 的目的，是让 IDE 等客户端驱动同一个 Codex Harness，而不在每个 UI 里重写 agent loop。[Unlocking the Codex harness](https://openai.com/index/unlocking-the-codex-harness/) 中，App Server 既是双向 JSON-RPC 协议，也是托管 Codex core threads 的长生命周期进程。
+因此，做单机工具嵌入时，Pi SDK 往往比 Codex App Server 少一层网络和状态机；做浏览器任务中心时，Codex 已有的持久 thread 比 Pi RPC 子进程更接近目标。Pi 给的是组件级合同，Codex 给的是服务级合同；前者灵活而局部，后者统一但需要平台化部署。
 
-它把会话拆成 thread、turn 和 item。thread 是可持久化的会话容器；turn 是一次用户输入触发的工作；item 表示消息、工具执行、审批、diff 等有生命周期的单元。客户端请求可以产生多个服务端通知，服务端也能主动发起审批请求并暂停当前 turn，直到客户端允许或拒绝。[App Server conversation primitives](https://openai.com/index/unlocking-the-codex-harness/)
+## DeepSeek Harness 对 Pi：入口模式，还是整套 profile 装配
 
-在 Web 场景中，OpenAI 明确把服务端作为状态真相源：浏览器标签页和网络都可能消失，任务进度留在服务端，新会话重连后再追上事件。[App Server web runtime](https://openai.com/index/unlocking-the-codex-harness/) 这比“把 TUI 包进 WebView”多了一层承诺：客户端可以短命，thread 必须持久。
+DeepSeek Harness 的[架构文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md) 描述 `web`、`headless`、`sdk`、`sdk-minimal`、`acp` 等 profiles，每个 profile 在启动时组合 session、loop、工具、持久化、approval、sandbox 与宿主组件。相比 Pi 的 TUI/RPC/SDK 入口，DeepSeek Harness 不只更换调用方式，还允许入口决定整棵插件树。
 
-这种结构也有代价。协议要维护版本与能力协商，客户端要正确处理事件顺序、重复通知、审批等待和断线重连。App Server 证明了统一 Harness 可以被多个客户端驱动，不能据此推出每个 Codex 产品表面都共享同一执行环境或同一权限配置。
+这对异构平台是优势。一个 headless profile 可以减少交互部件，一个 web profile 可以接入浏览器与实时 patch，一个 ACP profile 可以使用相应协议。Pi 更适合在同一个最小 Harness 周围选择宿主合同；DeepSeek Harness 更适合让不同宿主拥有不同运行时组合。后者控制更深，也让“同一个 Agent”更难定义。
 
-## Pi：TUI、RPC 与 SDK 暴露不同集成合同
+DeepSeek Harness 的短板是状态迁移需要同时考虑 profile 兼容。一个 web profile 产生的会话，能否由 headless profile 恢复，取决于两边安装的 session、tool、provider 和事件消费者，而不是只看会话 ID。Pi 在不同入口间也需要兼容 extensions，但最小核心减少了变化层次；DeepSeek Harness 的运行图越不同，迁移测试越像平台发布测试。
 
-Pi 把自己定位为 minimal agent harness，并提供交互式 TUI、基于 stdin/stdout JSONL 的 RPC 模式，以及可嵌入 Node.js 进程的 SDK。[Pi 文档首页](https://pi.dev/docs/latest) 这三种入口分别适合人直接操作、跨语言子进程集成和同进程编程控制。
+项目仍处 developer preview，[README](https://github.com/deepseek-ai/deepseek-harness) 警告兼容性可能破坏。因此 profiles 当前更适合探索宿主与运行时组合，不应被写成已经稳定的跨端迁移协议。若团队只需要“从 Node 进程调用 Agent”，Pi SDK 的较窄合同通常更容易维护；若要同时研究 Web、ACP 与异构 provider，DeepSeek Harness 才体现差异价值。
 
-RPC 模式会把 Agent 运行事件流式写到 stdout，客户端通过命令读取状态、提交 prompt，并处理扩展触发的交互请求。需要确认、选择或输入时，RPC 使用带 ID 的请求/响应子协议；部分强依赖 TUI 的自定义界面能力会降级或不可用。[Pi RPC mode](https://pi.dev/docs/latest/rpc) 这正说明宿主不是透明层：同一个扩展放进不同宿主，交互合同可能变化。
+## 审批、断线与并发会暴露谁真正持有状态
 
-SDK 则允许调用方直接访问 agent state、选择工具并装载 extensions；官方建议，同进程、需要类型安全和直接状态访问时用 SDK，跨语言或需要进程隔离时用 RPC。[Pi SDK](https://pi.dev/docs/latest/sdk) 选择 SDK 也意味着宿主进程要承担更多生命周期责任，例如何时创建 session、怎样传播取消、怎样清理扩展资源。
+团队权限模型也会随宿主变化。Claude Code 官方入口沿产品账号与本地环境组织访问；Codex 自建宿主需要把自己的用户身份映射到 thread、审批和工具凭据。Pi RPC/SDK 常继承承载进程的身份，若多个用户共享一个服务，租户隔离完全由集成者补齐；DeepSeek Harness profiles 可以装配 credential 与 transport 服务，但预览架构不替部署者证明租户边界。
 
-Pi 的会话仍以 JSONL 文件保存，可恢复、分叉和树形导航。[Pi Sessions](https://pi.dev/docs/latest/sessions) 但“多个入口都能读会话格式”不等于允许多个客户端安全地同时写同一文件。并发所有权需要调用方自己设计和验证。
+从终端切到 IDE 时，Claude Code 用户主要确认是否进入同一产品会话及同一仓库；Codex 客户端主要确认是否订阅正确 thread；Pi 集成者要确认 TUI 与 RPC/SDK 是否指向同一 session 文件且没有双写；DeepSeek Harness 要确认两个 profiles 对 session 与工具事件有兼容解释。四者表面都能“继续”，所需一致性检查从产品级一路加深到运行图级。
 
-## DeepSeek Harness：profile 在启动时组装运行时
+从本地切到云端，Claude Code 的 teleport 把迁移做成显式产品动作，优势是边界清楚，短板是只能按产品支持的路径走。Codex 若服务端原本就在远端，客户端切换较轻，但执行环境和凭据由平台负责。Pi 可以把 RPC 进程部署到远端，却要自己补认证、队列和持久化；DeepSeek Harness 可以选择 web 或 headless profile，也要自己承担部署与兼容。
 
-DeepSeek Harness 公开架构把一次运行描述为由有序层在启动时组成的 Cordis plugin tree。官方提供 `web`、`headless`、`sdk`、`sdk-minimal` 和 `acp` 等 profile；其中多数 profile 共享 `dsh-base`，再加上浏览器应用、一轮运行器或 JSON-RPC 服务等不同宿主组件。[DeepSeek Harness Architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)
+成本模型因此不同。Claude Code 主要支付产品席位与使用成本；Codex 产品团队还要支付常驻服务、客户端开发和状态存储；Pi 团队可能从一个本地子进程起步，但一旦远程多人使用，就会逐步重造服务治理；DeepSeek Harness 在此基础上还要维护 profile 和插件版本。能嵌入不等于已经适合多租户运行。
 
-这个设计把 UI 与运行时组合变成配置问题：profile 决定装入哪些 session、agent loop、工具、持久化、审批和 sandbox 服务。Web profile 可以实时重载 patch，而 headless、SDK 和 ACP profile 在启动时应用配置一次，因为持有任务后替换依赖会破坏生命周期。这里的“可替换”是官方架构主张，不是兼容性或可靠性实测结论。[Architecture：profiles and bundles](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)
+可观测性也跟着状态所有者走。Claude Code 用户主要使用官方界面与会话记录；Codex 平台能从 item 流构建自己的监控；Pi 宿主必须自行汇总 RPC/SDK 事件；DeepSeek Harness 可以装配 telemetry 插件，但必须确保不同 profile 发出可比较的数据。控制面越开放，监控越能贴合组织，也越不能依赖产品默认值兜底。
 
-它与 Codex App Server 的侧重点不同。Codex 先固定 thread/turn/item 和客户端协议，再让多个产品表面复用 Harness；DeepSeek Harness 先把运行时本身拆成可组合服务，再由 profile 决定宿主。前者更关注稳定驱动面，后者更关注运行时可重组性。两者都需要实测断线、并发和审批语义，不能凭架构图推导质量排名。
+退出路径也应演练：Claude Code 要确认会话与分支能导出，Codex 要隔离客户端协议适配，Pi 要保存可迁移 session，DeepSeek Harness 要固定 profile 清单。切换入口容易，切换状态所有者才昂贵。
 
-DeepSeek Harness 目前仍是 developer preview，README 提醒会有兼容性破坏；`SAFETY.md` 明确表示尚未经过安全审计，不能视为安全或生产就绪。[README](https://github.com/deepseek-ai/deepseek-harness)；[SAFETY.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md) profile 中出现 sandbox 与 approval 插件，也不能替代外部隔离和生产安全评估。
+这笔迁移成本必须在选型试验中实际计时，而不是上线后才发现。
 
-## 谁负责等待、断线和并发
+审批等待时，Claude Code 的官方工作台负责呈现请求，跨表面迁移需遵循其会话边界；Codex 服务端可以暂停 turn 并向客户端发出请求，客户端消失后仍要有超时与接管策略。Pi RPC 把扩展交互建模为带 ID 的请求/响应，宿主必须决定断线时怎样结束；DeepSeek Harness 的处理则取决于 profile 中装配的 approval 与 transport。
 
-宿主状态最容易在三种时刻暴露问题。第一种是审批：如果运行时在等待，UI 必须准确展示请求、来源和作用范围；客户端消失后，服务端要决定继续等、超时还是取消。Codex 的双向协议让服务端能主动请求审批并暂停 turn；Pi RPC 把扩展 UI 交互建模为请求/响应。[Codex App Server](https://openai.com/index/unlocking-the-codex-harness/)；[Pi RPC](https://pi.dev/docs/latest/rpc)
+后台任务也不同。Claude Code 云端工作有远程环境，不能把本地 CLI 进程的生命周期直接类比过去；Codex 服务端 thread 天然适合客户端短暂离线；Pi SDK 若嵌在应用进程里，应用退出通常意味着运行时一起退出，RPC 是否常驻由宿主决定；DeepSeek Harness headless 能否持续，则由部署方式与插件生命周期共同决定。
 
-第二种是断线。真正的远程运行不能把浏览器内存当真相源。保存 thread 只解决事件恢复，还要检查工作环境是否存活、工具是否可重试、审批是否仍有效。第三种是并发：两个客户端同时向同一会话发送输入时，系统必须定义排队、拒绝或分叉，而不是让事件静默交错。
+并发是最容易被“多入口”掩盖的短板。Claude Code 文档提醒，同一 session 在两个终端同时恢复而不分叉，会把消息交错写入同一 transcript。Codex 可以让多个客户端连接，却仍需定义写入所有权。Pi 不提供现成的多写者 session 协调，DeepSeek Harness 的不同 transports 也不会自动解决业务级冲突。能重连不是能并发写。
 
-状态所有权还决定取消语义。用户在 IDE 点击停止时，究竟只停止界面流式显示，还是取消服务端 turn 和正在运行的子进程？取消消息若在断线后迟到，运行时又怎样避免把已经完成的结果误标为中断？这些行为需要从事件记录和实际进程中核对，不能只凭按钮动画判断。
+验收必须把客户端直接杀掉。Claude Code 要验证本地与云端迁移后的分支一致；Codex 要验证服务端继续运行且新客户端不会重复 item；Pi 要分别验证 RPC 子进程与 SDK 宿主退出后的清理；DeepSeek Harness 要验证 profile 重启后插件图与会话兼容。只有这些结果能回答“状态会不会断”，入口数量回答不了。
 
-Claude Code 的会话文档甚至提醒，同一 session 在两个终端同时恢复而不分叉时，消息会交错写入同一 transcript。[Claude Code Sessions](https://code.claude.com/docs/en/sessions) 这是一个很具体的边界：能同时打开，不代表具备安全的多客户端并发控制。
+## 裁决：选择状态所有者，不是选择界面
 
-## 选择宿主时看责任归属
+| 产品 | 优势 | 短板 | 代价 | 适合谁 |
+| --- | --- | --- | --- | --- |
+| Claude Code | 多个成熟工作台，并有明确 resume/teleport 路径 | 各表面历史有边界，不是任意实时共享 | 理解本地、云端、分支和会话迁移规则 | 主要使用官方入口、偶尔跨端继续的团队 |
+| Codex | App Server 持有持久 thread，客户端可短命 | 自建宿主要实现连接、身份、事件与并发治理 | 运行长生命周期服务并维护协议状态机 | 建设 IDE、Web 或内部任务中心的产品团队 |
+| Pi | TUI、RPC、SDK 合同直接，嵌入方式灵活 | 并发所有权与后台生命周期由集成者设计 | 管理进程、session、取消和扩展资源 | 单机嵌入、跨语言子进程或定制终端工具 |
+| DeepSeek Harness | profile 可同时重组宿主与运行时 | 跨 profile 状态兼容复杂，且仍在预览期 | 固定插件图并测试启动、迁移和恢复 | 研究多种宿主与异构运行组合的平台团队 |
 
-如果你主要在一个终端里工作，优先看本地会话是否透明、进程中断后能否恢复、文件状态是否容易核对。频繁在 CLI 与 IDE 之间切换时，要确认两者是否驱动同一 thread，还是各自复制上下文。要把任务放到云端运行，则应验证关闭客户端后谁继续执行、怎样重连、凭据与代码环境由谁保存。
+只在官方工作台间工作，Claude Code 的迁移入口最直接；要让服务端任务独立于界面，Codex 的状态模型最清楚；要把 Agent 嵌进现有进程，Pi 的 SDK/RPC 更轻；要让不同宿主连运行时部件都不同，DeepSeek Harness 控制最深。先决定状态属于谁，再决定 UI 长什么样。
 
-可以用一次故意断线做最小验收。在入口 A 发起会修改两个文件并运行测试的任务，等它进入工具执行后关闭窗口；从入口 B 重连，检查 thread 标识、已完成 item、未决审批和工作树是否一致。随后同时打开两个客户端，各提交一条互斥指令，观察系统是排队、拒绝、分叉还是交错执行。最后重启承载进程，再确认它能否区分“历史可读”和“任务仍在运行”。
-
-这组测试会暴露界面演示看不到的问题。若新客户端只能看到最终文字，却看不到工具与审批事件，它无法可靠接管；若 thread 恢复了，临时进程和凭据却已经消失，运行状态也没有真正恢复；若两个客户端都能写入但没有并发规则，所谓共享状态反而增加误操作概率。把这些结果记录下来，再谈跨端体验是否成立。
-
-Claude Code 提供集成式工作台与明确的本地、云端迁移入口；Codex 用 App Server 把持久 thread 和事件协议放到客户端之下；Pi 给集成者 TUI、RPC、SDK 三种合同；DeepSeek Harness 允许 profile 重组宿主与运行时。[Claude Code Sessions](https://code.claude.com/docs/en/sessions)；[Codex App Server](https://openai.com/index/unlocking-the-codex-harness/)；[Pi Documentation](https://pi.dev/docs/latest)；[DeepSeek Harness Architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md) 选择结果取决于你愿意承担哪一层状态管理，而不是哪家界面最多。
-
-下一篇会沿着这个边界继续：当你要加入数据库工具、项目规则或自定义审批时，应该扩展既有 Harness，还是替换运行时的一部分。
-
-## 资料来源
+## 本篇引用来源
 
 - [Claude Code：Manage sessions](https://code.claude.com/docs/en/sessions)
 - [Claude Code：Use Claude Code on the web](https://code.claude.com/docs/en/claude-code-on-the-web)
@@ -109,4 +105,3 @@ Claude Code 提供集成式工作台与明确的本地、云端迁移入口；Co
 - [Pi：Sessions](https://pi.dev/docs/latest/sessions)
 - [DeepSeek Harness：Architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)
 - [DeepSeek Harness：README](https://github.com/deepseek-ai/deepseek-harness)
-- [DeepSeek Harness：SAFETY.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md)
