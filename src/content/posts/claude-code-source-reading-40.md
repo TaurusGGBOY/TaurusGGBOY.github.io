@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读40：如何从会话中提炼知识"
 published: 2026-07-24T16:47:27+08:00
-updated: 2026-08-04
+updated: 2026-08-28
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -13,7 +13,7 @@ imagePosition: "left"
 
 上一篇留下的问题是，**普通用户能把 Claude Code 更新到内部版本或测试版本（即非 `stable`、`latest` 渠道的版本）吗？**
 
-**普通用户不能仅靠修改本地配置获得内部版本或测试版本；只有当目标版本的二进制或 npm 包本来就对外发布时，才可能通过公开安装流程安装它。** 源码里“能解析这个版本号”“能找到这个版本的下载物”“当前用户有权限访问下载源”是三件不同的事。
+答案先放在前面，**普通用户不能仅靠修改本地配置获得内部版本或测试版本；只有当目标版本的二进制或 npm 包本来就对外发布时，才可能通过公开安装流程安装它。** 源码里“能解析这个版本号”“能找到这个版本的下载物”“当前用户有权限访问下载源”是三件不同的事。
 
 ### `claude update` 只更新渠道，不选择任意版本
 
@@ -25,7 +25,7 @@ imagePosition: "left"
 
 随后真正下载时，`downloadVersion()` 按 `USER_TYPE` 分流，内部用户走 Anthropic 的 Artifactory，外部用户走公开的 GCS 二进制仓库。外部路径会请求 `<version>/manifest.json`，再根据平台下载并校验二进制。如果某个内部版本没有同步到公开仓库，普通用户即使输入了正确的版本号，也只会在 manifest 或平台文件下载处失败。
 
-对普通用户而言，分界是：
+因此，普通用户实际可以这样理解，
 
 ```text
 claude install 2.1.88       # 目标版本已公开时，可以安装
@@ -52,12 +52,13 @@ npm view @anthropic-ai/claude-code versions --json
 
 但 npm 的版本列表只代表公共 registry 能看到的发布物。内部 Artifactory 中存在的包、未发布的 nightly 或 CI 测试夹具，不会因为把版本号写进命令就自动出现在公共 registry；下载权限和平台包仍然是硬边界。
 
-结论是，**普通用户不能通过修改本地配置更新到内部或测试版本；`claude update` 只支持 `latest` / `stable`。如果某个非渠道版本被明确公开到二进制仓库或 npm，普通用户可以用 `claude install <version>` 或 npm 安装它；否则就需要内部构建、私有下载源和相应权限。**
+因此准确答案是，**普通用户不能通过修改本地配置更新到内部或测试版本；`claude update` 只支持 `latest` / `stable`。如果某个非渠道版本被明确公开到二进制仓库或 npm，普通用户可以用 `claude install <version>` 或 npm 安装它；否则就需要内部构建、私有下载源和相应权限。**
 
 ## 介绍本章的一些概念
 
 - Session Memory 是一条完整的**记忆数据生命周期**，写（post-sampling hook 提炼）→ 索引（结构化模板分节）→ 选（token 与工具调用阈值）→ 注入（compact 时复用）→ 同步（内存游标记录边界）→ 防中毒（受限 fork + 单文件精确路径权限）。
 - `summary.md` 是**模型维护的派生信息**，不是 transcript 备份，它按 project + `sessionId` 落盘，目录 `0700`、文件 `0600`，首次创建用 `wx` 独占写入；需要精确审计或追责时，原始 transcript 仍是更接近事实的来源。
+- Auto Memory 是另一条项目级、跨会话的持久化链路：四个 `type`（`user`、`feedback`、`project`、`reference`）是并列分类，不是优先级；具体内容通常进入 topic 文件，`MEMORY.md` 只保存短指针，启动加载索引、需要时再读主题文件。
 - 默认阈值是硬条件，首次提炼要 10,000 上下文 token，两次更新之间至少再增长 5,000，工具调用至少 3 次，远程动态配置 `tengu_sm_config` 可以覆盖这三个正数，因此默认值不是不可变协议。
 - 提炼 fork 的工具能力被收窄到**一个精确路径上的 `Edit`**，`createMemoryFileCanUseTool()` 对不是该路径的 Read、Bash、Write 一律 `behavior: 'deny'`，不会转入 `'ask'` 扩大权限。
 - SM Compact 是回退链的第一选择，自动 compact 先尝试复用已维护的 summary（零 API 成本），文件缺失、空模板、边界 uuid 找不到或压缩后仍超阈值时返回 `null`，回退传统模型摘要。
@@ -78,9 +79,11 @@ npm view @anthropic-ai/claude-code versions --json
 
 ## 问题
 
+本篇的主线是说明会话记忆如何在后台提炼而不接管主任务：post-sampling hook 选择值得总结的停顿，隔离 agent 只允许写入指定记忆文件，文件成为持久事实，游标和阈值则是可丢失的优化状态。记忆因此是受控旁路，不是第二个主 Agent。
+
 上一篇（39）的问题是，**普通用户能把 Claude Code 更新到内部版本或测试版本（即非 `stable`、`latest` 渠道的版本）吗？**
 
-**普通用户不能仅靠修改本地配置获得内部版本或测试版本；只有当目标版本的二进制或 npm 包本来就对外发布时，才可能通过公开安装流程安装它。** 源码里「能解析这个版本号」「能找到这个版本的下载物」「当前用户有权限访问下载源」是三件不同的事。
+答案先放在前面，**普通用户不能仅靠修改本地配置获得内部版本或测试版本；只有当目标版本的二进制或 npm 包本来就对外发布时，才可能通过公开安装流程安装它。** 源码里「能解析这个版本号」「能找到这个版本的下载物」「当前用户有权限访问下载源」是三件不同的事。
 
 ### `claude update` 只更新渠道，不选择任意版本
 
@@ -92,7 +95,7 @@ npm view @anthropic-ai/claude-code versions --json
 
 随后真正下载时，`downloadVersion()` 按 `USER_TYPE` 分流，内部用户走 Anthropic 的 Artifactory，外部用户走公开的 GCS 二进制仓库。外部路径会请求 `<version>/manifest.json`，再根据平台下载并校验二进制。如果某个内部版本没有同步到公开仓库，普通用户即使输入了正确的版本号，也只会在 manifest 或平台文件下载处失败。
 
-对普通用户而言，分界是：
+因此，普通用户实际可以这样理解，
 
 ```text
 claude install 2.1.88       # 目标版本已公开时，可以安装
@@ -119,7 +122,7 @@ npm view @anthropic-ai/claude-code versions --json
 
 但 npm 的版本列表只代表公共 registry 能看到的发布物。内部 Artifactory 中存在的包、未发布的 nightly 或 CI 测试夹具，不会因为把版本号写进命令就自动出现在公共 registry；下载权限和平台包仍然是硬边界。
 
-结论是，**普通用户不能通过修改本地配置更新到内部或测试版本；`claude update` 只支持 `latest` / `stable`。如果某个非渠道版本被明确公开到二进制仓库或 npm，普通用户可以用 `claude install <version>` 或 npm 安装它；否则就需要内部构建、私有下载源和相应权限。**
+因此准确答案是，**普通用户不能通过修改本地配置更新到内部或测试版本；`claude update` 只支持 `latest` / `stable`。如果某个非渠道版本被明确公开到二进制仓库或 npm，普通用户可以用 `claude install <version>` 或 npm 安装它；否则就需要内部构建、私有下载源和相应权限。**
 
 ## 正文
 
@@ -134,6 +137,68 @@ npm view @anthropic-ai/claude-code versions --json
 这句话不会立刻把整段对话永久塞进 prompt。Session Memory 在会话和项目边界内，通过 hook、token 门槛和受限 fork 提炼少量可复用事实；下一次 `/resume` 或新会话启动时，记忆文件才可能作为上下文重新注入。真正留下的是经过筛选的根因、边界和命令，不是把当前工单的所有临时猜测都带到下一次。
 
 前面我们已经看过 transcript 如何恢复（20 篇），本章继续追问另一种「保留」，哪些知识会脱离原始对话留下来。
+
+### Auto Memory 记的是跨会话线索，`MEMORY.md` 只是入口
+
+先把官方文档和源码快照的职责分开。Claude Code 当前公开文档把 Auto Memory 描述为「Claude 根据用户的纠正和偏好自行记录的跨会话笔记」；`CLAUDE.md` 仍然是用户或团队主动维护的指令文件。本文的公开行为以[官方记忆文档](https://code.claude.com/docs/en/memory)为准，具体写入提示词和后台提取链路则来自本仓库 `@anthropic-ai/claude-code@2.1.88` 的还原源码。官方页面没有把 AutoDream 当作 Auto Memory 的公开使用契约，后文涉及它时会单独标出源码证据。
+
+源码把可保存的记忆限制为四个并列的 `MemoryType`。它们回答的是不同的问题，不能按「级别」理解：
+
+| `type` | 保存什么 | 什么时候保存、怎样使用 | 例子 |
+| --- | --- | --- | --- |
+| `user` | 用户的角色、知识、责任和工作偏好 | 了解用户画像时保存；解释代码或提出方案时用来调整沟通方式 | 用户有十年 Go 经验，第一次接触这个仓库的 React 部分 |
+| `feedback` | 用户对协作方式的纠正，以及被确认有效的非显然做法 | 用户说「不要这样做」或确认「这样做是对的」时保存；后续按这个方式执行，避免重复得到同一条反馈 | 集成测试不能 mock 数据库；不要在回答末尾重复总结 diff |
+| `project` | 代码和 Git 历史推不出来的进行中工作、目标、期限、决定和事故背景 | 得知谁在做什么、为什么做、何时完成时保存；后续用来理解动机、协调约束和建议范围 | 移动端切发布分支后，周四起冻结非关键合并 |
+| `reference` | 外部系统中的信息入口及其用途 | 得知 Linear 项目、Slack 频道或 Grafana 面板的用途时保存；需要外部事实时按入口查最新内容 | Pipeline bug 记录在 Linear 的 `INGEST` 项目 |
+
+这里的 `type` 只负责说明记忆内容的语义；在启用 Team Memory 的组合提示词里，源码还会为这些类型提供 private/team 的保存范围提示，那是下一篇讨论的作用域问题。四类记忆也都有共同的排除项：代码结构、文件路径、Git 历史和已经写进 `CLAUDE.md` 的规则，当前状态可以直接从项目或版本控制中取得，不应复制成 Auto Memory。
+
+#### 具体记忆在 topic 文件，索引在 `MEMORY.md`
+
+官方文档给出的目录模型是每个仓库一份 memory 目录；在 2.1.88 的普通 Auto Memory 提示词里，保存一条记忆要走两步，先写自己的 topic 文件，再在 `MEMORY.md` 增加一行指针：
+
+```text
+~/.claude/projects/<project>/memory/
+├── MEMORY.md              # 入口索引，不放具体记忆正文
+├── user_role.md           # 一条 user 记忆
+├── feedback_testing.md    # 一条 feedback 记忆
+└── ...                    # 其他按主题组织的文件
+```
+
+topic 文件用 YAML frontmatter 标出 `name`、`description` 和 `type`，正文保存事实、规则以及适用原因。`MEMORY.md` 没有 frontmatter，每个条目应是短的 `- [标题](topic.md) — 一行提示`，它是目录，不是另一份正文。源码把这条约束写进 `buildMemoryLines()`：不要把记忆内容直接写进索引，也不要重复创建已有 topic 文件。
+
+当前官方文档规定，每次会话启动最多加载 `MEMORY.md` 的前 200 行或 25KB，先到哪个上限就停；topic 文件（例如 `user_role.md`）不会在启动时全部加载，而是在需要时用普通文件工具读取。因此索引必须保持短，详细事实放在 topic 文件。2.1.88 的 `MAX_ENTRYPOINT_LINES = 200` 与 `MAX_ENTRYPOINT_BYTES = 25_000` 和这个公开行为一致，但具体线上开关仍属于运行时实现，而不是本文从源码外推的永久承诺。
+
+源码还保留一个由 `tengu_moth_copse` 控制的 `skipIndex` 实验路径。这个路径会让保存提示词只写 topic 文件，跳过维护 `MEMORY.md`；它是灰度实现细节，不能改写成官方默认流程。正常路径下，`MEMORY.md` 仍然可能和 topic 文件一起被修改，但「用户真正要回忆的内容」在 topic 文件里。
+
+#### Auto Memory 的两条日常写入路径
+
+Auto Memory 的写入时机和 Session Memory 的 token 阈值不是一回事。第一条路径发生在工作过程中：`loadMemoryPrompt()` 把保存规则放进主 Agent 的上下文，用户明确说「记住」时，主 Agent 可以立即选择合适的 `type`，写入或更新 topic 文件，并在普通索引路径下补上 `MEMORY.md` 指针。官方文档也明确说明，Claude 不会每个会话都保存内容，而是判断某条信息对未来对话是否有用。
+
+第二条路径发生在主轮次结束、进入 stop hook 收尾时。`stopHooks.ts` 在非 bare 模式下 fire-and-forget 调用 `executeExtractMemories()`；`extractMemories.ts` 再检查主 Agent、`tengu_passport_quail`、Auto Memory 开关和本地模式等门槛，然后以 forked agent 分析从上次游标以来的最近可见消息。它不是把整份历史重新总结一遍：若这段消息里主 Agent 已经对 auto-memory 路径执行过 `Write` / `Edit`，`hasMemoryWritesSince()` 就跳过后台提取并推进游标；只有主 Agent 没有写入时，后台 agent 才尝试补捞遗漏的长期信息。
+
+补捞 agent 先收到已有 memory 文件的 manifest，再按提示词检查重复项；它只能读取、窄范围搜索和执行只读 shell 命令，写入权限被限制在 auto-memory 目录。源码把这条路径定义为 best-effort：fork 失败会记录日志；在真正启动 fork 的路径上，已处理游标只在成功运行后推进，主 Agent 已直接写入时则走单独的跳过分支。不能把「触发了检查」理解为「一定保存了一条记忆」。动态 gate 和实际模型产物仍需运行证据。
+
+可以把两条路径压成下面的时序：
+
+```text
+主 Agent 工作中
+  ├─ 判断值得跨会话保留 → 直接写 topic 文件 +（普通路径）更新 MEMORY.md
+  └─ 主轮次结束进入 stop hook
+       └─ ExtractMemories 检查最近消息
+            ├─ 主 Agent 已写过记忆 → 跳过补捞
+            └─ 没有写过 → forked agent 尝试提炼并写入 memory 目录
+```
+
+#### 什么时候召回，召回后还要不要验证
+
+启动阶段只把 `MEMORY.md` 当作导航加载进上下文；当前问题涉及某个主题，或用户要求回忆过去的工作时，Claude 再按索引读取对应 topic 文件。2.1.88 的 memory prompt 对这一点写得更严格：用户明确要求检查、回忆或记住时必须访问记忆；用户要求忽略记忆时要像 `MEMORY.md` 为空一样继续，不能引用或暗中套用其中内容。
+
+在 2.1.88 中，`buildSearchingPastContextSection()` 只有在 `tengu_coral_fern` 灰度 gate 开启时，才会额外提示如何寻找过去上下文：先用窄关键词搜索 memory 目录中的 topic 文件，再把项目 transcript 作为最后手段。这是可选的检索提示，不是「每次请求都会自动语义召回」的静态保证；官方文档能确认的稳定边界仍是索引启动加载、主题文件按需读取。
+
+召回也不等于事实自动成立。源码要求，记忆中点名的文件先检查是否存在，函数或 feature flag 先搜索确认；用户问「现在」或准备据此行动时，应优先读取当前代码、文件或外部资源。若当前状态与记忆冲突，以眼前可验证的状态为准，并更新或删除过期 topic。官方文档同样把 Auto Memory 定义为上下文而非强制配置；必须在固定时机阻止某个动作，应使用 hook 或权限规则。
+
+因此，Auto Memory 和本章的 Session Memory 处在不同作用域：前者为项目积累跨会话可复用的线索，后者为当前 session 的 `summary.md` 服务于长会话压缩。两者都可能被重新读入上下文，但保存对象、触发路径和消费时机不能混写。
 
 ### Session Memory 以项目和会话划定作用域
 
@@ -486,6 +551,11 @@ Session Memory 的价值恰好来自这些限制，它不试图成为全局知�
 
 | 阶段 | 关键符号 | 位置 | 证据状态 |
 | --- | --- | --- | --- |
+| Auto Memory 类型 | `MEMORY_TYPES` / `TYPES_SECTION_INDIVIDUAL` | `src/memdir/memoryTypes.ts` | 已确认（四类并列；内容不可由代码/Git 推导） |
+| Auto Memory 提示词 | `buildMemoryLines()` / `buildMemoryPrompt()` | `src/memdir/memdir.ts` | 已确认（topic 文件 + `MEMORY.md` 指针；`skipIndex` 可跳过索引） |
+| Auto Memory 路径与索引上限 | `getAutoMemPath()` / `MAX_ENTRYPOINT_LINES` / `MAX_ENTRYPOINT_BYTES` | `src/memdir/paths.ts`、`src/memdir/memdir.ts` | 已确认（200 行 / 25,000 字节） |
+| 轮次结束补捞 | `executeExtractMemories()` / `runExtraction()` | `src/services/extractMemories/extractMemories.ts`、`src/query/stopHooks.ts` | 已确认（gate、直接写入互斥和受限 fork） |
+| 召回与验证提示 | `WHEN_TO_ACCESS_SECTION` / `TRUSTING_RECALL_SECTION` | `src/memdir/memoryTypes.ts` | 已确认（相关时读取；当前状态冲突时以可验证状态为准） |
 | 路径 | `getSessionMemoryDir()` / `getSessionMemoryPath()` | `src/utils/permissions/filesystem.ts` | 已确认 |
 | 注册 | `initSessionMemory()` / `setup()` 调用点 | `src/services/SessionMemory/sessionMemory.ts`、`src/setup.ts` | 已确认 |
 | 提炼入口 | `extractSessionMemory`（post-sampling hook） | `src/services/SessionMemory/sessionMemory.ts` | 已确认 |
@@ -502,7 +572,7 @@ Session Memory 的价值恰好来自这些限制，它不试图成为全局知�
 
 ## 设计决策
 
-源码里找不到官方选型记录，下面的判断来自代码结构，属于解释而非官方声明。
+源码没有提供官方选型记录，下面的解释依据代码结构，不代表官方声明。
 
 **第一，为什么用 post-sampling hook + 阈值，而不是每轮无条件提炼？** 如果每轮都提炼，短会话会得到大量无意义文件，长会话的每个工具结果都会触发一次后台摘要。token 是硬条件、工具数与自然停顿决定时机，等于把「值得提炼」的成本决策放进了控制流，10,000 token 以下不建文件，5,000 token 以内不更新，`tool_use` / `tool_result` 未稳定时不记录「当前状态」。
 

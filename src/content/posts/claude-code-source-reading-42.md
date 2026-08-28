@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读42：AutoDream 如何在后台自动整合记忆 🔬"
 published: 2026-07-24T16:47:29+08:00
-updated: 2026-08-04
+updated: 2026-08-28
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -13,7 +13,7 @@ imagePosition: "left"
 
 上一篇的问题是，**普通用户可以使用 Claude Code 的 Team Memory 吗？**
 
-**普通用户不能靠修改 `settings.json` 把 Team Memory 强行打开，但普通账号也不是永远不能用。** 是否可用取决于发行版是否编译进了 Team Memory、账号是否被灰度开关放行，以及你要的是本地 `team/` 目录还是面向团队的远端同步。
+答案先放在前面，**普通用户不能靠修改 `settings.json` 把 Team Memory 强行打开，但普通账号也不是永远不能用。** 是否可用取决于发行版是否编译进了 Team Memory、账号是否被灰度开关放行，以及你要的是本地 `team/` 目录还是面向团队的远端同步。
 
 ### 先分清“本地 Team Memory”和“远端同步”
 
@@ -25,7 +25,7 @@ imagePosition: "left"
 | 从服务端 pull / 向服务端 push | 上一行条件，再加第一方 Anthropic OAuth、有效 access token，以及 inference/profile 两个 scope | 本地记忆即使存在，也不会远端同步；API key、BYOK 或其他 provider 不满足这道门 |
 | 自动持续同步 | 上一行条件，再加 `github.com` 的仓库 remote | watcher 不启动；没有 GitHub remote 的项目不会建立团队同步 |
 
-可用性要区分本地读取、远端同步和自动持续同步：没有远端同步时，某个已经被放行的构建仍可能在本机读取或写入 `team/`；但这不意味着其他成员会看到相同内容。
+因此，“能不能使用”至少要先问清楚是哪一种，没有远端同步时，某个已经被放行的构建仍可能在本机读取或写入 `team/`；但这不意味着其他成员会看到相同内容。
 
 ### 第一层｜`TEAMMEM` 是构建期能力，不是设置项
 
@@ -53,7 +53,7 @@ export function isTeamMemoryEnabled(): boolean {
 
 watcher 的启动顺序也很明确，先检查 `TEAMMEM` 和两个运行时开关，再调用 `getGithubRepo()`；只有解析到 `github.com/owner/repo` 才会先 pull 一次团队记忆，随后建立文件 watcher。没有 GitHub remote 时，源码会记录 `no github.com remote, skipping sync` 并退出这条同步路径。
 
-### 普通用户的可用性分层
+### 所以普通用户到底能不能用？
 
 - 如果当前安装的公开构建没有把 `TEAMMEM` 编译进去，答案是不能；改配置、改普通环境变量都无效。
 - 如果发行版包含该能力，账号又被 `tengu_herring_clock` 灰度放行，那么普通的第一方 OAuth 账号可以使用本地 Team Memory；源码没有要求必须是内部用户。
@@ -83,13 +83,15 @@ watcher 的启动顺序也很明确，先检查 `TEAMMEM` 和两个运行时开�
 
 ![AutoDream 的触发门、后台任务与记忆写回](/images/posts/claude-code-source-reading-42/42-dream-gates-detail-handdrawn.png)
 
-AutoDream 的三个判断点是「何时尝试」「允许谁执行」和「失败后如何释放锁」；五道门由这三类状态共同决定，而不是一个时间定时器。
+先把「何时尝试」「允许谁执行」和「失败后如何释放锁」分开，后文的五道门就不会被误读成一个时间定时器。
 
 ## 问题
 
+本篇把 AutoDream 还原成后台维护任务：触发门槛筛选值得整合的会话，锁和任务状态避免并发重复，后台提示词负责重组记忆，进度与失败则通过旁路回收。它改变的是记忆维护时机，不改变主 Agent 的工具权限和会话控制流。
+
 上一篇（41）的问题是，**普通用户可以使用 Claude Code 的 Team Memory 吗？**
 
-**普通用户不能靠修改 `settings.json` 把 Team Memory 强行打开，但普通账号也不是永远不能用。** 是否可用取决于发行版是否编译进了 Team Memory、账号是否被灰度开关放行，以及你要的是本地 `team/` 目录还是面向团队的远端同步。
+答案先放在前面，**普通用户不能靠修改 `settings.json` 把 Team Memory 强行打开，但普通账号也不是永远不能用。** 是否可用取决于发行版是否编译进了 Team Memory、账号是否被灰度开关放行，以及你要的是本地 `team/` 目录还是面向团队的远端同步。
 
 ### 先分清「本地 Team Memory」和「远端同步」
 
@@ -131,7 +133,7 @@ export function isTeamMemoryEnabled(): boolean {
 
 watcher 的启动顺序也很明确，先检查 `TEAMMEM` 和两个运行时开关，再调用 `getGithubRepo()`；只有解析到 `github.com/owner/repo` 才会先 pull 一次团队记忆，随后建立文件 watcher。没有 GitHub remote 时，源码会记录 `no github.com remote, skipping sync` 并退出这条同步路径。
 
-### 普通用户的可用性分层
+### 所以普通用户到底能不能用？
 
 - 如果当前安装的公开构建没有把 `TEAMMEM` 编译进去，答案是不能；改配置、改普通环境变量都无效。
 - 如果发行版包含该能力，账号又被 `tengu_herring_clock` 灰度放行，那么普通的第一方 OAuth 账号可以使用本地 Team Memory；源码没有要求必须是内部用户。
@@ -161,6 +163,32 @@ watcher 的启动顺序也很明确，先检查 `TEAMMEM` 和两个运行时开�
 第三个概念是 **lease-like lock**。`.consolidate-lock` 既保存持有进程 PID，也把文件 mtime 当作最后整合时间。两个进程可能同时尝试写入，所以获取后还要重读 PID 验证谁赢了；进程崩溃后，下一次运行则可根据 PID 是否存活和锁年龄回收它。
 
 把三个概念连起来，AutoDream 的主线就很清楚了，轮次结束只是检查机会，门槛负责控制成本，锁负责减少重复执行，后台 Agent 负责真正的语义整理，普通记忆加载链路负责让结果在未来生效。
+
+### Auto Memory 和 AutoDream：一个负责记，一个负责整理
+
+这里要先把两个容易混在一起的词拆开。官方文档里的 **Auto memory** 是跨会话积累知识的持久化机制：主 Agent 可以在对话中直接保存，轮次结束后，源码还会让 `ExtractMemories` 这个 forked agent 检查最近消息，补上主 Agent 漏掉的长期信息。**AutoDream** 则是更低频的 consolidation pass，面对的是已经存在的一批记忆，负责去重、纠错、删掉过期入口并重建索引。它们都可能触碰 `MEMORY.md`，但这里的文件角色始终是索引；真正的记忆内容位于独立的 topic 文件中。官方文档也明确把 `MEMORY.md` 描述为每行一个记忆入口，而不是内容仓库（[How Claude remembers your project](https://code.claude.com/docs/en/memory)）。
+
+| 对比项 | Auto Memory（含 `ExtractMemories` 补捞） | AutoDream |
+| --- | --- | --- |
+| 核心职责 | 把当前对话中值得跨会话保留的新信息写成记忆 | 把多轮会话积累的记忆重新合并、校正和裁剪 |
+| 主要对象 | 当前轮次的消息，以及待写入或更新的 topic 文件 | 整个 memory 目录、历史 transcript 和最近变更的会话 |
+| 触发时机 | 主 Agent 工作中可直接写；主轮次结束后再由 `ExtractMemories` 异步补捞 | 同样在主轮次结束时获得检查机会，但只有调度门槛通过才启动 |
+| `MEMORY.md` 的作用 | 新建记忆时通常追加一个 topic 指针；已有指针不必重复改写 | Phase 4 清理失效指针、压缩过长入口并补齐重要指针 |
+| 频率与门槛 | 没有 AutoDream 的 24 小时/5 会话门槛；仍受功能开关、主 Agent、Remote 等条件约束 | `2.1.88` 静态默认至少间隔 24 小时、积累 5 个其他会话，并以 10 分钟扫描节流控制检查成本；这些调度值可被远程实验配置覆盖 |
+
+因此，一轮结束时的统一时序是：
+
+```text
+主 Agent 在会话中发现新信息
+    └─ 直接写入 topic（必要时同步 MEMORY.md 索引）
+
+主轮次结束
+    ├─ ExtractMemories：若主 Agent 本轮没有写 memory，就 fork 检查最近消息并补捞
+    │                    正常路径写 topic + MEMORY.md；skipIndex 实验路径只写 topic
+    └─ AutoDream：低频检查时间、会话积累和锁，满足门槛后批量整理 topic + MEMORY.md
+```
+
+`skipIndex` 不是 AutoDream 的另一种触发方式，而是 `ExtractMemories` 提示词的索引例外：`tengu_moth_copse` 开启时，补捞 Agent 仍可按类型写入独立 topic，但提示词会移除“第二步：在 `MEMORY.md` 添加指针”。这说明“可能修改 `MEMORY.md`”不是两个系统都在每轮重写索引：Auto Memory 的正常保存路径和 AutoDream 的整理阶段会维护它，具体是否写入仍取决于有没有新入口或需要清理；topic 文件才是两条路径共同维护的事实载体。
 
 ### 轮次结束提供触发机会
 
