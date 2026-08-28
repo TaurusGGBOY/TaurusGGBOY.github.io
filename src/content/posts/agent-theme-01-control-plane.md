@@ -1,8 +1,8 @@
 ---
-title: "Agent主题对比01｜为什么不能只比模型"
+title: "Agent主题对比01｜四种 Harness 到底把控制权交给谁"
 published: 2026-08-12T10:01:00+08:00
 updated: 2026-08-28
-description: "模型只负责提出下一步，Harness 决定它看见什么、能调用什么、怎样验证以及何时停下。本文建立 Claude Code、Codex、Pi 与 DeepSeek Harness 的统一比较单位。"
+description: "Claude Code、Codex、Pi 与 DeepSeek Harness 的核心差别，不是功能多少，而是产品替你决定多少、团队必须接管多少。"
 tags: ["agent-theme-comparison", "ai-agent", "agent-harness", "claude-code", "codex", "pi", "deepseek-harness"]
 category: "AI / Architecture"
 draft: false
@@ -12,103 +12,82 @@ slug: "agent-theme-01-control-plane"
 series: "agent-theme-comparison"
 order: 1
 difficulty: "intermediate"
-time: "18 min"
+time: "14 min"
 prerequisites:
-  - "知道语言模型可以输出文本和工具调用"
   - "正在使用或评估至少一种 coding agent"
+  - "能区分产品体验与团队自建运行时"
 topics:
-  - "Agent Harness"
+  - "Harness 控制权"
   - "Claude Code"
   - "Codex"
   - "Pi"
   - "DeepSeek Harness"
-  - "Coding Agent 评估"
+  - "平台责任"
 status: "verified"
 verified_at: "2026-08-28"
 ---
 
-同一个模型装进不同 Agent，可能走不同工具路径、消耗不同 token，也可能在不同位置停下。答案很直接：模型名不能代表完整 Agent。有效能力来自“模型 × Harness × 运行环境 × 任务”，选型和评测都要同时控制这四项。
+四者最值得比较的不是“谁会改代码”，而是谁替你决定工作方式。Claude Code 把最多决定收进成品工作台；Codex 把稳定执行语义与客户端分开；Pi 只保留一个可塑的小核心；DeepSeek Harness 连循环和日志都允许替换。控制权越靠近使用者，自由度越高，团队要接手的工程责任也越多。
 
-你可以把模型想成每一回合提出下一步的人。谁把文件送进上下文，谁真正执行命令，失败后回填哪些信息，怎样限制权限，又凭什么宣布完成，这些工作由模型外面的系统承担。这个系统就是 Harness。
+## Claude Code 与 Pi：接受产品意见，还是自己定义工作方式
 
-## 一个模型名遗漏了三件事
+Claude Code 的优势是整合。它把代码探索、工具反馈、权限、会话和扩展入口放在同一产品体验里，[官方工作原理](https://code.claude.com/docs/en/how-claude-code-works) 也直接围绕“读取代码库—采取行动—根据结果继续”来描述使用方式。相比 Pi，团队不用先设计终端交互、基础工具组合和会话体验，个人开发者可以更快进入真实任务。
 
-假设团队要让 Agent 修复一个横跨 API、数据库迁移和前端页面的缺陷。两位同事都选择同一型号的模型。一位在可写工作区、受限网络和完整测试环境中运行；另一位只能读文件，缺少数据库工具，测试输出还被截断。两次结果不同，不能简单归因于“模型发挥不稳定”。
+这份整合也是 Claude Code 的边界。你可以通过 CLAUDE.md、Skills、Hooks、MCP 和插件改变很多行为，却仍在它定义的产品生命周期、权限语义和交互入口里工作。若团队要替换主循环、重新规定每一类事件怎样入日志，Claude Code 不是最短路径；它的优势来自产品替你做了选择，短板也正是这些选择不会全部交还给你。
 
-差异至少来自三处：Harness 为模型准备了什么信息，提供了哪些行动通道，运行环境又允许这些行动触达什么资源。论文 [What makes a harness a harness](https://arxiv.org/abs/2606.10106) 把 Harness 概括为包裹语言模型、让它能在代码仓库中行动的那一层；[AI Harness Engineering](https://arxiv.org/abs/2605.13357) 则把软件工程能力放在模型、Harness 与环境组成的系统中讨论。这两个定义都把“能回答代码问题”和“能完成代码任务”分开了。
+Pi 走向另一端。[Pi 首页](https://pi.dev/) 把自己称为 minimal agent harness，[README](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/README.md) 强调让使用者按自己的工作流塑造它。相较 Claude Code，Pi 更适合不认同成品默认值的团队：工具少了可以加，界面不合适可以换，行为可以用 TypeScript extension 深入改造，而不必先绕过一整套产品意见。
 
-这里的环境也不是电脑配置表。工作目录是否干净、依赖能否安装、凭据是否暴露、网络是否可达、测试要跑多久，都会改变 Agent 可观察的世界。任务同样需要固定：修一个有明确失败用例的函数，与迁移一个缺少验收标准的系统，不应放进同一分数里比较。
+Pi 的短板不是“功能少”这么简单，而是缺失的决定会变成你的待办。扩展由谁维护，危险命令在哪里隔离，团队成员如何获得一致配置，升级后自定义模块怎样回归，都不再由一个集成产品兜底。Claude Code 用户付出的代价主要是接受边界；Pi 用户付出的代价主要是拥有边界。
 
-## Harness 会把差距放大到任务结果
+## Codex 与 Claude Code：同一产品入口，还是可被多端驱动的执行层
 
-Harness 不是提示词外壳。它决定模型每一回合收到哪些高信号信息、能否组合工具、失败是否可见、上下文何时压缩，以及完成声明前有没有验证。模型给出相同意图时，一个 Harness 可能把它翻译成受限命令并回传完整 stderr；另一个可能只返回“执行失败”。下一回合的判断自然会分叉。
+Codex 与 Claude Code 都提供较完整的使用表面，但控制权切分不同。[OpenAI 对 Codex agent loop 的说明](https://openai.com/index/unrolling-the-codex-agent-loop/) 把核心描述为用户、模型和工具之间的编排；[App Server 工程文章](https://openai.com/index/unlocking-the-codex-harness/) 更关键：IDE 等客户端可以驱动同一 Harness，而不必各自重写循环。对产品集成团队而言，Codex 的优势不是多一个 UI，而是可以把执行层当成协议化能力复用。
 
-[The Scaffold Effect in Coding Agents](https://arxiv.org/abs/2607.22585) 专门把 Harness 当作编码 Agent 评测中的隐藏变量。论文在其受控任务和配置内报告，同一模型因 Harness 不同，解决任务所需 token 可相差到 40 倍。这个数字不能外推成某个产品永远更省 token；它能支持的结论是：不记录 Harness，就连“每个已解决任务的成本”也无法只归因于模型。
+Claude Code 更像一套向用户交付完整体验的工作台，Codex 更像既有官方客户端、又把 thread、turn、item 等运行语义暴露给客户端的执行层。前者减少了产品拼装，后者减少了多端重复实现。若需求只是让工程师在终端高效工作，Codex 的协议面可能成为额外概念；若要把同一 Agent 接进 IDE、桌面端或内部系统，Claude Code 的产品完整性反而不等于集成者拥有底层状态协议。
 
-更早的 [SWE-agent 研究](https://papers.neurips.cc/paper_files/paper/2024/file/5a7c947568c1b1328ccc5230172e1e7c-Paper-Conference.pdf) 也显示，面向语言模型设计交互界面会影响下游任务表现。工具的参数、观察结果的格式、一次允许编辑多少内容，看似是界面细节，实际都进入了模型的决策回路。
+Codex 的短板也随这条边界出现：App Server 给了集成入口，却不替内部产品团队完成 UI、任务队列、租户隔离、身份映射和异常恢复。它比 Pi 少造一层核心执行语义，比 Claude Code 多承担一层宿主产品责任。选择 Codex，不是在“成品”和“框架”之间免费得到两者，而是购买一个较稳定的中间层，再自己完成最后一公里。
 
-因此，看到“模型 A 在 Agent X 中优于模型 B”时，先问四个问题：两个模型是否使用同一 Harness，权限和资源是否一致，任务集合是否相同，停止和计分规则是否相同。少一个，结论就只能描述那次组合。
+## Pi 与 DeepSeek Harness：改造 Agent，还是重组运行时
 
-## 四个项目把责任放在不同位置
+Pi 的小核心主要服务于“把 coding agent 改成我的工具”；DeepSeek Harness 的公开架构则把目标推到“把运行时部件重新组合”。其[架构文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md) 把模型适配器、工具注册表、会话日志和 Agent loop 都列为插件。和 Pi 的 TypeScript extensions 相比，DeepSeek Harness 暴露的不是几个行为钩子，而是更接近运行时骨架的替换面。
 
-这组文章比较 Claude Code、Codex、Pi 与 DeepSeek Harness，不按功能数量打分。我们关心它们把上下文、工具、权限、会话和验证责任放在哪里。
+这使 DeepSeek Harness 在异构模型、不同传输层或实验性会话结构上更有吸引力。Pi 适合围绕一个小而可用的 Agent 逐步加能力；DeepSeek Harness 更适合一开始就需要替换 provider、事件流或编排部件的平台研究。反过来，若目标只是增加一个数据库工具或调整交互，DeepSeek Harness 的运行时自由会带来比 Pi 更大的理解、配置和兼容成本。
 
-| 项目 | 公开资料呈现的设计取向 | 选型时真正要问的问题 |
-| --- | --- | --- |
-| Claude Code | 集成式 Agent 开发工作台 | 团队是否需要一套已经组合好的代码理解、工具、权限和工作流体验 |
-| Codex | 跨 CLI、IDE、应用与自动化表面的执行层 | 多个客户端能否驱动同一套 Agent 语义，并保留一致的任务状态 |
-| Pi | 可塑的最小 Harness | 团队是否愿意自己选择扩展、隔离和工作流约束 |
-| DeepSeek Harness | 可重组的运行时与异构编排底座 | 团队是否真的需要替换运行时部件，并能承担预览期变化与安全责任 |
+这里不能忽略成熟度差异。DeepSeek Harness 的 [README](https://github.com/deepseek-ai/deepseek-harness) 明确标为 developer preview，并警告会出现破坏兼容性的变化；这意味着它现在提供的是值得研究的控制面，不是已经稳定的企业扩展契约。Pi 同样把稳定工作流的责任交给使用者，但它的最小定位减少了需要理解的运行时层次；DeepSeek Harness 则要求团队同时拥有架构判断和升级预算。
 
-[Claude Code 的工作原理](https://code.claude.com/docs/en/how-claude-code-works) 把它描述为读取代码库、采取行动并根据反馈继续工作的 Agent；工具结果会回到循环，影响下一步。它的公开产品文档覆盖上下文、工具、权限与多种工作流，因此本文把它视为集成式工作台。这是产品形态判断，不代表它在所有任务上质量最高。
+## 真正的锁定点各不相同
 
-[OpenAI 对 Codex agent loop 的说明](https://openai.com/index/unrolling-the-codex-agent-loop/) 把核心循环定义为对用户、模型与工具交互的编排。[App Server 的工程文章](https://openai.com/index/unlocking-the-codex-harness/) 说明 IDE 等客户端可以驱动同一 Harness，而不用各自重写循环。这里比较的是 Codex 的执行语义，不把某一个客户端拥有的界面功能算成模型能力。
+控制权还会改变团队怎样协作。Claude Code 可以把常用规则放进项目说明和产品扩展点，新成员进入的是相对一致的现成体验；Pi 允许每个人快速塑造自己的终端，但如果 extensions、提示规则和启动参数没有被版本化，同一个仓库会出现多套事实标准。Claude Code 的一致性更多由产品形态提供，Pi 的一致性必须由仓库治理提供。
 
-[Pi 官方首页](https://pi.dev/) 直接将它定位为 minimal agent harness；其 [coding agent README](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/README.md) 强调以扩展塑造工作方式。较少的内建选择给了使用者更大的改造空间，也把更多组合、隔离和维护责任交给使用者。少并不自动等于更安全，也不自动等于更高效。
+Codex 与 DeepSeek Harness 面对的则是平台一致性。Codex 可以让多个客户端复用同一执行层，但客户端仍可能选择不同的事件展示、批准流程和恢复策略；一致的是 Harness 语义，不一定是用户体验。DeepSeek Harness 允许不同 profile 装配不同 provider、transport 和插件，灵活度更高，却更容易出现“同名 Agent 实际运行图不同”。两者都需要配置身份与版本记录，DeepSeek Harness 还要记录完整插件图。
 
-[DeepSeek Harness 架构文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md) 将模型适配器、工具注册表、会话日志和 Agent loop 都设计成插件。它适合用来观察“连循环本身都可替换”的运行时思路。项目 [README](https://github.com/deepseek-ai/deepseek-harness) 同时写明它处于 developer preview，可能出现破坏兼容性的变化；[SAFETY.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md) 说明它未经安全审计，不能视为生产就绪。可重组是架构主张，不是已经得到独立验证的性能优势。
+升级时，Claude Code 用户主要验证官方更新是否改变现有工作流与扩展；Codex 集成者还要验证 App Server 协议和自己的客户端。Pi 团队必须重新跑所有内部 extensions，DeepSeek Harness 团队则要同时检查插件接口、装配顺序和事件消费者。控制权从产品向团队移动以后，升级不再只是“新版本能否启动”，而是“我们自己拥有的每个契约是否仍然成立”。
 
-## 比较单位要落到一张任务卡
+人员结构因此会让结论反转。一个没有专职平台工程师的五人产品组，即使欣赏 DeepSeek Harness 的可替换循环，也更可能从 Claude Code 获益；一个已有 IDE、任务队列和审计系统的平台组，即使 Claude Code 对终端用户更完整，也可能更需要 Codex 的执行接口。Pi 位于两者之间：它不要求先造完整平台，但至少需要有人持续维护扩展与隔离。
 
-“模型 × Harness × 运行环境 × 任务”不是学术装饰。真正做选型时，可以把一次试验写成下面这张任务卡：
+Claude Code 最难替换的是已经形成习惯的整合工作流：权限规则、团队说明、插件与日常交互一起迁移，成本高于换一个命令。Codex 最难替换的是围绕 App Server 语义建立的宿主集成：客户端一旦依赖 thread、turn、item 和审批事件，替换执行层就要重做协议适配。
 
-| 变量 | 需要固定或记录的内容 |
-| --- | --- |
-| 模型 | 精确版本、推理档位、上下文限制 |
-| Harness | 产品与版本、启用的工具、扩展、停止规则 |
-| 运行环境 | 操作系统、仓库状态、权限、网络、依赖与资源限制 |
-| 任务 | 输入、允许修改范围、验收测试、超时和人工介入规则 |
+Pi 最难替换的不是核心，而是团队自己长出来的 extension 集合。自由定制越成功，内部模块越可能变成只有少数人理解的私有平台。DeepSeek Harness 的锁定点则在插件图与事件契约：理论上部件可替换，实际 profile、provider、transport 和日志消费者一旦互相依赖，迁移仍然是一项运行时工程。
 
-比如比较四个项目修复同一缺陷，应给它们相同的起始提交、失败测试、依赖缓存和网络策略。若 Pi 被放进容器，Claude Code 在宿主机运行，Codex 获得外网，而 DeepSeek Harness 只能读取本地文件，这次试验仍有使用价值，但它回答的是“四套完整部署怎样表现”，不能回答“哪个 Harness 更好”。
+因此，“开放”不等于“没有锁定”。Claude Code 与 Codex 的锁定更容易指向产品和协议；Pi 与 DeepSeek Harness 的锁定更多来自自己写下的代码与运维知识。前两者把一部分维护风险交给供应方，后两者把一部分路线决定权拿回团队，也把人员流失和兼容回归风险拿了回来。
 
-记录人工介入也很关键。一个 Agent 用较少 token 完成任务，却要求人反复批准、解释环境和修复中间状态，成本只是从模型账单移到了工程师时间。相反，更多工具调用也可能是在运行测试、检查差异和收集证据。脱离 Trace 看调用次数，很容易奖励乐观的提前停止。
+采购方式也暴露了责任位置。Claude Code 的采购判断应重点验证官方工作流是否覆盖团队高频任务；Codex 还要验证自建宿主的工程预算；Pi 必须把 extension、隔离和内部支持算进总成本；DeepSeek Harness 则要把运行时维护与预览期迁移列成长期岗位，而不是一次性接入项目。只比较订阅费或仓库许可证，会系统性低估后三者由团队承担的成本。
 
-重复试验时，还要保存每轮的最终补丁、工具轨迹和人工决定。只保留一个通过率，无法判断失败来自模型推理、工具缺失、环境抖动，还是验收脚本本身。若要替换其中一个变量，最好保持另外三项不动，再比较结果分布。这样得到的是某个改变在当前任务集里的影响，不会把一次偶然成功包装成产品结论，也方便团队复查。
+退出方案同样不同：Claude Code 应提前导出团队规则与外部工具契约，Codex 应隔离客户端与 App Server 适配层，Pi 应给 extensions 建立独立测试，DeepSeek Harness 应让 profile 和事件消费者可以逐个替换。能否退出，不取决于宣传中的开放程度，而取决于团队有没有把自己新增的耦合写清。
 
-版本也要进入记录。云端产品可能在试验期间更新模型路由或默认工具，本地 Harness 也可能升级扩展和策略。无法锁定服务端版本时，至少记录日期、可见配置、任务输入和完整产物，并把复测结果当作新的时间截面。否则，两周后用同一名称重跑，差异究竟来自模型、Harness 更新还是环境变化，仍然无法解释。
+## 裁决：你愿意接手哪一层责任
 
-这份时间记录也是复盘异常结果时最便宜的线索。
+| 产品 | 优势 | 短板 | 代价 | 适合谁 |
+| --- | --- | --- | --- | --- |
+| Claude Code | 整合度高，工作流和控制入口成套交付 | 主循环与产品生命周期不由团队掌握 | 接受产品边界，并围绕其扩展点建设 | 希望直接使用成熟工作台的个人与团队 |
+| Codex | 执行语义可被 CLI、IDE 和自建客户端复用 | App Server 不替你完成宿主产品和平台治理 | 维护客户端、身份、队列与协议适配 | 要把统一 Agent 执行层嵌入多个入口的产品团队 |
+| Pi | 核心小，行为与工具改造直接 | 隔离、一致配置和扩展质量缺少成品兜底 | 长期维护内部 extensions 与运行环境 | 想拥有工作流、能维护 TypeScript 扩展的小团队 |
+| DeepSeek Harness | 模型、工具、日志、循环都可重组 | 预览期兼容性与生产成熟度不足 | 承担运行时设计、安全隔离和升级回归 | 研究异构编排或自建 Agent 平台的团队 |
 
-## 把设计证据和效果证据分开
-
-公开文档足以支持设计层结论：某个项目是否内建沙箱，工具反馈会不会进入下一回合，运行循环能否被多个客户端驱动，插件能插入哪一层。文档还可以说明项目自己声明的成熟度和限制。
-
-效果证据需要另一套材料。官方写着“支持沙箱”，只说明有这项控制，不等于所有配置都能抵挡不可信输入；官方写着“可扩展”，也不代表扩展后的组合已经稳定运行。任务质量和平均成本需要共同任务、明确版本、相同资源和可检查的方法。安全效果还需要威胁模型、隔离边界与绕过测试。
-
-这也是本系列不设总冠军的原因。Claude Code 的整合度、Codex 的跨表面执行、Pi 的最小核心、DeepSeek Harness 的运行时可替换性，各自解决不同的组织问题。把它们压成一排勾选框，会丢掉最影响结果的责任分配。
-
-## 接下来应该观察什么
-
-读完一份产品介绍，先别问“用了什么模型”。问它如何完成一轮真实工作：需求怎样变成上下文，工具怎样执行，错误怎样回填，越权动作怎样停下，最后用什么证据结束。后面八篇会沿这条路径依次讨论任务循环、人工接管、长任务恢复、宿主状态、扩展、多 Agent、完成证明和条件式选型。
-
-如果你只想带走一个判断方法，就保存那张任务卡。任何看似绝对的产品结论，都应该能还原到模型、Harness、环境和任务。还原不了，它更像一次演示印象，不是可复用的选型证据。
+如果团队没有人明确负责 Harness，Claude Code 通常比 Pi 或 DeepSeek Harness 更诚实：它少给控制权，也少制造无人维护的自由。若团队真正要把 Agent 变成产品能力，Codex 的执行层边界比单一工作台更有价值。只有当“替换循环或事件系统”本身就是目标时，DeepSeek Harness 的深层可组合性才抵得过预览期成本。
 
 ## 本篇引用来源
 
-- [What makes a harness a harness](https://arxiv.org/abs/2606.10106)
-- [AI Harness Engineering](https://arxiv.org/abs/2605.13357)
-- [The Scaffold Effect in Coding Agents](https://arxiv.org/abs/2607.22585)
-- [SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering](https://papers.neurips.cc/paper_files/paper/2024/file/5a7c947568c1b1328ccc5230172e1e7c-Paper-Conference.pdf)
 - [How Claude Code works](https://code.claude.com/docs/en/how-claude-code-works)
 - [Unrolling the Codex agent loop](https://openai.com/index/unrolling-the-codex-agent-loop/)
 - [Unlocking the Codex harness](https://openai.com/index/unlocking-the-codex-harness/)
@@ -116,4 +95,3 @@ Harness 不是提示词外壳。它决定模型每一回合收到哪些高信号
 - [Pi coding agent README](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/README.md)
 - [DeepSeek Harness Architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)
 - [DeepSeek Harness README](https://github.com/deepseek-ai/deepseek-harness)
-- [DeepSeek Harness Safety](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md)
