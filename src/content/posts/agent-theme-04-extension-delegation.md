@@ -55,7 +55,7 @@ Append-only 的优势是既有记录不必为“当前真相”被重写，审�
 
 两者的短板也不能互相抵消。Pi 的树不会自动捕获 extension 在进程外产生的全部副作用；DeepSeek Harness 的事件日志也只记录插件选择写入的事实，漏记的外部动作不会因 append-only 自动出现。前者需要补环境快照，后者需要验证事件覆盖面。任何一方都不能仅凭日志结构宣称恢复正确。
 
-DeepSeek Harness 当前仍处 developer preview，[README](https://github.com/deepseek-ai/deepseek-harness) 警告会有破坏兼容变化。把 session log 设计成可替换插件有研究价值，但长期迁移、重放兼容和恢复成功率还需要具体版本与实测；Pi 的公开 JSONL 树较容易直接检查，却同样把格式消费者和并发策略交给使用者。
+DeepSeek Harness 把 session log 设计成可替换插件，适合研究迁移与重放策略；Pi 的公开 JSONL 树更容易直接检查，却把格式消费者和并发策略交给使用者。前者仍处 developer preview，[README](https://github.com/deepseek-ai/deepseek-harness) 警告会有破坏兼容变化，因此长期兼容与恢复效果需要固定版本实测。
 
 ## 四种恢复都缺少同一块，但缺口位置不同
 

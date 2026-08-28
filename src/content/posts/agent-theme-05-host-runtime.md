@@ -57,7 +57,7 @@ DeepSeek Harness 的[架构文档](https://github.com/deepseek-ai/deepseek-harne
 
 DeepSeek Harness 的短板是状态迁移需要同时考虑 profile 兼容。一个 web profile 产生的会话，能否由 headless profile 恢复，取决于两边安装的 session、tool、provider 和事件消费者，而不是只看会话 ID。Pi 在不同入口间也需要兼容 extensions，但最小核心减少了变化层次；DeepSeek Harness 的运行图越不同，迁移测试越像平台发布测试。
 
-项目仍处 developer preview，[README](https://github.com/deepseek-ai/deepseek-harness) 警告兼容性可能破坏。因此 profiles 当前更适合探索宿主与运行时组合，不应被写成已经稳定的跨端迁移协议。若团队只需要“从 Node 进程调用 Agent”，Pi SDK 的较窄合同通常更容易维护；若要同时研究 Web、ACP 与异构 provider，DeepSeek Harness 才体现差异价值。
+DeepSeek Harness profiles 适合探索宿主与运行时组合；若团队只需要“从 Node 进程调用 Agent”，Pi SDK 的较窄合同通常更容易维护；若要同时研究 Web、ACP 与异构 provider，前者才体现差异价值。[README](https://github.com/deepseek-ai/deepseek-harness) 将项目标为 developer preview 并警告破坏兼容风险，因此这仍不是稳定跨端迁移协议。
 
 ## 审批、断线与并发会暴露谁真正持有状态
 

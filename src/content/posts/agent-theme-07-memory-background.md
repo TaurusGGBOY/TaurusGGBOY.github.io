@@ -45,7 +45,7 @@ OpenAI 的 [Harness engineering](https://openai.com/index/harness-engineering/) 
 
 这使 Codex 适合“交付物驱动”的多 Agent：一个 Agent 产出补丁，另一个只审查特定风险，主流程根据评论和测试决定是否回到实现。Claude Code 更适合用户在产品内快速建立成员或子任务；Codex 更适合平台把不同角色接到已有 thread、review 和客户端界面。前者减少编排代码，后者更容易嵌入组织流程。
 
-Codex 的短板是工程案例不能自动变成通用调度器。公开文章描述的是特定仓库与工具环境，不能证明任何项目只要增加 reviewer 就会更可靠。任务队列、跨 thread 依赖、资源上限和最终仲裁仍需团队设计。Claude Code 的 agent team 也不是免费组织：持续成员越多，协调消息、重复工作和权限范围越需要监督。
+Codex 的工程案例支持“实现—审查—修复”可以在特定仓库与工具环境中形成闭环，不支持增加 reviewer 就普遍更可靠。任务队列、跨 thread 依赖、资源上限和最终仲裁仍需团队设计。Claude Code 的 agent team 也不是免费组织：持续成员越多，协调消息、重复工作和权限范围越需要监督。
 
 两者都可能产生“审查通过”的假象。Claude Code 主 Agent 若只接收子 Agent 摘要，可能遗漏过程中的不确定性；Codex 审查循环若没有明确退出条件，可能在风格意见上来回消耗。Claude Code 需要规定子结果的证据格式，Codex 需要规定 review 的拒绝条件与最大轮次。多一个 Agent 只增加第二个判断者，不自动增加第二份事实。
 

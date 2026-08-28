@@ -62,7 +62,7 @@ DeepSeek Harness 的公开架构强调插件化运行与可追踪事件，[Core 
 
 短板是 Trace 完整不等于任务正确。DeepSeek Harness 只能记录插件看到并写入的事件；错误测试集、遗漏的浏览器路径或未采集的外部副作用，都会让一条结构漂亮的 Trace 支持错误结论。Codex 的运行态反馈同样可能选错指标，但已有宿主语义更容易规定 item 生命周期；DeepSeek Harness 还要先验证插件覆盖和事件契约。
 
-项目处于 developer preview，日志与 telemetry 组合的兼容性需要具体版本验证。这里能支持的判断只是 DeepSeek Harness 公开提供了可重组观察面，不能推导它比 Codex、Claude Code 或 Pi 更容易得到正确答案。若团队没有专人维护证据 schema，可组合日志会比一组朴素、稳定的测试更难复查。
+DeepSeek Harness 的公开资料支持“观察面可重组”这一架构判断，不支持它比 Codex、Claude Code 或 Pi 更容易得到正确答案。项目处于 developer preview，日志与 telemetry 组合的兼容性需要固定版本验证；若团队没有专人维护证据 schema，可组合日志会比一组朴素、稳定的测试更难复查。
 
 ## 四者最容易制造哪种“口头完成”
 
