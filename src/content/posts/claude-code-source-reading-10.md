@@ -1,679 +1,100 @@
 ---
-title: "Claude Code源码解读10：多个 tool_use 如何串并行执行"
+title: "Agent Harness 10｜多个工具调用如何串并行"
 published: 2026-07-24T09:30:00+08:00
-description: "拆解 Claude Code 如何依据单次输入的并发安全性划分 tool_use 批次，并按原顺序串并行执行、回传进度和处理取消与错误。"
-tags: ["claude-code", "source-code", "ai-agent", "tool-orchestration"]
+description: "比较四种 Agent Harness 如何判定工具并发安全、建立独占屏障、限制并发并按原顺序提交结果。"
+tags: ["agent-harness", "claude-code", "codex-cli", "pi", "deepseek"]
 category: "AI / Architecture"
 draft: false
 image: "/images/posts/claude-code-source-reading-10/claude-code-source-reading-00.png"
 imagePosition: "left"
 updated: 2026-08-28
 ---
-## 回答上一篇的问题
+## Claude Code
 
-上一篇留下的问题是，**你知道 Claude Code 自带哪些 tool 吗？**
+![Claude Code 用相邻安全批次和独占屏障调度多个工具调用](/images/posts/claude-code-source-reading-10/agent-theme-10-claude-code-tool-orchestration-handdrawn.png)
 
-工具清单不是调度器的输入原样。源码先在 `getAllBaseTools()` 建候选集，再经过 `isEnabled()`、deny 规则、运行模式、provider 能力和 feature gate，最终把本轮真正存在的工具交给模型；调度器只对这份会话快照负责。
+*静态路径先切批次，流式路径逐个准入；两者都不允许调用越过独占屏障。*
 
-### `getAllBaseTools()` 里的基础清单
+Claude Code 2.1.88 有两套工具编排器。`runTools()` 用于已经拿到完整 `ToolUseBlock[]` 的静态路径，先切批次再执行；`StreamingToolExecutor` 在模型 response 仍返回时逐个接收完成的 tool block，边到边排队。两条路径共享一条安全原则：只有工具针对这次输入明确声明并发安全，调用主体才可以重叠；未知、解析失败或无法判断的调用都走保守路径。
 
-源码把常用工具直接放进数组，把条件工具用展开表达式接入，
+静态路径的 `partitionToolCalls()` 从左到右扫描模型给出的顺序。它先按名称查当前工具池，再用该工具的 `inputSchema.safeParse()` 解析输入；只有解析成功，才调用 `isConcurrencySafe(parsedInput)`。返回值经 `Boolean()` 归一化；函数抛错、工具不存在或 schema 失败都得到 `false`。连续的 true 合进同一并发批次，每个 false 单独成为一个串行批次。例如 `Read A → Grep X → Edit A → Read B` 会形成 `[Read A, Grep X] → [Edit A] → [Read B]`，后一个 Read 不能越过 Edit 提前和前面的读取合并。
 
-```ts
-export function getAllBaseTools(): Tools {
-  return [
-    AgentTool,
-    TaskOutputTool,
-    BashTool,
-    ...(hasEmbeddedSearchTools() ? [] : [GlobTool, GrepTool]),
-    ExitPlanModeV2Tool,
-    FileReadTool,
-    FileEditTool,
-    FileWriteTool,
-    NotebookEditTool,
-    WebFetchTool,
-    TodoWriteTool,
-    WebSearchTool,
-    TaskStopTool,
-    AskUserQuestionTool,
-    SkillTool,
-    EnterPlanModeTool,
-    // 其余条件工具省略
-  ]
-}
-```
-
-因此，最稳定的核心工具可以按职责记，
+并发批次由通用异步生成器 `all()` 执行。它先启动不超过 cap 的 generator，任一 generator 完成后再从等待队列补位；消息更新可以按实际到达速度 yield。cap 来自 `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY`，代码是 `parseInt(value, 10) || 10`：未设置、无法解析或解析为 0 都回退到 10；正整数是正常覆盖方式。源码没有拒绝负数，负数会让“当前 promise 数小于 cap”永远为假，导致该并发批次无法启动，所以负数只能视为未防御的非法输入，而不是受支持选项。
 
-| 类别 | 工具 |
-| --- | --- |
-| 文件与命令 | `Bash`、`Read`、`Edit`、`Write`、`NotebookEdit`、`Glob`、`Grep` |
-| Agent 与计划 | `Agent`、`TaskOutput`、`EnterPlanMode`、`ExitPlanMode`、`TaskStop` |
-| 网络与交互 | `WebFetch`、`WebSearch`、`AskUserQuestion` |
-| 会话辅助 | `TodoWrite`、`Skill` |
-| MCP 与发现 | `ListMcpResources`、`ReadMcpResource`、`ToolSearch` |
-
-源码中的真实名称带有 `Tool` 后缀，例如 `FileReadTool` 的模型名称通常是 `Read`，所以文章里同时写源码名和用户可见名，避免把实现对象名误当成 API 工具名。
-
-### 条件工具才是清单里最容易漏掉的部分
+消息可以实时交错，共享上下文却不能按完成速度乱序修改。并发工具返回的 `contextModifier` 先按 `tool_use_id` 缓冲；整个批次完成后，`runTools()` 按原始 block 顺序逐个回放 modifier，再进入下一个批次。串行工具则在每个 update 到达时立即修改 `currentContext`，后一调用拿到的是前一调用收敛后的上下文。这里维护的不是“所有输出严格有序”，而是副作用可见顺序：并发主体允许乱序完成，跨屏障的 context 不能乱序提交。
 
-`getAllBaseTools()` 后面还会根据构建能力和运行时状态追加工具，
+流式路径没有预先切好的完整数组。`addTool()` 收到一个 block 后立即完成相同的查找、schema 解析和安全分类，并把它标成 queued。`canExecuteTool()` 的条件只有两个：当前没有执行中的工具；或者新调用是安全的，并且所有正在执行的工具也都是安全的。于是多个安全调用可在模型流尚未结束时重叠；不安全调用必须等当前执行清空，开始后独占。队列扫描遇到无法启动的不安全调用会停止，后续调用不能越过它。
 
-- `USER_TYPE === 'ant'` 时才追加 `ConfigTool`、`TungstenTool`，并可能追加 `REPLTool`；
-- `isTodoV2Enabled()` 打开时追加 `TaskCreate`、`TaskGet`、`TaskUpdate`、`TaskList`；
-- `ENABLE_LSP_TOOL` 为 truthy 时追加 `LSPTool`；工作树模式打开时追加 `EnterWorktree`、`ExitWorktree`；
-- `isAgentSwarmsEnabled()` 打开时追加 `TeamCreate`、`TeamDelete`；已有能力模块还可能提供 `SendMessage`、`ListPeers`；
-- `WebBrowserTool`、`WorkflowTool`、`SleepTool`、cron、`MonitorTool`、通知、PowerShell 等工具，取决于构建产物是否提供对应实现；
-- `ToolSearchTool` 会先在“可能启用”的检查中进入基础池，真正是否用于本轮请求，还要看模型、工具规模和延迟发现条件。
+StreamingToolExecutor 没有调用静态路径的数字 cap，因此固定窗口里看不到 `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY` 对这条动态路径的限制。它的约束来自模型逐块产出的速度、完整 block 提交点和安全 gate，而不是“最多 10 个”。这也是两个实现不能混为一谈的地方：静态并发批次有 cap，流式安全 siblings 在源码层没有同一 cap。
 
-所以“Claude Code 自带多少个 tool”要带上运行上下文回答。源码能确认装配规则和候选集合；具体某次运行的数量取决于构建 feature、环境变量、功能开关和当前连接的 MCP server。
+进度和最终结果也采用不同排序承诺。每个工具的 progress 会放入 `pendingProgress`，只要可用就立即 yield；最终结果按内部工具数组扫描。一个仍在执行的并发安全工具不会阻止后面的安全 sibling 先交付结果，因为 `tool_use_id` 能保持配对；但执行中的独占工具会让扫描停止，阻止后续结果跨越屏障。换句话说，Claude Code 维护必要的因果顺序，不把所有可观察事件强制压成一条完成顺序。
 
-### 从候选清单到当前会话工具池
+错误级联同样按依赖假设收口。只有 `Bash` 产生 error tool_result 时，streaming executor 才触发 `siblingAbortController.abort('sibling_error')`；源码解释 shell 命令更可能构成隐式依赖链。Read、WebFetch 等错误不会取消其他 siblings。用户中断与 streaming fallback 使用另外的 abort reason 和 synthetic result。下一轮模型请求仍要等当前 response 结束并把剩余工具结果 drain 完；提前并行只缩短等待窗口，不改变第 08 篇确认的双门禁。
 
-普通模式下，`getTools(permissionContext)` 会从基础集合出发，排除特殊工具，再依次应用 deny 规则和 `isEnabled()`，
+## Codex CLI
 
-```ts
-const tools = getAllBaseTools().filter(tool => !specialTools.has(tool.name))
-let allowedTools = filterToolsByDenyRules(tools, permissionContext)
+![Codex CLI 用读写锁控制并行准入，并用 FuturesOrdered 有序写回结果](/images/posts/claude-code-source-reading-10/agent-theme-10-codex-cli-tool-orchestration-handdrawn.png)
 
-const isEnabled = allowedTools.map(_ => _.isEnabled())
-return allowedTools.filter((_, i) => isEnabled[i])
-```
+*工具 future 可以重叠执行；不支持并行的 handler 持写锁形成独占区，history 按调用顺序 drain。*
 
-`permissionContext` 包含权限模式和规则。`CLAUDE_CODE_SIMPLE` 会走特殊分支，普通情况下只保留 `Bash`、`Read`、`Edit`；REPL 模式同时生效时可能只把 `REPLTool` 暴露给模型，原语工具由 REPL 内部间接使用。
+Codex CLI 固定提交 `c6dee5f` 先把“模型能否一次返回多个工具调用”和“某个 handler 能否并发执行”分开。发采样请求时，`parallel_tool_calls` 取自当前模型的 `supports_parallel_tool_calls` 能力；这允许 provider 在一个 response 中产生多个调用，但不自动授权本地同时执行它们。每个 `ToolExecutor` 还有 `supports_parallel_tool_calls()`，默认返回 `false`，只有 handler 显式 opt in 才进入共享执行区。
 
-因此，后面讨论的 `tool_use` 调度直接读取当前会话筛选完成的 `toolUseContext.options.tools`。同一个 `Read` 是否存在、同一个工具是否启用，都会影响模型能否调用它，以及调度器后面能否找到它。
+完整 `OutputItemDone` 到达后，Codex 把工具调用交给 `handle_output_item_done()`。如果它产生 `tool_future`，sampling loop 立即将 future 压入 `FuturesOrdered`，然后继续读取后续 output item、文本 delta 和 `response.completed`。工具 future 因此可以与其他工具以及剩余模型流重叠；普通 function arguments 仍要到完整 item 才启动，不是看见一段参数 delta 就执行。
 
-## 介绍本章的一些概念
+真正的并发 gate 位于 `ToolCallRuntime`。一个 sampling request 共享一把 Tokio `RwLock<()>`：声明支持 parallel 的调用等待并持有 read guard，不支持的调用等待并持有 write guard。多个 reader 可以同时进入 handler；writer 必须等当前 readers 清空，持有期间又阻止其他 reader 和 writer 准入，所以自然形成独占屏障。工具 runtime 的 readiness 在拿锁之前等待，真正通过 gate 时才记录 handler execution start。
 
-- **并行不是 `Promise.all`**，Claude Code 只并行"同一次模型响应里相邻出现、且对本次输入明确声明并发安全"的调用；其余调用逐个串行，且从不跨越不安全调用重排顺序。
-- **并发安全由工具自己声明**，`partitionToolCalls` 先对输入做 Schema `safeParse`，再调用 `isConcurrencySafe(parsedInput)`；查找失败、解析失败或判断抛异常，一律按串行处理（三层"失败即串行"）。
-- **并发有槽位上限**，`getMaxToolUseConcurrency()` 默认并发数为 **10**，可用环境变量 `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY` 覆盖；批次之间永远按模型给出的调用顺序执行。
-- **顺序一致性靠回放保证**，并发批次的 `contextModifier` 不按完成速度即时应用，而是整批结束后按原始 `tool_use` 顺序回放，消息可以实时交错，共享上下文却按模型顺序收敛。
-- **新工具默认串行**，`buildTool` 为未声明该能力的工具补上 `isConcurrencySafe: () => false`，返回值经 `Boolean(...)` 归一化后只有 `true`/`false` 两种调度结果。
+这个分类是按工具运行时声明，不是按当前参数计算。`exec_command` 和 `shell_command` 在固定提交中都显式返回 true，因此两条命令可以并发进入各自 sandbox/进程生命周期；这并不证明两条命令访问同一文件就安全，调用者和命令自身仍要负责资源冲突。MCP handler 在 server 明确 opt in，或者工具 annotation 的 `read_only_hint` 为 true 时允许并行；两项都没有时回到 false。隐藏工具即使 runtime 声明并行，也不会被 registry 当作可并行的模型工具。
 
-## 本篇新增机制
+Codex 没有像 Claude 静态路径或 DeepSeek Harness 那样在这个固定提交中设置一个全局数字并发上限。一个 response 能形成多少并行 future，先受 provider 返回 item 数量约束，再受 handler opt-in 与 RwLock gate 约束；真正的进程、MCP server、sandbox 和系统资源还可能各自限流。源码只能支持“没有统一数字 cap”，不能推出无限并发能力。
 
-- **串并行决策流程图**，把"两个调用能不能并行"的完整判定分支画成一张图，从查找工具一路到批次合并与槽位约束。
-- **并发安全声明表**，按工具列出 2.1.88 中各内置工具的并发安全声明、默认回退与证据位置。
-- 全部代码块按 `[source]` / `[pseudocode]` / `[inference]` / `[runtime]` 标注证据层级（见 [00-series-guide](00-series-guide.md)）。
+`FuturesOrdered` 解决的是写回顺序，不是串行执行。future 入队后即可各自推进，后面的短工具可能先完成；消费端只有在前面的 future ready 后，才按插入顺序取得后续结果。`drain_in_flight()` 将每个 `ResponseInputItem` 依次写进 conversation history，并检查外部上下文污染标记。它会产生 head-of-line wait，但换来模型请求顺序与结果账本顺序一致。
 
-## 问题
+采样循环必须先看见 response terminal，随后再 drain 全部 `FuturesOrdered`。因此工具 future 的并发分成三层：handler 主体可以在 RwLock read guard 下重叠；结果在 `FuturesOrdered` 中按调用顺序提交；下一次采样等当前 stream 和整个 future 队列共同收敛。这里的“parallel tool calls”从未把 turn 本身变成多个并发 turn。
 
-金额工单的调查要求混合使用多种工具，
+取消时还要区分 runtime 是否拥有自己的清理职责。如果 terminal outcome 已经产生或 task 已完成，Codex 等待并保留真实结果；需要 runtime cancellation 的工具由取消路径取得 terminal outcome 所有权，同时等待进程 teardown；其他工具 task 可直接 abort。最终都形成结构化 aborted response 并发出工具取消事件，避免 history 只留下无结果的调用。并发优化不能绕过这个清理屏障。
 
-> 并行检查金额计算、支付回调和最近改动；通过 issue-tracker MCP 读取事故记录，必要时搜索官方文档。
+## Pi
 
-模型可能在一次响应里同时给出 `Read A`、`Grep B`、`Edit C` 和 `Read D`。本章要回答，**同一次模型响应里的多个 `tool_use`，Claude Code 如何判断哪些可以并行执行、哪些必须串行？** 答案是分批执行，不是四个 Promise 一起丢进 `Promise.all`，但批次怎么切、槽位怎么限、顺序怎么保，都需要看源码。
+![Pi 先顺序准备整批调用，再并发执行主体，最后按模型顺序发送结果](/images/posts/claude-code-source-reading-10/agent-theme-10-pi-tool-orchestration-handdrawn.png)
 
-### 并发优化先问“能否改变语义”
+*Pi 采用整批开关：任一 sequential 工具让全批串行；并行批次没有框架级数字 cap。*
 
-控制 Agent 并发时，不能把所有工具都丢进 `Promise.all`。源码给出的原则是：先按原始顺序划分批次，再只并发执行声明为安全、且不会依赖前一副作用结果的调用；写入、权限询问、取消和需要前序结果的调用要保留顺序。并发槽位改善等待时间，但不等于系统获得了无限吞吐，也不自动解决共享资源冲突。
+Pi 固定提交 `9d2ec7f` 的调度策略比前两套更直接。`ToolExecutionMode` 只有 `sequential` 和 `parallel`。Agent loop 收到一条完整 assistant message 后提取其中全部 tool calls：如果 `config.toolExecution === 'sequential'`，或者任意被调用工具的 `executionMode === 'sequential'`，整批调用走串行；否则整批走 parallel。它不会在一批中切出 `[并行 → 独占 → 并行]` 三个区间，一个 sequential 声明会让所有 siblings 一起降级。
 
-## 正文
+串行路径对每个调用依次执行完整生命周期：发 `tool_execution_start`，完成参数准备与验证，运行 `beforeToolCall`，执行工具，运行 `afterToolCall`，发 `tool_execution_end`，创建并发送 ToolResultMessage，然后才处理下一个调用。准备阶段找不到工具、参数无效、before hook 阻止或 signal 已取消时，会直接产生 immediate error outcome；signal 在一个调用之后变为 aborted，循环停止，不再启动剩余调用。
 
-本文全部引用 `@anthropic-ai/claude-code@2.1.88` source map 还原出的代码。代码块保留真实控制流，删去日志、埋点、遥测与无关分支；`// ...` 表示删节。`[source]` 是还原源码直接片段，`[pseudocode]` 是按源码结构简化的示意，`[inference]` 是依据调用关系推出的解释，`[runtime]` 是运行命令与实测输出。
+parallel 路径需要更精确地理解。外层 `for` 仍按模型顺序发 start 事件并 `await prepareToolCall()`，所以参数转换、schema 校验和 `beforeToolCall` 不会彼此并发。准备成功后，Pi 保存一个异步 thunk，并没有当场启动工具主体；只有所有可接受调用准备结束，`Promise.all(finalizedCalls.map(...))` 才逐个调用这些 thunk，让 `tool.execute()` 和随后的 `afterToolCall`/finalize 重叠。
 
-### 工具池装配｜调度器只对会话快照负责
-
-先交代调度器读取的工具集合从哪来。`getAllBaseTools()` 先建候选集，常用工具直接放进数组，条件工具用展开表达式接入，
-
-```ts [source]
-// restored-src/src/tools.ts（2.1.88 还原源码，条件工具展开已省略部分）
-export function getAllBaseTools(): Tools {
-  return [
-    AgentTool,
-    TaskOutputTool,
-    BashTool,
-    ...(hasEmbeddedSearchTools() ? [] : [GlobTool, GrepTool]),
-    ExitPlanModeV2Tool,
-    FileReadTool,
-    FileEditTool,
-    FileWriteTool,
-    NotebookEditTool,
-    WebFetchTool,
-    TodoWriteTool,
-    WebSearchTool,
-    TaskStopTool,
-    AskUserQuestionTool,
-    SkillTool,
-    EnterPlanModeTool,
-    // 其余条件工具省略
-  ]
-}
-```
-
-最稳定的核心工具可以按职责记，
-
-| 类别 | 工具 |
-| --- | --- |
-| 文件与命令 | `Bash`、`Read`、`Edit`、`Write`、`NotebookEdit`、`Glob`、`Grep` |
-| Agent 与计划 | `Agent`、`TaskOutput`、`EnterPlanMode`、`ExitPlanMode`、`TaskStop` |
-| 网络与交互 | `WebFetch`、`WebSearch`、`AskUserQuestion` |
-| 会话辅助 | `TodoWrite`、`Skill` |
-| MCP 与发现 | `ListMcpResources`、`ReadMcpResource`、`ToolSearch` |
-
-源码中的真实名称带 `Tool` 后缀（如 `FileReadTool` 的模型名称是 `Read`），所以文章同时写源码名和用户可见名，避免把实现对象名误当成 API 工具名。条件工具才是清单里最容易漏掉的部分，`USER_TYPE === 'ant'` 时才追加 `ConfigTool`、`TungstenTool` 并可能追加 `REPLTool`；`isTodoV2Enabled()` 打开时追加 `TaskCreate`、`TaskGet`、`TaskUpdate`、`TaskList`；`ENABLE_LSP_TOOL` 为 truthy 时追加 `LSPTool`；工作树模式打开时追加 `EnterWorktree`、`ExitWorktree`；`isAgentSwarmsEnabled()` 打开时追加 `TeamCreate`、`TeamDelete`，已有能力模块还可能提供 `SendMessage`、`ListPeers`；`WebBrowserTool`、`WorkflowTool`、`SleepTool`、cron、`MonitorTool`、通知、PowerShell 等取决于构建产物；`ToolSearchTool` 先在"可能启用"检查中进入基础池，真正是否用于本轮请求还看模型、工具规模和延迟发现条件。
-
-候选集不等于本轮工具池。普通模式下 `getTools(permissionContext)` 从基础集合出发，排除特殊工具，再依次应用 deny 规则和 `isEnabled()`，
-
-```ts [source]
-// restored-src/src/Tool.ts（2.1.88 还原源码）
-const tools = getAllBaseTools().filter(tool => !specialTools.has(tool.name))
-let allowedTools = filterToolsByDenyRules(tools, permissionContext)
-
-const isEnabled = allowedTools.map(_ => _.isEnabled())
-return allowedTools.filter((_, i) => isEnabled[i])
-```
-
-`CLAUDE_CODE_SIMPLE` 走特殊分支，普通情况下只保留 `Bash`、`Read`、`Edit`；REPL 模式同时生效时可能只把 `REPLTool` 暴露给模型。因此后面讨论的 `tool_use` 调度直接读取当前会话筛选完成的 `toolUseContext.options.tools`，同一个 `Read` 是否存在，都影响调度器能否找到它。
-
-### 三个概念｜冲突域、可交换性、稳定合并
-
-- **冲突域**，两次调用是否可并发取决于它们访问的资源与副作用范围，而非工具名称本身。
-- **可交换性**，执行顺序变化仍产生等价结果的调用具备并行基础。
-- **稳定合并**，执行可以按完成速度流出，回填模型上下文时仍按原始调用顺序配对。
-
-![工具调用如何按冲突域组成并发批次](/images/posts/claude-code-source-reading-10/10-conflict-batches-detail-handdrawn.png)
-
-这张图要回答的是每个调用能否安全地和相邻调用共享执行窗口。批次边界由工具属性、输入和并发槽位共同决定，Promise 数量只是实现细节。
-
-### 不要把多个 tool_use 想成 Promise.all
-
-假设 Claude 一次返回了六个调用，
-
-```text [pseudocode]
-Read A → Grep B → Edit C → Read D → Write E → Glob F
-```
-
-如果两个读取、搜索调用都判断为并发安全，而 Edit、Write 不安全，调度结果会变成，
-
-```text [pseudocode]
-[Read A, Grep B] → [Edit C] → [Read D] → [Write E] → [Glob F]
-     并行             串行        并行        串行        并行
-```
-
-注意最后三个调用不会被重新排列，Claude Code 不会为了"跑得更快"把 `Read D` 和 `Glob F` 越过 `Write E` 合并，因为后面的读取可能应该看到前面写入后的文件状态。这套机制位于 `restored-src/src/services/tools/toolOrchestration.ts`。2.1.88 的静态代码没有构建跨文件依赖图，也没有依据工具名做全局排序；它只按本次响应顺序和每个输入的安全声明切批次。
-
-![Claude Code 多工具串并行调度流程](/images/posts/claude-code-source-reading-10/10-tool-orchestration-handdrawn.png)
-
-### 串并行决策流程图
-
-把上面的判定过程画成决策图（本文依据下文 `[source]` 代码块绘制，证据层级 `[inference]`），
-
-```mermaid
-flowchart TD
-    A[模型返回多个 tool_use<br/>ToolUseBlock[] 按响应顺序] --> B{逐个扫描}
-    B --> C{在当前工具池<br/>findToolByName 找到?}
-    C -- 否 --> S[串行处理<br/>各自独立批次]
-    C -- 是 --> D{inputSchema.safeParse<br/>成功?}
-    D -- 否 --> S
-    D -- 是 --> E{isConcurrencySafe(parsedInput)<br/>是否为 true?}
-    E -- 抛异常 --> S
-    E -- false --> S
-    E -- true --> F{前一个批次<br/>也是并发安全?}
-    F -- 是 --> G[追加进当前并行批次]
-    F -- 否 --> H[新建并行批次<br/>前序成为串行屏障]
-    G --> I[runToolsConcurrently<br/>槽位上限默认 10]
-    H --> I
-    S --> I
-    I --> J[按完成速度流出 progress/结果<br/>contextModifier 按原顺序回放]
-```
-
-记住两条线，**同侧合并、异侧阻断**，只有相邻且都安全的调用合并；**先分类后执行**，`validateInput` 不参与分组，留到单次执行链。
-
-### 第一步｜按本次输入判断并发安全性
-
-真正的分组函数叫 `partitionToolCalls`，
-
-```ts [source]
-// restored-src/src/services/tools/toolOrchestration.ts（2.1.88 还原源码）
-function partitionToolCalls(
-  toolUseMessages: ToolUseBlock[],
-  toolUseContext: ToolUseContext,
-): Batch[] {
-  return toolUseMessages.reduce((acc: Batch[], toolUse) => {
-    const tool = findToolByName(toolUseContext.options.tools, toolUse.name)
-    const parsedInput = tool?.inputSchema.safeParse(toolUse.input)
-    const isConcurrencySafe = parsedInput?.success
-      ? (() => {
-          try {
-            return Boolean(tool?.isConcurrencySafe(parsedInput.data))
-          } catch {
-            return false
-          }
-        })()
-      : false
-    if (isConcurrencySafe && acc[acc.length - 1]?.isConcurrencySafe) {
-      acc[acc.length - 1]!.blocks.push(toolUse)
-    } else {
-      acc.push({ isConcurrencySafe, blocks: [toolUse] })
-    }
-    return acc
-  }, [])
-}
-```
-
-`toolUseMessages` 是模型这次响应里的 `ToolUseBlock[]`，数组顺序就是扫描顺序；`toolUseContext` 提供当前可用工具集合（实际读取 `toolUseContext.options.tools`）；返回值 `Batch[]` 中每个批次有布尔值 `isConcurrencySafe` 和调用数组 `blocks`，`true` 批次可含多个连续调用，`false` 批次在这段实现中只含一个调用。
-
-这里有三层"失败即串行"，`findToolByName` 查找失败时，可选链跳过解析并落到 `false`；`safeParse` 失败同样返回 `false`；输入合法但 `isConcurrencySafe` 抛出异常时，`catch` 仍返回 `false`。无效输入不会因为"看起来像读取命令"而提前并发执行。
-
-### 调度阶段的 safeParse 不等于执行阶段的 validateInput
-
-`inputSchema.safeParse` 先执行工具声明的静态 Schema 约束，必填字段、类型、对象结构，也包括 Schema 声明的长度、数值范围、正则或 refine。可选的 `validateInput` 是第二道工具自定义语义校验，回答"这组已经解析成功的值，在当前运行上下文里能不能继续"，它可以检查跨字段关系、路径规则、运行时状态。例如 `FileReadTool.validateInput` 会检查 PDF 页码范围、路径 deny 规则、不能读取的二进制扩展名和特殊设备路径。`restored-src/src/Tool.ts` 把它定义成可选异步方法，
-
-```ts [source]
-// restored-src/src/Tool.ts（2.1.88 还原源码，合并展示 ValidationResult 与 Tool 相关片段）
-export type ValidationResult =
-  | { result: true }
-  | {
-      result: false
-      message: string
-      errorCode: number
-    }
-
-// Tool<Input, Output> 契约中的可选方法
-validateInput?(
-  input: z.infer<Input>,
-  context: ToolUseContext,
-): Promise<ValidationResult>
-```
-
-第一个参数 `input` 已通过该工具的 Schema，类型由 `Input` 推导；第二个参数 `context` 是当前 `ToolUseContext`，因此校验可读取运行时状态。返回值只有两个分支，成功必须是 `{ result: true }`；失败必须同时给出 `message: string` 和 `errorCode: number`。通用接口没有规定错误码枚举，具体数字及含义由各工具实现，静态源码无法统一穷举。
-
-可选的是方法本身，而不是失败字段。工具没有实现 `validateInput` 时，执行器的可选链得到 `undefined` 并继续向下，不会凭空补出 `{ result: true }`；实现了该方法时，只有显式返回 `result === false` 才会拦住调用，`message` 进入调试日志、分析事件和带原 `tool_use_id` 的 `is_error: true` 工具结果；`errorCode` 只作为 `tengu_tool_use_error` 分析事件字段记录。随后不会再运行 PreToolUse、权限判断或 `tool.call`。两条顺序应该分开记，
-
-```text [pseudocode]
-调度分组：safeParse → isConcurrencySafe
-单次执行：重新 safeParse → validateInput（若有）→ PreToolUse → 权限决策 → tool.call
-```
-
-`partitionToolCalls` 不会调用 `validateInput`。一次调用可以先被归入并发安全批次，随后在执行链里因值级或上下文校验失败；批次标签只说明"可以和谁共享调度窗口"，不代表已越过校验或真正产生副作用。
-
-### isReadOnly 与 isConcurrencySafe 分别描述副作用和调度
-
-"只读"通常意味着"适合并发"，但源码把它们保留成两个能力。以 Bash 工具为例，
-
-```ts [source]
-// restored-src/src/tools/BashTool/BashTool.tsx（2.1.88 还原源码）
-isConcurrencySafe(input) {
-  return this.isReadOnly?.(input) ?? false;
-},
-isReadOnly(input) {
-  const compoundCommandHasCd = commandHasAnyCd(input.command);
-  const result = checkReadOnlyConstraints(input, compoundCommandHasCd);
-  return result.behavior === 'allow';
-},
-```
-
-`isConcurrencySafe(input)` 接收已按 Schema 解析的本次 Bash 输入，并复用 `isReadOnly(input)` 的判断；如果 `isReadOnly` 是 `undefined`，`??` 回退到 `false`。`isReadOnly` 检查具体的 `input.command`，所以同一个 Bash 工具可能因命令不同得到不同分类。相比之下，`FileReadTool` 的两个函数都固定返回 `true`（`restored-src/src/tools/FileReadTool/FileReadTool.ts:373`），但这不代表调度器直接读取 `isReadOnly`，`partitionToolCalls` 调用的仍然是 `isConcurrencySafe`。
-
-还有一个容易忽略的默认值。`restored-src/src/Tool.ts` 的 `buildTool` 会为省略该能力声明的工具补上 `isConcurrencySafe: () => false`（`Tool.ts:759`，注释写着 "assume not safe"）。新工具因此默认串行；返回值经过 `Boolean(...)` 归一化后，只产生 `true` 和 `false` 两种调度结果。
-
-### 第二步｜相邻安全调用组成批次
-
-`partitionToolCalls` 同时约束类别与相邻关系。当当前调用安全、且最后一个批次也安全时，它被追加到最后一个批次；除此之外都新建批次。于是不安全调用天然成为屏障，它前后的两个安全区间不会跨屏障合并。调度器不构建跨工具文件依赖图；具体工具根据解析后的输入声明并发安全性，编排层执行统一分组规则。
-
-### 第三步｜批次并行，批次之间串行
-
-分组完成后，`runTools` 顺序遍历每个批次，
-
-```ts [source]
-// restored-src/src/services/tools/toolOrchestration.ts（2.1.88 还原源码，完整 runTools）
-export async function* runTools(
-  toolUseMessages: ToolUseBlock[],
-  assistantMessages: AssistantMessage[],
-  canUseTool: CanUseToolFn,
-  toolUseContext: ToolUseContext,
-): AsyncGenerator<MessageUpdate, void> {
-  let currentContext = toolUseContext
-  for (const { isConcurrencySafe, blocks } of partitionToolCalls(
-    toolUseMessages,
-    currentContext,
-  )) {
-    if (isConcurrencySafe) {
-      const queuedContextModifiers: Record<
-        string,
-        ((context: ToolUseContext) => ToolUseContext)[]
-      > = {}
-      // Run read-only batch concurrently
-      for await (const update of runToolsConcurrently(
-        blocks,
-        assistantMessages,
-        canUseTool,
-        currentContext,
-      )) {
-        if (update.contextModifier) {
-          const { toolUseID, modifyContext } = update.contextModifier
-          if (!queuedContextModifiers[toolUseID]) {
-            queuedContextModifiers[toolUseID] = []
-          }
-          queuedContextModifiers[toolUseID].push(modifyContext)
-        }
-        yield {
-          message: update.message,
-          newContext: currentContext,
-        }
-      }
-      for (const block of blocks) {
-        const modifiers = queuedContextModifiers[block.id]
-        if (!modifiers) {
-          continue
-        }
-        for (const modifier of modifiers) {
-          currentContext = modifier(currentContext)
-        }
-      }
-      yield { newContext: currentContext }
-    } else {
-      // Run non-read-only batch serially
-      for await (const update of runToolsSerially(
-        blocks,
-        assistantMessages,
-        canUseTool,
-        currentContext,
-      )) {
-        if (update.newContext) {
-          currentContext = update.newContext
-        }
-        yield {
-          message: update.message,
-          newContext: currentContext,
-        }
-      }
-    }
-  }
-}
-```
-
-参数语义，`toolUseMessages` 是待调度的所有调用；`assistantMessages` 用来按 `tool_use.id` 找到产生该调用的 assistant 消息，后续错误和结果才能保留关联；`canUseTool` 是权限决策函数，不负责并发分类，而是在单工具执行链中决定允许、询问或拒绝；`toolUseContext` 包含工具列表、应用状态、文件状态与 `abortController` 等运行上下文。生成器产出 `MessageUpdate`，`message` 可选、可以为 `undefined`；`newContext` 必填，每次更新都携带当时上下文。`queryLoop` 仍对 `update.newContext` 做存在性检查，因为 `toolUpdates` 还可能来自另一种执行器。
-
-外层是普通 `for...of`，当前批次的异步生成器结束以后，才进入下一个批次。所谓"串行执行不安全工具"，在当前分组规则下实际表现为，每个不安全批次只有一个 `blocks` 元素，必须等它结束，后面的批次才能启动。
-
-### 并发批次还受槽位上限约束
-
-安全批次交给 `runToolsConcurrently`。它把每个调用包装成异步生成器，再交给通用的 `all` 合并，
-
-```ts [source]
-// restored-src/src/services/tools/toolOrchestration.ts（2.1.88 还原源码）
-yield* all(
-  toolUseMessages.map(async function* (toolUse) {
-    toolUseContext.setInProgressToolUseIDs(prev =>
-      new Set(prev).add(toolUse.id),
-    )
-    yield* runToolUse(
-      toolUse,
-      assistantMessages.find(_ =>
-        _.message.content.some(
-          _ => _.type === 'tool_use' && _.id === toolUse.id,
-        ),
-      )!,
-      canUseTool,
-      toolUseContext,
-    )
-    markToolUseAsComplete(toolUseContext, toolUse.id)
-  }),
-  getMaxToolUseConcurrency(),
-)
-```
-
-`toolUseMessages` 在这里已经是当前安全批次。每个调用开始前把自己的字符串 `toolUse.id` 加入 `inProgressToolUseIDs`，`runToolUse` 结束后再删除，这个集合只表达哪些调用仍在运行；结果数组与输出顺序由其他结构维护。并发上限来自同文件的 `getMaxToolUseConcurrency`，
-
-```ts [source]
-// restored-src/src/services/tools/toolOrchestration.ts（2.1.88 还原源码）
-function getMaxToolUseConcurrency(): number {
-  return (
-    parseInt(process.env.CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY || '', 10) || 10
-  )
-}
-```
-
-这个零参数函数用 `parseInt(..., 10)` 按十进制解析环境变量。变量缺失、空字符串、解析成 `NaN` 或 `0` 时，`|| 10` 回退到默认并发数 `10`；源码未额外校验正数范围，其他整数只代表这份静态实现会接受的运行时输入。
-
-通用合并器 `all(generators, concurrencyCap = Infinity)` 位于 `restored-src/src/utils/generators.ts:32`。第二个参数省略时默认 `Infinity`，但 `runToolsConcurrently` 明确传入上面的上限，所以这条调用路径默认最多同时推进 10 个工具生成器。
-
-### 并发安全声明表｜谁说自己可以并行
-
-把上面出现的声明集中成表（`[source]` 位置已列出），
-
-| 工具 | `isConcurrencySafe` | 依据 | 说明 |
-| --- | --- | --- | --- |
-| `Bash` | 按命令判断 | 复用 `isReadOnly(input)`（`BashTool.tsx`） | 同一工具因命令不同分类不同；复合命令含 `cd` 时走 `commandHasAnyCd` 分支 |
-| `Read`（FileReadTool） | `true` | 固定返回（`FileReadTool.ts:373`） | 读取不修改共享状态 |
-| `WebSearch` | `true` | 固定返回（`WebSearchTool.ts:200`） | 网络检索视为只读；见下篇边界 |
-| 未声明能力的新工具 | `false` | `buildTool` 补丁 `() => false`（`Tool.ts:759`） | 默认串行，声明安全才放开 |
-| 找不到工具 / 解析失败 / 判断抛异常 | `false` | `partitionToolCalls` 三层失败即串行 | 保守分类，校验留给执行阶段 |
-
-这张表回答"能不能并发"；真正"是否并发执行"还要叠加相邻关系与槽位上限。
-
-### 结果按完成速度流出，上下文按原顺序合并
-
-并发调用通过 `Promise.race` 持续取得最先返回的更新，
-
-```ts [source]
-// restored-src/src/utils/generators.ts（2.1.88 还原源码，all 主循环）
-while (promises.size > 0) {
-  const { done, value, generator, promise } = await Promise.race(promises)
-  promises.delete(promise)
-
-  if (!done) {
-    promises.add(next(generator))
-    if (value !== undefined) {
-      yield value
-    }
-  } else if (waiting.length > 0) {
-    const nextGen = waiting.shift()!
-    promises.add(next(nextGen))
-  }
-}
-```
-
-`all` 把多个 `AsyncGenerator` 合并成一个异步输出流；`concurrencyCap` 是同时推进的生成器上限。`promises` 保存正在推进的生成器，`waiting` 保存超过并发上限、尚未启动的生成器；`Promise.race` 谁先完成就先产出谁的 `value`，`value === undefined` 时不向外 yield，一个生成器结束后才从 `waiting` 头部启动下一个。
-
-然而，工具还可能返回 `contextModifier`，例如更新共享的文件读取状态。若按完成速度立即修改上下文，慢工具和快工具会让最终状态依赖时序。`runTools` 因此先按 `toolUseID` 暂存并发批次的 modifier，等整批完成后，再按原始 `blocks` 顺序逐个应用，
-
-```ts [source]
-// restored-src/src/services/tools/toolOrchestration.ts（runTools 并行分支尾部）
-for (const block of blocks) {
-  const modifiers = queuedContextModifiers[block.id]
-  if (!modifiers) {
-    continue
-  }
-  for (const modifier of modifiers) {
-    currentContext = modifier(currentContext)
-  }
-}
-yield { newContext: currentContext }
-```
-
-`block.id` 是模型为每个 `tool_use` 给出的关联 ID。若某个调用未产生 modifier，`queuedContextModifiers[block.id]` 为 `undefined`，直接 `continue`；若同一个调用产生多个 modifier，它们保持该调用内部的产出顺序。消息可以实时交错显示，共享上下文却仍以模型给出的调用顺序收敛。串行分支不需要排队，每收到一个 `contextModifier`，`runToolsSerially` 立刻基于当前上下文执行它，后一个工具拿到的是更新后的 `currentContext`。
-
-### 两个完成点：工具可以提前启动，下一轮不能越过屏障
-
-这里有两个不同的“完成”，不能混成一个时间点。第一，某个 `tool_use` 内容块在 `content_block_stop` 处完成，参数已经累积并规范化，流式工具执行器可以立刻把它加入执行队列；第二，当前 assistant 流和这一轮工具批次都完成，`queryLoop()` 才能把完整的 assistant 消息与全部 `tool_result` 组成下一轮状态。
-
-因此，某个快工具可能在模型还在发送后续文本或其他工具调用时就已经完成。它的结果先留在调度器的结果集合中，不能单独触发下一次 API 请求。等模型流结束、所有本轮 `tool_use` 都有结果后，`queryLoop()` 才构造 `messagesForQuery + assistantMessages + toolResults`，回到下一轮模型请求。
-
-```text
-content_block_stop(A) → 启动 A
-content_block_stop(B) → 启动 B
-message_stop          → 当前 assistant turn 完成
-等待 A、B             → 收齐 tool_result
-next State            → 下一次 LLM 请求
-```
-
-这条屏障不是为了牺牲并发，而是为了保持消息协议的完整性：同一个 assistant turn 产生的每个 `tool_use` 都必须有对应的 `tool_result`，而且结果不能被普通 user message 插入。并发优化发生在屏障之前，下一轮推理发生在屏障之后。
-
-### progress 为什么能从并发工具里不断冒出来
-
-单个工具通过同一个 `Stream<MessageUpdateLazy>` 先后产出 progress 与最终结果。`streamedCheckPermissionsAndCallTool`（`restored-src/src/services/tools/toolExecution.ts:492`）中完成、失败和关闭流的部分如下，
-
-```ts [source]
-// restored-src/src/services/tools/toolExecution.ts（2.1.88 还原源码）
-.then(results => {
-  for (const result of results) {
-    stream.enqueue(result)
-  }
-})
-.catch(error => {
-  stream.error(error)
-})
-.finally(() => {
-  stream.done()
-})
-```
-
-`results` 是单工具执行完成后得到的更新数组，每个元素依次入队；Promise 拒绝时异常进入 `stream.error`；无论成功或失败，`finally` 都调用 `stream.done()` 结束流。函数前半段的 progress 回调也会调用 `stream.enqueue`，并用 `toolUseID` 和 `parentToolUseID` 标记来源。于是 UI 会持续看到多个生成器交错产生的进度与消息。
-
-### 取消和错误不会伪装成成功
-
-并发执行必须有明确的停止语义。`runToolUse` 在真正进入权限与调用链之前先检查共享的 abort signal，
-
-```ts [source]
-// restored-src/src/services/tools/toolExecution.ts（runToolUse abort 分支）
-const content = createToolResultStopMessage(toolUse.id)
-content.content = withMemoryCorrectionHint(CANCEL_MESSAGE)
-yield {
-  message: createUserMessage({
-    content: [content],
-    toolUseResult: CANCEL_MESSAGE,
-    sourceToolAssistantUUID: assistantMessage.uuid,
-  }),
-}
-return
-```
-
-局部 `content` 由 `createToolResultStopMessage(toolUse.id)` 创建，内部 `tool_use_id` 与原调用配对；随后把 `content.content` 改为带 memory correction hint 的取消文本。yield 对象的 `message` 是 user message，`content: [content]` 作为模型回执，`toolUseResult` 为宿主保留 `CANCEL_MESSAGE`，`sourceToolAssistantUUID` 指向发起调用的 assistant 节点；`return` 随即结束该工具生成器。`signal.aborted` 是布尔值，`signal.reason` 可以是运行时任意值。
-
-未知工具和执行异常也会被转换成 `is_error: true` 的 `tool_result`，并保留 `tool_use_id`。对模型而言，工具失败由此成为一条可进入下一轮推理且保留调用关联的数据。边界也要说清楚，取消检查发生在调用前；已经运行的工具是否能立刻停止，还取决于具体工具是否继续监听同一个 `AbortSignal`。
-
-### 最后怎样回到 queryLoop
-
-知识图谱中的调用关系是 `queryLoop → runTools → runToolsConcurrently/runToolsSerially → runToolUse`。在 `restored-src/src/query.ts` 中，`queryLoop` 消费调度器产生的更新，
-
-```ts [source]
-// restored-src/src/query.ts（2.1.88 还原源码）
-for await (const update of toolUpdates) {
-  if (update.message) {
-    yield update.message
-    toolResults.push(
-      ...normalizeMessagesForAPI(
-        [update.message],
-        toolUseContext.options.tools,
-      ).filter(_ => _.type === 'user'),
-    )
-  }
-  if (update.newContext) {
-    updatedToolUseContext = {
-      ...update.newContext,
-      queryTracking,
-    }
-  }
-}
-```
-
-`toolUpdates` 在普通路径中是 `runTools(...)` 返回的异步生成器。`update.message` 省略时只更新上下文；存在消息时先向宿主 yield，再规范化并筛出 API 能接收的 user 消息，追加到 `toolResults`。`update.newContext` 存在时则覆盖最新工具上下文，并补回当前 `queryTracking`。工具批次全部结束且 abort、hook 均允许继续时，`queryLoop` 构造下一轮状态，
-
-```ts [source]
-// restored-src/src/query.ts（2.1.88 还原源码，next State 构造）
-const next: State = {
-  messages: [...messagesForQuery, ...assistantMessages, ...toolResults],
-  toolUseContext: toolUseContextWithQueryTracking,
-  autoCompactTracking: tracking,
-  turnCount: nextTurnCount,
-  maxOutputTokensRecoveryCount: 0,
-  hasAttemptedReactiveCompact: false,
-  pendingToolUseSummary: nextPendingToolUseSummary,
-  maxOutputTokensOverride: undefined,
-  stopHookActive,
-  transition: { reason: 'next_turn' },
-}
-state = next
-```
-
-`messages` 依次拼接查询前历史、assistant 的 `tool_use` 和 `toolResults`；`toolUseContext` 使用带 query tracking 的上下文；`autoCompactTracking` 保存本轮压缩跟踪；`turnCount` 切到下一轮；`maxOutputTokensRecoveryCount: 0` 与 `hasAttemptedReactiveCompact: false` 重置两类恢复状态；`pendingToolUseSummary` 保存可选摘要 Promise；`maxOutputTokensOverride` 清除临时输出上限；`stopHookActive` 延续 Hook 状态；`transition.reason: 'next_turn'` 标记回环原因。随后 `state = next`，再次请求 Claude API。调度的完整闭环是，模型产出多个 `tool_use`，Claude Code 分批执行并收集带 ID 的结果，再把这些 `tool_result` 放回消息链，让模型决定下一步。
-
-### 小结
-
-多个工具调用的调度可以压缩成五条规则，
-
-1. 调度阶段先解析本次输入，再调用工具的 `isConcurrencySafe(input)`；找不到工具、解析失败或判断异常都按不安全处理，`validateInput` 留到单次执行阶段。
-2. 只合并相邻的安全调用，不跨越任何不安全调用重排。
-3. 安全批次受并发上限约束，默认上限是 10；不安全调用各自形成串行屏障。
-4. progress 和结果按完成速度流出，但并发产生的上下文修改在批次结束后按原 `tool_use` 顺序应用。
-5. 错误和取消仍转换成可关联的 `tool_result`；`queryLoop` 收齐结果与新上下文后，才进入下一轮推理。
-
-Tool orchestration 在保持副作用顺序的前提下，释放工具明确声明安全的并行空间。
-
-## 源码映射表
-
-路径前缀 `restored-src/` 表示 2.1.88 source map 还原源码。行号以当前仓库为准。
-
-| 机制 | 关键符号 | 位置 | 证据状态 |
-| --- | --- | --- | --- |
-| 候选清单 | `getAllBaseTools()` | `src/tools.ts` | 已确认 |
-| 工具池筛选 | `getTools()` / `filterToolsByDenyRules()` / `isEnabled()` | `src/Tool.ts` | 已确认 |
-| 并发分组 | `partitionToolCalls()` | `src/services/tools/toolOrchestration.ts:91` | 已确认 |
-| 批次调度 | `runTools()` | `src/services/tools/toolOrchestration.ts:18` | 已确认 |
-| 串行执行 | `runToolsSerially()` | `src/services/tools/toolOrchestration.ts:118` | 已确认 |
-| 并行执行 | `runToolsConcurrently()` / `markToolUseAsComplete()` | `src/services/tools/toolOrchestration.ts:152,179` | 已确认 |
-| 并发上限 | `getMaxToolUseConcurrency()` | `src/services/tools/toolOrchestration.ts:8` | 已确认（默认 10） |
-| 生成器合并 | `all()` | `src/utils/generators.ts:32` | 已确认 |
-| 工具契约 | `validateInput` / `ValidationResult` / `buildTool` 默认 `isConcurrencySafe` | `src/Tool.ts:759` | 已确认 |
-| Bash 声明 | `isConcurrencySafe` / `isReadOnly` | `src/tools/BashTool/BashTool.tsx` | 已确认 |
-| Read 声明 | `isConcurrencySafe` / `isReadOnly` | `src/tools/FileReadTool/FileReadTool.ts:373` | 已确认 |
-| 单工具执行 | `streamedCheckPermissionsAndCallTool()` | `src/services/tools/toolExecution.ts:492` | 已确认 |
-| 取消分支 | `runToolUse()` abort | `src/services/tools/toolExecution.ts:337` | 已确认 |
-| 结果回环 | `queryLoop()` 消费与 `next` State | `src/query.ts` | 已确认 |
-
-## 设计决策
-
-源码里找不到官方选型记录，以下判断来自代码结构与注释，属于解释而非官方声明。
-
-**第一，为什么按相邻合并，而不是全局排序或构建依赖图？** 2.1.88 的静态代码没有跨文件依赖图。相邻合并是成本最低且语义最安全的方案，模型给出的顺序本身就是"预期观察顺序"，后面的读取大概率想看到前面写入的状态。跨屏障重排（把 `Read D` 挪到 `Write E` 之前）会破坏这个假设，因此被明确禁止。代价是并行的收益被限制在连续的安全区间内，这正是"安全优先于速度"的取舍。
-
-**第二，为什么并发安全由工具自己声明？** 副作用语义只有工具自己知道。统一编排层无法从参数推断 `Read` 与 `Bash git status` 的区别，更无法判断一条 shell 命令是否只读；把声明权交给工具（`isConcurrencySafe(input)` 可以按本次输入分支），编排层只执行统一分组规则，职责边界最清晰。
-
-**第三，为什么默认串行？** `buildTool` 为未声明的工具补 `isConcurrencySafe: () => false`，注释 "assume not safe" 直接写明意图，新工具先按保守处理，作者显式声明安全才放开并发，防止未经审视的并发引入竞态。`FileRead`、`WebSearch` 这类固定 `true` 是明确声明过的例外，而不是默认值。
-
-**第四，为什么 contextModifier 回放而不是即时应用？** 若按完成速度立即修改共享上下文，慢工具与快工具会让最终状态依赖调度时序，同样的输入在不同运行时可能收敛到不同状态。先暂存、整批结束后按原始 `tool_use` 顺序回放，保证结果等价于"串行执行"的收敛路径，消息层可以实时交错，状态层保持确定性。
-
-## 练习｜观察一次多工具响应怎样分批
-
-**练习 1（约 10 分钟），默认配置下观察并发批次。** 用 `claude --debug` 启动，在一个目录里执行一条需要同时读取多个文件的任务（例如"读取项目里的三个源文件，说明各自职责"）。打开 `--debug` 日志，找到工具执行事件。期望输出，日志中相邻的 `Read` 调用出现在同一执行窗口内（`inProgressToolUseIDs` 同时包含多个 ID），进度消息交错出现；随后模型拿到的是按原始顺序回填的结果。
-
-**练习 2（约 10 分钟），把并发上限压到 1 再对比。** 运行 `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=1 claude --debug`，重跑练习 1 的同一任务。期望输出，工具严格逐个执行，`inProgressToolUseIDs` 任意时刻最多一个元素，进度不再交错；最终结果顺序不变。对比两次日志，确认"结果顺序由模型调用顺序决定，与并发配置无关"。
-
-**练习 3（约 10 分钟），用混合批次验证串行屏障。** 提示词明确要求"先读取 A，再修改 B，再搜索 C"（模型通常会连续给出 Read、Edit、Grep）。期望输出，日志中 `Read A` 与 `Grep C` 分属两个批次，`Edit B` 是中间的独立串行批次，即使 Read 与 Grep 都声明并发安全，也不会跨过 Edit 合并。
-
-## 自测
-
-1. `partitionToolCalls` 判断并发安全时，"失败即串行"的三个位置分别是什么？
-2. 为什么并发批次的 `contextModifier` 要等整批结束后再按原始顺序回放？
-3. `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY` 的默认值与回退规则是什么？
-
-<details>
-<summary>参考答案</summary>
-
-1. `findToolByName` 查找失败（可选链跳过解析落到 `false`）；`inputSchema.safeParse` 失败；输入合法但 `isConcurrencySafe` 抛出异常（`catch` 返回 `false`）。三层都让本次调用按不安全处理，校验细节留到单次执行阶段。
-
-2. 因为若按完成速度立即修改共享上下文，慢工具和快工具会让最终状态依赖调度时序。`runTools` 先按 `toolUseID` 暂存 modifier，等整批 `blocks` 结束后再按模型给出的原始顺序逐个应用（`toolOrchestration.ts` 并行分支尾部），保证收敛状态与"串行执行"等价；同一调用产生多个 modifier 时保持内部产出顺序。
-
-3. `getMaxToolUseConcurrency()` 用 `parseInt(process.env.CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY || '', 10) || 10` 解析，变量缺失、空字符串、解析成 `NaN` 或 `0` 时都回退到默认值 `10`；源码未额外校验正数范围。`all()` 的第二参数省略时默认 `Infinity`，但 `runToolsConcurrently` 明确传入该上限。
-
-</details>
-
-## 回顾｜上一篇的问题
-
-<details>
-<summary>展开查看回顾</summary>
-
-上一篇问，**你知道 Claude Code 自带哪些 tool 吗？** 结论是，工具清单不是调度器的输入原样。源码先在 `getAllBaseTools()`（`restored-src/src/tools.ts`）建候选集，常用工具直接进数组（`AgentTool`、`BashTool`、`FileRead/FileEdit/FileWriteTool`、`WebFetchTool`、`WebSearchTool`、`TodoWriteTool`、`SkillTool` 等），条件工具用展开表达式接入，`USER_TYPE === 'ant'` 时追加 `ConfigTool`、`TungstenTool`、`REPLTool`；`isTodoV2Enabled()` 追加 Task 系列；`ENABLE_LSP_TOOL` 追加 `LSPTool`；工作树模式追加 `Enter/ExitWorktree`；Agent Swarms 追加 Team 系列；`WebBrowserTool`、`WorkflowTool`、`SleepTool`、cron、`MonitorTool` 等取决于构建产物。候选集不等于本轮工具池，普通模式下 `getTools(permissionContext)` 先排除特殊工具，再经 `filterToolsByDenyRules` 应用 deny 规则，最后按 `isEnabled()` 逐个过滤；`CLAUDE_CODE_SIMPLE` 分支只保留 `Bash`、`Read`、`Edit`。调度器读的是这份会话快照（`toolUseContext.options.tools`），同一个 `Read` 是否存在直接决定模型能否调用它。所以"自带多少个 tool"要带运行上下文回答，源码能确认装配规则与候选集合，具体数量取决于构建 feature、环境变量、功能开关和 MCP server。
-
-</details>
-
-## 留给下一篇的问题
-
-`WebSearch` 是 Claude Code 的内置网络检索工具。它接收查询词，还可以用 `allowed_domains` 或 `blocked_domains` 限定结果来源；真正执行时，会再发起一轮带服务端 `web_search` 工具的模型请求。
-
-**你认为 `WebSearch` 在任何情况下都可以并发执行吗？**
+因此 parallel 不是“prepare、execute、finalize 全部并行”。prepare 有确定顺序，execute 与每个调用自己的 finalize 可以重叠，`tool_execution_end` 会随各 thunk 完成而交错；`Promise.all` 的返回数组仍保持输入顺序，Pi 再按该顺序创建和发送 ToolResultMessage。UI 可以先看到后一个工具结束，下一轮模型上下文中的结果消息仍按原始 tool call 排列。
+
+Pi 的固定循环没有 parallel 数字 cap。只要整批没有 sequential 标记，所有准备成功的 thunk 都进入同一个 `Promise.all`。工具数量通常由单条 assistant message 限定，具体工具或外部服务可以自行限流，但核心 AgentLoopConfig 没有 `maxParallelToolCalls`。工具作者如果不能保证主体并发，要显式声明 `executionMode: 'sequential'`；省略时不会自动按“可能有副作用”保守串行。
+
+七个基础工具 `read`、`bash`、`edit`、`write`、`grep`、`find`、`ls` 在固定提交中都没有声明 sequential，因此默认进入 parallel 候选路径。文件一致性由更细一层补上：Edit 与 Write 在真正修改前都调用 `withFileMutationQueue(absolutePath, fn)`。队列先把路径规范成 mutation key，同一个 canonical path 的任务串接等待，不同 key 仍可并发。这允许 `Edit A` 与 `Write B` 重叠，同时阻止两个调用同时改 A。
+
+取消不会通过事件监听器立刻释放这把文件队列。Edit/Write 在每个 await 后检查 `signal.aborted`，但一直持有 queue，直到当前异步文件操作真正 settle 才进入 finally 释放下一个 waiter。否则一个已经被标记取消、但底层写入仍可能完成的 promise 会与后来的修改同时操作同一文件。这个局部机制说明：框架级 parallel 只决定何时启动工具，资源级安全仍应由最了解冲突域的工具实现。
+
+工具主体抛错也不会让 `Promise.all` 直接 reject。`executePreparedToolCall()` 捕获异常、等待已经排队的 partial update 事件，然后转成错误 ToolResult；after hook 还有自己的错误归一化。整批结果全部收敛后，`shouldTerminateToolBatch()` 再归约 `terminate`。并发路径提高的是主体重叠度，错误、结果和终止仍被编码回同一条 Agent 协议。
+
+## DeepSeek Harness
+
+![DeepSeek Harness 用有界滚动池、动态重分类和独占提交屏障调度工具](/images/posts/claude-code-source-reading-10/agent-theme-10-deepseek-harness-tool-orchestration-handdrawn.png)
+
+*只有 dispatch/body 重叠；prepare、post-execute、持久化结果和附加上下文都按模型顺序提交。*
+
+DeepSeek Harness 固定提交 `47f9438` 把每个待执行调用分类为 `parallel` 或 `exclusive`。`ctx.tools.executionMode(exec)` 解析当前 agent scope 中真正可见的工具，只有 `isConcurrencySafe(arguments)` **精确返回 `true`** 才得到 parallel；工具未知、隐藏、没有 classifier、参数无效、返回其他 truthy 值或抛异常都得到 exclusive。这个 fail-closed 判定发生在宿主，不进入模型 Schema。
+
+native agent loop 先按模型顺序把 arguments JSON 解析为 `PlannedCall[]`。外层调度读取第一项的实时 classification：exclusive 只组成单调用 group；parallel 则把后续计划作为候选交给 rolling pool。pool 在每次真正 start 前重新调用 `executionMode()`，因为前面工具的有序提交可能修改 registry；一个排队时看似 parallel 的工具可以在启动前变成 exclusive。此时 pool 不让它挤入当前窗口，而是先 drain 已启动 siblings，再把它留给下一轮独占 barrier。
+
+全局 `maxParallelToolCalls` 必须是大于等于 1 的整数，省略时使用 `DEFAULT_MAX_PARALLEL_TOOL_CALLS = 10`；0、负数和小数在插件加载或设置更新时直接报错。值为 1 时 rolling pool 退化为全串行。它只限制一个 Agent step 内已经分类为 parallel 的 native 调用，不是 provider response 的工具数量限制，也不控制 Code Mode 内部子调用。
+
+调度器把生命周期拆成有序 lane 和可重叠区。`startCall()` 先写 durable `tool/call`，再按顺序完成 pre-execute/guards 的 prepare；只有 prepared dispatch 的 around-execute/tool body 放进 `inFlight`，这部分可以重叠。结果落入按模型 index 编号的 slot，`commitReady()` 只沿连续的 head-of-line slot 前进，依次运行 post-execute/finalize、写 `tool/result`、接收 `additionalContexts`，再读取下一项。后面的主体即使先完成，也不能让结果和上下文越过前项。
+
+exclusive barrier 覆盖的不只是 tool body。只有该调用的 post-execute 和结果 commit 完成，后续调用才重新分类并启动。这比“写工具执行完就释放锁”更严格，因为 post policy 可以替换结果、附加下一 step 上下文，甚至改变注册表；让后项提前启动，会使它依据一个尚未提交的旧世界分类。
+
+取消路径保持 call/result 配对。signal aborted 后，scheduler 停止补充 pool，等待所有已启动 dispatch settle，并按模型顺序提交它们；尚未启动的调用会追加 synthetic `TOOL_ABORTED_BEFORE_DISPATCH` 结果。内部 scheduler failure 的语义不同：它停止新 dispatch，`Promise.allSettled` 等待已经启动的工作，然后把第一个内部错误抛到 turn boundary，不为未提交调用伪造成功或普通工具失败结果。普通取消是可表示的运行结果，scheduler 崩溃是执行基础设施失效。
+
+工具结果的 `concludesTurn === true` 在有序 commit 时归约到批次 outcome。它不会回滚或抢停已经启动的 siblings，而是在 group 收敛后通知 Agent loop 结束后续 step。工具可通过结果影响控制流，但仍不能跳过当前批次的审计和 drain。
+
+Code Mode 还有第二个调度池。模型只发一个 `run_code`，程序中的 SDK sub-call 进入 bridge；`maxParallelSubCalls` 同样必须为正整数，默认 10，设为 1 可恢复串行。bridge 复用 parallel/exclusive classifier、启动前重分类和模型/提交顺序，exclusive sub-call 也会一直占据 barrier 到 post-execute commit 完成。它与 native 的 `maxParallelToolCalls` 是两个独立计数器：前者限制一个 run_code 程序内部，后者限制一条 assistant step 的原生 sibling calls。
+
+run_code 结束时会 abort 并 drain 尚未完成的 bindings，排队但未启动的 sub-call 被放弃；已经发生的工具副作用不会因为程序最终失败而自动回滚。Code Mode 减少模型与 harness 的往返，并没有把并发变成事务。无论 native 还是 code，DeepSeek Harness 真正维持的是同一条提交纪律：并发只开放给明确安全的主体，有序 policy、结果和上下文始终是屏障的一部分。
