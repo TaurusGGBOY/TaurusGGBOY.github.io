@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读27：如何连接外部工具与资源"
 published: 2026-07-24T16:47:14+08:00
-updated: 2026-08-04
+updated: 2026-08-28
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -92,6 +92,14 @@ return { worktreePath, worktreeBranch }
 ### Function Calling、Skill 与 MCP 不是同一层
 
 Function Calling/`tool_use` 描述模型如何提出结构化动作；Skill 描述一套可复用的指令和执行方式；MCP 负责外部 server 的连接、能力发现、认证、工具/资源传输。三者可以串在同一条链上，但职责不能互换：配置了 MCP server 不代表工具已连通，Skill 也不等于额外的工具权限。最终仍要经过本地 Schema、权限和结果归一化，再回填 `tool_result`。
+
+### “服务端工具”首先要问：谁在执行
+
+“server tool”这个词在不同层次上容易产生歧义。对 2.1.88 的 Claude Code 来说，MCP server 即使使用 HTTP、SSE 或 WebSocket，工具也会先由本地 MCP client 发现，再经过 `fetchToolsForClient()` 包装成 Claude Code 内部的 `Tool`；调用时由本地运行时发起，结果最终归一为本地 `tool_result`。这里的 server 指协议对端，不等于 Anthropic API 的服务端执行。
+
+当前公开的 Anthropic Messages API 则把工具分成两类。`web_search`、`web_fetch`、`code_execution`、Tool Search、`advisor` 以及远程 MCP Connector 的 `mcp_toolset` 属于服务端执行；它们通常表现为 `server_tool_use` 或对应的服务端结果块，应用不需要像客户端工具那样亲自执行。`bash`、`text_editor`、`memory`、computer use、browser use，以及 Claude Code 的 `Read`、`Edit`、`Bash` 等，则由应用或本地宿主执行。分类和版本应以 [Anthropic Tool Reference](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-reference) 与 [Server Tools](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools) 为准。
+
+混合调用时还有一个边界：如果同一轮同时出现服务端工具和客户端工具，API 可能先以 `stop_reason: 'tool_use'` 把客户端工具交给应用；服务端工具暂时没有结果，等应用回传客户端 `tool_result` 后再继续。这个行为解释了为什么“服务端工具不需要客户端执行”与“混合一轮仍然要等客户端结果”可以同时成立。它是公开 API 的协议对照，不是把当前 API 的服务端循环倒推成 2.1.88 的内部实现。
 
 ## 正文
 

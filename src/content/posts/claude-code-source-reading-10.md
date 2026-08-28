@@ -7,7 +7,7 @@ category: "AI / Architecture"
 draft: false
 image: "/images/posts/claude-code-source-reading-10/claude-code-source-reading-00.png"
 imagePosition: "left"
-updated: 2026-08-04
+updated: 2026-08-28
 ---
 ## 回答上一篇的问题
 
@@ -487,6 +487,22 @@ yield { newContext: currentContext }
 ```
 
 `block.id` 是模型为每个 `tool_use` 给出的关联 ID。若某个调用未产生 modifier，`queuedContextModifiers[block.id]` 为 `undefined`，直接 `continue`；若同一个调用产生多个 modifier，它们保持该调用内部的产出顺序。消息可以实时交错显示，共享上下文却仍以模型给出的调用顺序收敛。串行分支不需要排队，每收到一个 `contextModifier`，`runToolsSerially` 立刻基于当前上下文执行它，后一个工具拿到的是更新后的 `currentContext`。
+
+### 两个完成点：工具可以提前启动，下一轮不能越过屏障
+
+这里有两个不同的“完成”，不能混成一个时间点。第一，某个 `tool_use` 内容块在 `content_block_stop` 处完成，参数已经累积并规范化，流式工具执行器可以立刻把它加入执行队列；第二，当前 assistant 流和这一轮工具批次都完成，`queryLoop()` 才能把完整的 assistant 消息与全部 `tool_result` 组成下一轮状态。
+
+因此，某个快工具可能在模型还在发送后续文本或其他工具调用时就已经完成。它的结果先留在调度器的结果集合中，不能单独触发下一次 API 请求。等模型流结束、所有本轮 `tool_use` 都有结果后，`queryLoop()` 才构造 `messagesForQuery + assistantMessages + toolResults`，回到下一轮模型请求。
+
+```text
+content_block_stop(A) → 启动 A
+content_block_stop(B) → 启动 B
+message_stop          → 当前 assistant turn 完成
+等待 A、B             → 收齐 tool_result
+next State            → 下一次 LLM 请求
+```
+
+这条屏障不是为了牺牲并发，而是为了保持消息协议的完整性：同一个 assistant turn 产生的每个 `tool_use` 都必须有对应的 `tool_result`，而且结果不能被普通 user message 插入。并发优化发生在屏障之前，下一轮推理发生在屏障之后。
 
 ### progress 为什么能从并发工具里不断冒出来
 

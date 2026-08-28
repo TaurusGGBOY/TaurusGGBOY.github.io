@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读08：Claude 请求与响应如何传输"
 published: 2026-07-23
-updated: 2026-08-04
+updated: 2026-08-28
 description: "Claude Code 中的 API 流式请求与事件组装：从 message_start 到 message_stop，以及重试/缓存/provider 适配。"
 tags: ["claude-code", "source-code", "ai-agent", "api-streaming"]
 category: "AI / Architecture"
@@ -69,6 +69,8 @@ if (toolUseContext.abortController.signal.reason !== 'interrupt') {
 | Provider adapter | 统一请求语义映射到 Anthropic / Bedrock / Vertex / Foundry | `getAPIProvider()`、`getAnthropicClient()` |
 
 ## 问题｜从用户消息到模型回答，传输层经历了什么
+
+本篇沿一次模型调用的传输边界展开：请求参数如何构造，streaming 与 non-streaming 如何分流，事件如何被转换成内部消息，以及重试、缓存、错误映射和 provider 适配在哪里介入。核心不是“API 返回了什么”，而是传输层如何把协议不确定性收敛为 Agent loop 能消费的事件。
 
 你按下回车，模型输出会以一串边生成边到达的网络事件出现。它们可能半途失败，也可以被取消，最后要变成 Query Loop 能安全消费的完整内容块。**从用户消息到模型回答，请求与响应在传输层经历了什么？** 本篇沿 `queryLoop` → `queryModel` → provider client → `withRetry` 追踪这条链。源码只支持 2.1.88 的静态调用关系；代码块中的 `// 省略……` 表示删去的无关分支，代码片段不等于完整实现。
 
@@ -464,6 +466,19 @@ case 'message_delta': {
 `updateUsage(current, partUsage)` 的第二个参数允许为 `undefined`；此时返回当前 usage 的副本。对 input/cache token 字段，新的正数才覆盖旧值；`output_tokens` 等字段使用 `??` 回退。函数会把分散在事件里的最新可用字段合成一份 `NonNullableUsage`。`stopReason` 的静态类型是 `BetaStopReason | null`；本函数明确处理了 `max_tokens` 和 `model_context_window_exceeded`，也把停止原因交给 refusal 映射逻辑。更重要的是，**Query Loop 不把 `stop_reason === 'tool_use'` 当唯一依据**，因为源码注释明确说这个值并不始终可靠。
 
 这里直接修改属性，以配合 transcript 写队列持有原对象引用并延迟序列化的行为；原地回填能让已经排队的对象最终带上 usage 和 stop reason。每个底层事件随后还会被包装为 `{ type: 'stream_event', event: part }` 继续向上 yield，内部完整消息与原始增量可以同时存在。
+
+### 公开 API 的 stop_reason，和 2.1.88 的内部 terminal 不是一张表
+
+当前 Anthropic Messages API 的响应级 `stop_reason` 主要有七类：`end_turn` 表示自然完成，`tool_use` 表示客户端工具等待应用执行，`max_tokens` 表示输出上限，`stop_sequence` 表示命中自定义停止序列，`pause_turn` 表示服务端工具循环暂停，`refusal` 表示模型拒绝，`model_context_window_exceeded` 表示上下文窗口耗尽。它们决定 API 消费者是否提交工具结果、继续暂停轮次、压缩上下文或结束请求；完整定义见 [Stop reasons and fallback](https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons)。
+
+这张表不能直接替代 2.1.88 的 `queryLoop()` terminal。前者是 API 响应尾部的协议字段，后者是 Claude Code 内部把 `completed`、`max_turns`、`aborted_tools`、`model_error` 等运行时状态交给宿主的结果。更关键的是，2.1.88 源码注释明确说 `stop_reason === 'tool_use'` 并不可靠，循环以真实出现的 `tool_use` 内容块为继续信号。因此阅读源码时应该同时保留两层，
+
+| 层次 | 判断什么 | 典型证据 |
+|---|---|---|
+| API 传输层 | 这次模型响应为什么停止生成 | `message_delta.delta.stop_reason` |
+| Claude Code 循环层 | 是否执行工具、恢复、取消或收口 | `needsFollowUp`、`state.transition.reason`、`Terminal` |
+
+`stop_reason` 通常要到 `message_delta` 才被回填；它不是每个流式 chunk 都有，也不是工具执行完成事件。模型流结束后，`queryLoop()` 仍要等工具批次结束，才能把结果放进下一次请求。
 
 ### 第六站｜tool_use 怎样把控制权交回 Query Loop
 

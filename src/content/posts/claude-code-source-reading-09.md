@@ -7,7 +7,7 @@ category: "AI / Architecture"
 draft: false
 image: "/images/posts/claude-code-source-reading-09/claude-code-source-reading-00.png"
 imagePosition: "left"
-updated: 2026-08-04
+updated: 2026-08-28
 ---
 ## 回答上一篇的问题
 
@@ -140,6 +140,45 @@ export function getToolSearchBetaHeader(): string {
 2. 模型返回 `tool_use` 后，用同一批工具做名称匹配和输入校验，得到可以进入执行阶段的具体对象。
 
 这两个阶段必须使用对应的契约，才能保证模型看到的名称与 Schema 和执行时的查找、校验一致。Claude Code 的 `Tool` 抽象把“告诉模型什么”和“宿主真正执行什么”放在同一个对象上。
+
+### 从 0 设计一套最小 Tool 系统
+
+如果暂时不看 Claude Code 的 2.1.88 实现，而是从零设计一个能持续扩展的 Agent，最小闭环也不应该只是“模型返回函数名，然后直接执行”。至少要把四层拆开，
+
+1. **契约层**，保存 `name`、`description`、`inputSchema` 和风险元数据；这份结构发给模型。
+2. **注册层**，把内置工具、MCP 工具和插件工具汇成当前会话的工具池，并拒绝名称冲突。
+3. **执行层**，统一做名称解析、Schema 校验、权限判断、取消、超时和结果归一化。
+4. **生命周期层**，在执行前后运行 Hook，记录 transcript、耗时、错误和工具结果。
+
+可以把它压缩成一条不变量，**任何 `tool_use` 都必须经过“注册 → 校验 → 授权 → 执行 → 结果 → 审计”**。模型只能提出调用请求，不能直接获得宿主权限；本地工具、插件工具和 MCP 工具也必须经过同一个执行器。
+
+下面是设计骨架，不是 2.1.88 的逐字源码，
+
+```ts
+type ToolDefinition = {
+  name: string
+  description: string
+  inputSchema: JSONSchema
+  risk: 'read' | 'write' | 'execute' | 'external'
+}
+
+type Tool = {
+  definition: ToolDefinition
+  execute(input: unknown, context: ToolContext): Promise<ToolResult>
+}
+
+async function executeTool(call: ToolCall, context: ToolContext) {
+  const tool = registry.find(call.name)
+  if (!tool) return errorResult(call.id, 'UNKNOWN_TOOL')
+  validate(tool.definition.inputSchema, call.input)
+  await permission.check(tool.definition, call.input, context)
+  await hooks.before(call, context)
+  const result = await withTimeout(tool.execute(call.input, context))
+  return hooks.after(call, result, context)
+}
+```
+
+这套分层回答了几个容易混淆的问题：`Tool` 是模型契约还是函数实现？两者都需要，但不能把模型看到的 Schema 和宿主的权限状态混成一层；工具能否并发，应该由输入和副作用声明决定，而不是由工具名称猜测；工具失败应该成为带原 `tool_use_id` 的结构化结果，而不是让主循环丢失消息配对。
 
 ### Tool 把模型契约与宿主执行放在同一对象
 
@@ -466,6 +505,12 @@ export type ToolUseContext = {
 `restored-src/src/tools/ToolSearchTool/prompt.ts` 说明，工具注册表还有一层“按需目录”。`getPrompt()` 会根据 `tengu_glacier_2xr` 或 ant 路径选择提示容器（`<system-reminder>` 或 `<available-deferred-tools>`），再给出 `select:<name>`、关键词和 `+` 前缀的精确选择语法。模型先看到的是可搜索的工具描述，不是所有 deferred tool 的完整 Schema。
 
 这个列表不是简单的静态黑名单。`isDeferredTool()` 会保留 `alwaysLoad` 工具，把 MCP 工具默认放入 deferred 集合，排除 ToolSearch 自己；fork sub-agent、KAIROS 的 Brief 与 bridge 下的 SendUserFile 还有各自的例外。选中之后，运行时才把工具 Schema 放回当前工具池。因此一次调用可能跨过两次查找：先在 prompt 目录里选能力，再在注册表里按名称找到可执行对象。工具描述也因此成为上下文预算和 prompt cache 的一部分，而不是只有 `Tool` 类型才需要关心的元数据。
+
+#### 本地 ToolSearch 与 API 服务端 Tool Search 不是同一层
+
+这里还要加一个版本和边界说明。2.1.88 源码中的 `ToolSearch` 是 Claude Code 本地工具池上的延迟发现机制：它改变可见工具描述，把选中的 Schema 放回当前工具池，后续仍由 Claude Code 的 `queryLoop()` 和工具执行层处理。源码能确认它如何组织 prompt、deferred 工具和 `tool_reference`，但不能仅凭 `advanced-tool-use-2025-11-20` 这类 Beta header 证明具体的 Anthropic 服务端实现。
+
+当前公开的 Anthropic Messages API 还提供内置 `tool_search_tool_regex` / `tool_search_tool_bm25`。这两个工具由 Anthropic 服务端执行，服务端持有完整工具定义，模型按需搜索并加载工具；也可以由应用自己实现一套客户端搜索。两者都叫 Tool Search，执行边界却不同。具体分类以 [Anthropic Tool Reference](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-reference) 为准；这段是公开 API 对照，不改写本文关于 2.1.88 本地实现的源码结论。
 
 ### 全局工具清单矩阵（GLOBAL TOOL INVENTORY）
 

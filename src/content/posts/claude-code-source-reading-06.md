@@ -7,7 +7,7 @@ category: "AI / Architecture"
 draft: false
 image: "/images/posts/claude-code-source-reading-06/claude-code-source-reading-00.png"
 imagePosition: "left"
-updated: 2026-08-04
+updated: 2026-08-28
 ---
 ## 回答上一篇的问题
 
@@ -341,6 +341,10 @@ state = next
 ```
 
 注意 `maxTurns` 的检查位置，只在**已经产生工具结果、准备再次请求模型**时检查；纯文本最终回答从正常完成分支离开，不受它限制。`maxTurns` 是可选 number，省略或为 0 时 `if (maxTurns && ...)` 不启用限制。`messages` 按查询前历史、assistant 消息、工具结果的协议顺序拼接；`maxOutputTokensRecoveryCount` 重置为 `0`，`maxOutputTokensOverride` 清除临时覆盖；`transition.reason` 固定为 `'next_turn'`。随后 `while (true)` 回到顶部。工具和 `runTools()` 只负责产出结果，**继续推理由 `queryLoop()` 驱动**。
+
+这里的“等待”有一个容易被流式输出掩盖的双重屏障。`StreamingToolExecutor.addTool()` 可以在完整 `tool_use` 内容块到达时提前启动工具；普通 `runTools()` 则在模型流消费完成后统一调度。无论采用哪条路径，`queryLoop()` 都要先等当前 assistant stream 收口，再等这一轮所有工具结果和附件准备完成，最后才构造 `transition.reason = 'next_turn'` 的新状态。
+
+所以，工具执行可以和当前 LLM stream 重叠，但不能因为某个工具先完成就提前发起下一次 LLM 请求。下一轮需要完整的 assistant 消息，以及当前 turn 中每个 `tool_use` 对应的 `tool_result`；快工具的结果只能在内存中暂存，慢工具完成后一起回填。这也是“进度可以先显示”和“推理不能先继续”能够同时成立的原因。
 
 ### 分支 B｜没有 tool_use，恢复、Stop hook、预算、收口
 
