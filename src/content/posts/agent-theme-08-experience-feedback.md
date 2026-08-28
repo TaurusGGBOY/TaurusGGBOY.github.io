@@ -1,6 +1,6 @@
 ---
-title: "Agent主题对比08｜Agent 如何证明任务真的完成"
-description: "用测试、运行态验证、Trace、停止条件和总成本建立 Agent 完成证据链，并比较 Claude Code、Codex、Pi 与 DeepSeek Harness 的验证责任。"
+title: "Agent主题对比08｜谁最容易证明任务真的完成"
+description: "Claude Code 提供成品验证入口，Codex 强调运行态反馈，Pi 把门禁交给扩展，DeepSeek Harness 强调事件可观察性；证据责任各不相同。"
 published: 2026-08-12T10:08:00+08:00
 updated: 2026-08-28
 verified_at: 2026-08-28
@@ -18,91 +18,89 @@ tags:
 category: "AI / Architecture"
 topics:
   - Agent 完成证据
-  - 测试与运行态验证
-  - Trace 与停止条件
-  - Agent 总成本
   - Claude Code
   - Codex
   - Pi
   - DeepSeek Harness
+  - 运行态验证与 Trace
 prerequisites:
   - 能阅读测试输出、日志和代码差异
-  - 了解工具调用与 Agent 循环
-time: 14 分钟
+  - 需要验收 Agent 的完成声明
+time: 16 分钟
 slug: agent-theme-08-experience-feedback
 series: agent-theme-comparison
 order: 8
 ---
 
-判断 Agent 是否完成任务，不能看它有没有说“完成”，要看一条可复查的证据链：改动通过目标测试，真实运行路径得到验证，Trace 能解释关键动作，停止条件没有掩盖失败，所花时间与 token 也在可接受范围内。四种 harness 的差别，正在于它们替你承担了证据链的哪一段。
+Claude Code 最容易在成品工作流里补测试与 Hooks；Codex 最适合把浏览器、日志、指标和 reviewer 接回执行层；Pi 最容易按项目写一套专用门禁；DeepSeek Harness 最容易重组事件与 telemetry。四者都不能凭最终回复证明完成，真正差别是默认留下什么证据，以及缺失证据由产品、宿主、扩展还是运行时团队补。
 
-## 完成是证据链，不是一句回复
+## Claude Code 对 Pi：默认验证入口，还是专用门禁所有权
 
-一个修复可能通过单元测试，却在浏览器里点不开；也可能界面看似正常，却破坏了未覆盖的接口。Agent 的最终回复只是结论，测试结果、运行记录和可追溯过程才是证据。Claude Code 的官方工作流把循环概括为收集上下文、采取行动、验证结果；其中验证可以继续使用测试、检查输出或读取诊断信息，而不是把一次工具成功当成终点。[Claude Code 如何工作](https://code.claude.com/docs/en/how-claude-code-works)
+Claude Code 的[工作原理](https://code.claude.com/docs/en/how-claude-code-works) 把工具结果继续送回后续判断，用户可以让它运行项目测试、读取诊断并检查差异；Hooks 又能在固定事件点触发命令。相比 Pi，Claude Code 的优势是验证可以沿现成工作台展开，不必先写扩展框架，适合已有测试命令和明确验收标准的仓库。
 
-这条证据链可以拆成五问：目标行为有没有测试；真实入口能不能跑通；关键决策能不能回放；失败时会不会诚实停止；完成一次要付出多少时间、token 和人工复核。问题的顺序很重要。没有正确性，低成本没有意义；只有正确性而没有可复查过程，团队也难以信任结果。
+短板是“工具跑过”容易被误写成“目标达成”。Claude Code 运行了单元测试，不代表浏览器路径可用；Hook 退出码为零，也不代表测试没有被跳过。产品提供验证入口，却不会替项目决定哪些测试、断言数量、截图或业务指标构成完成。默认整合降低执行成本，没有降低验收定义成本。
 
-验收证据还要能对应最初请求。用户要修复导出乱码，Agent 却只证明“项目可以编译”，证据是真的，却没有回答主问题。较好的最终报告会把每条需求映射到一个可观察结果：哪个测试覆盖了乱码样例，哪次实际导出生成了正确文件，未覆盖的平台是什么。这样审查者不用从几十条工具调用中猜测任务是否闭环。
+Pi 的 [Extensions 文档](https://pi.dev/docs/latest/extensions) 允许团队注册工具、命令和事件处理器，因此可以把特定项目门禁写成代码：必须运行哪组测试、解析哪些结果、失败后禁止结束、何时要求人工检查。相比 Claude Code，Pi 的优势是门禁不必挤进产品既有事件语义，可以精准匹配内部构建和设备环境。
 
-对跨模块任务，可以在开始前写一张小型验收表，完成后逐项附上命令、输出位置和观察时间。证据缺失的项目保持“未验证”，不要用相邻测试的成功代替。
+Pi 的短板是门禁质量完全属于扩展作者。只检查进程退出码、不确认断言数量，或在超时后把“未完成”包装成“跳过”，都会稳定地产生虚假绿色。Claude Code 的默认工具更容易被普通团队使用，Pi 的专用验证更容易做到精确；但后者必须把 extension 本身当生产测试工具审查。
 
-四个项目给出的默认答案并不相同。Claude Code 提供较完整的工具循环与验证习惯，Codex 更强调把运行态反馈接入 harness，Pi 把验证策略留给扩展和使用者，DeepSeek Harness 则把运行过程组织为可观察、可替换的 runtime。选择之前，要先确认缺失的是验证能力，还是验证纪律。
+## Codex 对 Claude Code：把真实运行反馈接回去，还是留在工作台内验证
 
-## 测试证明已知行为
+OpenAI 的 [Harness engineering](https://openai.com/index/harness-engineering/) 案例展示了给 Agent 接入浏览器自动化、应用日志、指标和截图，并让其他 Agent 审查再修复。相比 Claude Code 主要围绕成品工作台调用工具，Codex 的优势是执行层与宿主集成更适合把真实应用状态做成一等反馈，而不只把测试 stdout 贴回会话。
 
-测试最适合回答“代码是否满足已写明的规则”。修复解析器时，先把复现样例写成失败测试，再改代码并运行相关测试；若改动会影响公共接口，还要跑覆盖面更大的回归集。Claude Code 可以调用项目已有命令并根据结果继续迭代，但官方文档也说明它的行动由工具和权限约束，是否拥有正确测试、运行什么测试，仍取决于仓库与指令。[Claude Code 工具与验证循环](https://code.claude.com/docs/en/how-claude-code-works)
+这对 UI、异步任务与服务故障尤其重要。Codex 宿主可以把一个 turn 中的工具 item、截图、日志和 reviewer 结果关联起来；Claude Code 也能通过工具、Hooks 或 MCP 获取这些证据，但组织方式更依赖产品提供的会话与扩展点。Codex 给予平台团队更大的证据建模权，Claude Code 给予使用者更短的接入路径。
 
-Codex 的工程团队把测试和代码审查放进同一闭环：Agent 实现后由其他 Agent 审查，再根据评论修复；真正困难的部分是让反馈快速、可靠地回到执行循环。[Harness engineering](https://openai.com/index/harness-engineering/) 这说明“能运行测试”只是起点。harness 还要限制无关测试的成本、保留失败输出，并在测试不稳定时避免把偶然通过写成确定结论。
+Codex 的短板是公开工程案例不能证明默认安装已拥有同样环境。浏览器、日志、指标与截图需要仓库和平台先暴露，reviewer 也需要任务边界与退出规则。若内部宿主只转发最终文本，Codex App Server 的事件优势就被自己丢掉。Claude Code 的短板则是团队可能满足于“在终端看到测试通过”，没有建设跨系统证据链。
 
-Pi 走的是更小的核心。官方将它定位为最小 coding-agent harness，并通过 TypeScript 扩展注册工具、命令和事件处理器。[Pi 官网](https://pi.dev/)、[Pi 扩展文档](https://pi.dev/docs/latest/extensions) 好处是团队可以精确实现自己的测试门禁；代价是 Pi 不会替项目发明正确的回归策略。若扩展只检查退出码、不检查断言数量或跳过项，它仍可能产生“绿色但无效”的证明。
+二者还会在失败归因上分叉。Claude Code 用户主要从会话中的工具结果、权限和 Hooks 找原因；Codex 平台可以从 thread/turn/item 关联客户端与执行事件，却要保证事件没有丢失或错误排序。前者诊断入口较集中，后者可观察性上限更高；后者的监控与存储成本也更高。
 
-DeepSeek Harness 允许能力以插件和子系统组合，适合把测试执行、结果提取与策略判断拆开。[DeepSeek Harness 架构](https://www.deepseek.com/harness/en/) 可组合性没有自动提高测试质量：选择了错误测试集，模块化只会更稳定地执行错误策略。
+## DeepSeek Harness 对 Codex：事件可重组，不等于结果已验证
 
-## 运行态验证证明真实路径
+DeepSeek Harness 的公开架构强调插件化运行与可追踪事件，[Core 文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/core.md) 描述工具调用经过 registry，并把模型可见事实追加到 session log。相比 Codex 已有 thread/item 和工程化反馈案例，DeepSeek Harness 更适合替换日志、telemetry、工具结果提取或策略判断部件。
 
-用户抱怨“提交按钮点了没有反应”时，单元测试很难单独结案。Agent 应启动应用，走一遍用户路径，查看浏览器控制台、服务日志、网络请求或生成的截图。Codex 团队在公开工程复盘中把应用运行起来，并给 Agent 接入浏览器自动化、日志、指标和截图，让它能直接观察行为是否符合预期。[Harness engineering](https://openai.com/index/harness-engineering/) 这里证明的是具体运行路径，不等同于整个产品没有缺陷。
+这种可组合性适合研究不同证据管线：一个插件收集测试结果，一个解析应用日志，一个把审批与副作用写入审计流。Codex 更像在既定执行语义上扩展运行反馈，DeepSeek Harness 则允许调整证据怎样进入事件系统。前者更接近产品平台，后者更接近实验运行时。
 
-运行态验证还要匹配故障层级。CLI 工具要核对标准输出、错误码和文件副作用；Web 应用要看交互、请求与服务端状态；异步任务要等待可观测的终态，而不是把“请求已接收”当作“处理已完成”。OpenHands 把 Agent 行为和环境反馈放在统一事件流中，论文将这种事件流描述为 Agent 与环境交互的基础。[OpenHands 论文](https://arxiv.org/abs/2407.16741) 事件存在不代表验证完成，但它能让 harness 基于真实反馈继续判断。
+短板是 Trace 完整不等于任务正确。DeepSeek Harness 只能记录插件看到并写入的事件；错误测试集、遗漏的浏览器路径或未采集的外部副作用，都会让一条结构漂亮的 Trace 支持错误结论。Codex 的运行态反馈同样可能选错指标，但已有宿主语义更容易规定 item 生命周期；DeepSeek Harness 还要先验证插件覆盖和事件契约。
 
-Claude Code、Pi 和 DeepSeek Harness 都能通过工具或扩展接入这类检查，默认完整度却不同。Claude Code 有现成的命令与文件工具，Pi 鼓励使用扩展塑造专用工作流，DeepSeek Harness 强调插件化 runtime。团队应记录每个任务类型必须看到的运行证据，避免把“理论上能接入”误写成“默认已经验证”。
+项目处于 developer preview，日志与 telemetry 组合的兼容性需要具体版本验证。这里能支持的判断只是 DeepSeek Harness 公开提供了可重组观察面，不能推导它比 Codex、Claude Code 或 Pi 更容易得到正确答案。若团队没有专人维护证据 schema，可组合日志会比一组朴素、稳定的测试更难复查。
 
-## Trace 证明过程可复查
+## 四者最容易制造哪种“口头完成”
 
-Trace 不负责证明结果正确，它回答“Agent 为什么得到这个结果”。有用的 Trace 至少保留模型输入边界、工具调用、环境返回、失败重试和最终产物。SWE-agent 的论文指出，Agent–Computer Interface 会显著影响模型能否有效浏览、编辑和执行代码；它用专门接口和防护规则约束交互。[SWE-agent 论文](https://papers.neurips.cc/paper_files/paper/2024/file/5a7c947568c1b1328ccc5230172e1e7c-Paper-Conference.pdf) 因而回看 Trace 时，不应只责怪模型，还要检查接口是否隐藏了关键信息。
+证据保存期会改变谁最省事。Claude Code 的会话与工具输出方便即时复查，但团队若要长期审计，需要决定哪些产物另存；Codex 宿主可以把 item、日志和截图写入平台存储，也必须处理敏感数据与保留策略。Pi 可让 extension 直接输出项目规定的报告，DeepSeek Harness 可让 telemetry 插件形成统一事件库；后两者的可定制性同时带来 schema 迁移责任。
 
-DeepSeek Harness 把可追踪运行列为设计能力，并允许不同 provider、插件和子系统参与同一次执行。[DeepSeek Harness 官网](https://www.deepseek.com/harness/en/) 这种设计适合定位“是模型判断错、工具失败，还是权限拒绝”。不过项目当前是 developer preview，README 明示可能出现破坏兼容性的变更；安全说明也写明它未经安全审计，不能把 sandbox 或审批当作处理不可信输入的唯一安全控制。[DeepSeek Harness README](https://github.com/deepseek-ai/deepseek-harness)、[安全边界](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md)
+证据身份也不同。Claude Code 用户通常知道当前操作者和本地工作区，却要补齐自动任务的身份关联；Codex 平台可以把 thread、客户端用户与 approval 关联，但实现错误会污染整条审计链。Pi 若以共享宿主账号运行，extension 记录的 Agent 名称不能替代真实用户；DeepSeek Harness 多 provider 还要记录远端执行者与 transport。没有身份，Trace 只能说明发生过动作，不能说明谁获准执行。
 
-Trace 也有成本。完整保存每段上下文会增加存储、隐私与审阅负担，删得太狠又无法复现。实际做法是保留影响结论的事件和工件，为敏感字段脱敏，并让最终报告指向具体测试、日志片段或运行产物。摘要可以帮助阅读，原始证据仍要能定位。
+可复现性会进一步拉开距离。Claude Code 与 Codex 的服务端或产品默认值可能随版本变化，复查时至少要保存日期、可见设置和任务 artifact；Pi 可以锁定 extension 与依赖，但模型和外部服务仍可能变化；DeepSeek Harness 能记录 profile 与插件图，却在预览期更需要固定精确提交。四者都不能把同一产品名当作可复现实验配置。
 
-## 停止条件决定失败是否诚实
+独立审查的切入点也不同。Claude Code 最容易让人从最终 diff、测试与会话抽查；Codex 可以把 reviewer 直接接进工作流；Pi 可以写第二个只读验证 extension；DeepSeek Harness 可以更换 verifier 或 telemetry consumer。审查越自动，越要确保验证者没有复用实现者的错误假设，否则多个 Agent 只是重复同一种偏差。
 
-Agent 循环必须知道什么时候成功、失败或请求人工介入。可靠的成功条件应是外部可观察状态，例如“目标测试通过且页面主路径走通”，而不是“模型认为问题已解决”。可靠的失败条件包括重试预算耗尽、权限不足、依赖服务不可用、验证互相矛盾，以及任务边界需要产品决策。
+Claude Code 最容易出现“测试命令成功，所以任务完成”：内建工具让执行很顺，未覆盖的 UI 或业务路径可能被忽略。Codex 最容易出现“事件很多，所以证据充分”：浏览器、日志与 reviewer 都接入后，团队仍可能没有一个明确的最终判定。丰富反馈与有效验收不是同义词。
 
-停止条件太松，Agent 会在未验证时宣布完成；太严，它会反复修改已正确的代码。Claude Code 的子 Agent 拥有独立上下文、工具和权限，并向主会话返回结果摘要。[Claude Code 子 Agent](https://code.claude.com/docs/en/subagents) 主 Agent 因此要把摘要重新接回任务级验收，不能把“子任务已返回”当作整体完成。Codex 的多轮审查同样需要退出规则，否则审查与修复可能循环消耗预算。[Harness engineering](https://openai.com/index/harness-engineering/)
+Pi 最容易出现“我们有自定义门禁，所以更严格”：extension 若无人独立测试，规则漏洞会被复制到每次任务。DeepSeek Harness 最容易出现“每次运行可追踪，所以可审计”：事件缺失、插件版本漂移和 profile 差异会让两条 Trace 不可直接比较。两者都拥有更深的验证控制，也承担验证验证器的递归责任。
 
-遇到不稳定测试时，停止报告应区分三种状态：改动引入的确定失败、与改动无关的已知失败、尚未解释的波动。这个分类比笼统写“测试大体通过”更有用。它保留事实边界，也告诉下一位工程师应该复跑、隔离还是回滚。
+停止条件会继续放大差异。Claude Code 可以由用户要求测试、审查与摘要，但产品不会替业务定义不可接受风险；Codex 工作流可循环 reviewer 与修复，缺少最大轮次会空转；Pi 能在 extension 中强制门禁，错误策略可能让任务永不结束；DeepSeek Harness 能把策略放进插件，组合变化可能使同一任务在不同 profile 下停止条件不同。
 
-人工接管也应是正常终态。若修复需要产品选择、生产凭证或不可逆的数据操作，Agent 应停在决策点，列出已确认事实、候选方案和各自影响。继续猜测不会提高自治，只会把缺少授权伪装成技术进展。一个能准确说明“缺什么才能继续”的 harness，通常比不断重试到超时更可靠。
+成本必须和证据一起报告。[VS Code 的 Harness 评估](https://code.visualstudio.com/blogs/2026/05/15/agent-harnesses-github-copilot-vscode) 分开观察正确性、Agent effort、token efficiency 与 latency，而不是合成一个神秘总分。Claude Code 的人工检查、Codex 的宿主与遥测、Pi 的扩展维护、DeepSeek Harness 的插件与存储，都是 token 之外的真实成本。
 
-## 把成功换算成总成本
+内部试点应给四者同一任务，却允许它们暴露各自责任：记录通过了哪些测试、看了哪些真实运行路径、保存了哪些 Trace、发生几次人工介入、失败能否归因。若只比较最终回复，Claude Code 的整合、Codex 的事件、Pi 的定制与 DeepSeek Harness 的可观察性都会被抹平。
 
-比较 harness 时，不能只数一次调用的 token。总成本还包括首次成功前的重试、工具等待、人工接管、失败排查和重复验证。VS Code 团队公开的 harness 评估把正确性、Agent effort、token efficiency 和 latency 分开观察，说明速度或 token 只是评价维度之一。[VS Code harness 评估](https://code.visualstudio.com/blogs/2026/05/15/agent-harnesses-github-copilot-vscode)
+## 裁决：选择你能长期维护的证据链
 
-一篇仍处于初步预印本阶段的研究在 3 个 harness、2 个模型和 50 个任务上观察到 harness 会改变结果与成本表现。[The Scaffold Effect](https://arxiv.org/abs/2607.22585) 这个样本能支持“脚手架影响评估”的提醒，不能推出某个 harness 在所有仓库里更强。若要内部选型，应使用自己的任务分布、权限环境和验收规则，报告成功率之外的中位耗时、人工介入次数和失败类型。
+| 产品 | 优势 | 短板 | 代价 | 适合谁 |
+| --- | --- | --- | --- | --- |
+| Claude Code | 工具、会话与 Hooks 让常规验证快速落地 | 容易把命令成功误当业务完成 | 为仓库补验收标准、运行态检查与未验证项 | 已有良好测试、希望低成本执行验证的团队 |
+| Codex | 宿主可把浏览器、日志、指标、reviewer 与 item 关联 | 反馈管线需自建，事件丰富仍可能没有最终判定 | 维护应用运行环境、遥测、存储和退出规则 | 需要真实运行证据与平台级审查闭环的团队 |
+| Pi | 专用 extension 可实现最贴合项目的门禁 | 门禁本身可能有漏洞，产品不替你审查 | 测试扩展、解析器、超时与失败语义 | 验收流程特殊且能维护验证代码的团队 |
+| DeepSeek Harness | session、日志、telemetry 与策略可重组 | 预览期事件覆盖与跨 profile 可比性待验证 | 维护证据 schema、插件版本和审计存储 | 研究可观察运行时或自建证据平台的团队 |
 
-可以把一次任务的完成记录压缩为四项：交付物是什么，哪些测试和真实路径通过，哪些风险尚未验证，花了多少机器与人工成本。Claude Code、Codex、Pi、DeepSeek Harness 都可以参与这条链，但没有任何一个项目能替团队定义“正确”。harness 的价值，是让定义变成可执行、可观察、可停止的流程。
+只有常规测试与差异审查，Claude Code 最快；要把真实应用反馈做成平台能力，Codex 更自然；验收规则高度专用，Pi 的可编程门禁更直接；要研究事件和证据管线本身，DeepSeek Harness 控制最深。无论选谁，最终回复只能引用证据，不能替代证据。
 
-## 本文引用
+## 本篇引用来源
 
 - [Claude Code：How Claude Code works](https://code.claude.com/docs/en/how-claude-code-works)
-- [Claude Code：Create custom subagents](https://code.claude.com/docs/en/subagents)
 - [OpenAI：Harness engineering](https://openai.com/index/harness-engineering/)
-- [Pi：Minimal coding agent harness](https://pi.dev/)
+- [OpenAI：Unlocking the Codex harness](https://openai.com/index/unlocking-the-codex-harness/)
 - [Pi：Extensions](https://pi.dev/docs/latest/extensions)
-- [DeepSeek Harness：Architecture](https://www.deepseek.com/harness/en/)
-- [DeepSeek Harness：README](https://github.com/deepseek-ai/deepseek-harness)
-- [DeepSeek Harness：Safety](https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md)
-- [SWE-agent: Agent–Computer Interfaces Enable Automated Software Engineering](https://papers.neurips.cc/paper_files/paper/2024/file/5a7c947568c1b1328ccc5230172e1e7c-Paper-Conference.pdf)
-- [OpenHands: An Open Platform for AI Software Developers as Generalist Agents](https://arxiv.org/abs/2407.16741)
+- [DeepSeek Harness：Core subsystem](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/core.md)
+- [DeepSeek Harness：Architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)
 - [VS Code：Evaluating Agent Harnesses for GitHub Copilot](https://code.visualstudio.com/blogs/2026/05/15/agent-harnesses-github-copilot-vscode)
-- [The Scaffold Effect](https://arxiv.org/abs/2607.22585)
