@@ -1,0 +1,13 @@
+issue_id,paragraph_id,section,pattern_code,cue_or_trigger,candidate_text,rhetorical_function,evidentiary_function,evidence_status,contribution_relation,provisional_disposition,claim_delta_check,citation_or_source_status_check,author_decision_needed,reviewer_note
+PI-01,pi-17,AgentHarness,D2,"这不是吹毛求疵","这不是吹毛求疵。它直接决定了你应该从哪一层接入 Pi","预防性自我辩护","解释版本边界影响","直接观察源码行为","支撑主贡献",TIGHTEN,"不改变结论","源码链接已在相邻段落","否","已改为直接说明接入层选择由未实现路径决定"
+PI-02,pi-31,四个设计判断,D2,"最该保留的负面结论","这恰好是源码阅读最该保留的负面结论","为负面证据辩护","保留未实现路径","直接观察源码行为","支撑主贡献",REFRAME,"不提高成熟度","AgentHarness 源码链接保留","否","已改为直接把负面证据作为结论"
+PI-03,pi-37,结尾,D3,"更准确","这比把 Pi 简化成“轻量版 Claude Code”更准确","比较性总结","限定比较范围","本文综合判断","辅助视角",KEEP,"范围明确","前文有官方和非官方来源区分","否","保留，负责避免错误类比"
+OC-01,oc-18,Agent Loop,D6,"比产品宣传更直接","自托管文章通常把这点讲得比产品宣传更直接","比较性修辞","补充威胁模型","非官方观点","辅助视角",CUT,"删除不影响安全结论","官方安全链接已足够","否","已删除比较性评价，直接陈述自托管威胁模型"
+OC-02,oc-28,插件,D3,"功能列表越长","功能列表越长，默认信任面就越大","压缩式推断","说明 capability 风险","本文工程推断","风险边界",TIGHTEN,"改为条件性推断","插件文档/source links retained","否","已加上同一 Gateway 共享状态和凭证的条件"
+OC-03,oc-42,安全,D2,"不是加分项","认证、pairing、Tailscale/VPN 和 SSH tunnel 是基础条件，不是加分项","强调安全优先级","部署必要条件","官方文档建议","风险边界",KEEP,"不提高安全保证","官方 architecture/security links","否","保留，属于必要安全限定"
+OC-04,oc-48,关系,D6,"一定更强","不能用“OpenClaw 有更多渠道”得出它一定更强","主动反驳比较","防止能力数量替代架构判断","本文比较推断","辅助视角",KEEP,"收窄比较","矩阵与官方来源支撑","否","保留，避免产品宣传式结论"
+VA-01,va-02,结论,D6,"不是一个更大的 ask","Vanna 2.0 不是一个更大的 ask()","简化对比","区分架构迁移","官方 migration + 源码","支撑主贡献",REFRAME,"维持同一主张","migration link nearby","否","已改为直接说“2.0 改变了抽象层”"
+VA-02,va-18,记忆,D6,"不是神奇的训练","Memory 是可插拔服务，不是神奇的训练","防止过度期待","区分 memory 与训练","源码与文档可见","辅助视角",KEEP,"不改变能力上限","memory source link","否","保留，简短且有分析作用"
+VA-03,va-28,无 Vanna,D2,"并不等于裸奔","一个“无 Vanna Agent”并不等于裸奔","预防性辩护","给基线保留合理位置","本文架构推断","比较边界",KEEP,"避免贬低基线","本段自建 pipeline 清楚","否","保留，防止比较失真"
+VA-04,va-45,生产化,D3,"真正的数据安全","Vanna 把产品运行时的接口集中起来，同时把数据库执行、身份解析、行级约束、部署安全和评测责任留给应用团队","责任边界","限制框架安全主张","源码+部署默认值","支撑主结论",KEEP,"主张不超出证据","registry/fastapi/data-security links","否","保留并置于结论和生产化段落"
+VA-05,va-50,结尾,D6,"更容易审计","直接调用 LLM 加一个窄 SQL tool 可能更容易审计","比较性结论","说明适用场景","本文工程判断","选型建议",TIGHTEN,"加上“在固定 schema/只读场景”","上下文已有条件","否","保持条件，避免普遍化"
