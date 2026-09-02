@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1750" viewBox="0 0 1200 1750" role="img" aria-labelledby="title desc">
+  <title id="title">2026 年 Agent 框架选型决策树</title>
+  <desc id="desc">从业务产品、流程复杂度、现成 Agent、云厂商绑定、角色协作和数据工作流等问题出发，判断是否选择 LangGraph 或其他方案。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="1750" fill="#f7f5ef"/>
+  <rect x="28" y="28" width="1144" height="1694" rx="28" fill="none" stroke="#d7d2c8" stroke-width="2"/>
+
+  <text x="600" y="78" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="30" font-weight="700" fill="#172033">2026 年 Agent 框架选型决策树</text>
+  <text x="600" y="112" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="16" fill="#64748b">每次只回答一个问题；走到最下方的方案，而不是追逐框架名气</text>
+
+  <g filter="url(#shadow)">
+    <rect x="150" y="145" width="900" height="82" rx="18" fill="#172033"/>
+    <text x="600" y="195" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="24" font-weight="700" fill="#ffffff">老板给你一个 Agent 需求</text>
+  </g>
+
+  <!-- question 1 -->
+  <g filter="url(#shadow)">
+    <rect x="250" y="285" width="700" height="94" rx="18" fill="#e6f5f4" stroke="#1a9a99" stroke-width="2"/>
+    <text x="600" y="326" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="21" font-weight="700" fill="#124e59">要把 Agent 嵌入业务产品，并拥有自己的状态与权限吗？</text>
+    <text x="600" y="355" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="15" fill="#46636b">不是一次性的聊天或脚本，而是要接入业务数据、工具和副作用</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="48" y="287" width="158" height="90" rx="16" fill="#fffdf8" stroke="#c9c2b5" stroke-width="2"/>
+    <text x="127" y="326" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="17" font-weight="700" fill="#172033">否</text>
+    <text x="127" y="353" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#64748b">直接 API / 简单脚本</text>
+  </g>
+  <path d="M250 332 H206" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <path d="M600 227 V285" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="620" y="263" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#64748b">是</text>
+
+  <!-- question 2 -->
+  <g filter="url(#shadow)">
+    <rect x="250" y="435" width="700" height="94" rx="18" fill="#e6f5f4" stroke="#1a9a99" stroke-width="2"/>
+    <text x="600" y="476" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="21" font-weight="700" fill="#124e59">你需要的是现成的 Agent 产品或编码助手吗？</text>
+    <text x="600" y="505" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="15" fill="#46636b">接受既有的交互、工具和沙箱边界，目标是尽快完成任务</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="994" y="437" width="158" height="90" rx="16" fill="#fff1dd" stroke="#e29a36" stroke-width="2"/>
+    <text x="1073" y="476" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="17" font-weight="700" fill="#7b4b12">是</text>
+    <text x="1073" y="503" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#7b5a2c">Claude Code / Codex /</text>
+    <text x="1073" y="521" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#7b5a2c">Cursor / OpenHands</text>
+  </g>
+  <path d="M600 379 V435" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <path d="M950 482 H994" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="958" y="468" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#64748b">是</text>
+
+  <!-- question 3 -->
+  <g filter="url(#shadow)">
+    <rect x="250" y="585" width="700" height="94" rx="18" fill="#e6f5f4" stroke="#1a9a99" stroke-width="2"/>
+    <text x="600" y="626" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="21" font-weight="700" fill="#124e59">流程是不是线性的，失败后也不需要中途恢复？</text>
+    <text x="600" y="655" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="15" fill="#46636b">一步接一步，状态只在请求内存在，没有人工等待或长任务</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="48" y="587" width="158" height="90" rx="16" fill="#fffdf8" stroke="#c9c2b5" stroke-width="2"/>
+    <text x="127" y="626" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="17" font-weight="700" fill="#172033">是</text>
+    <text x="127" y="653" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#64748b">简单 workflow / 高层 SDK</text>
+  </g>
+  <path d="M250 632 H206" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <path d="M600 529 V585" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="620" y="565" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#64748b">否</text>
+
+  <!-- question 4 -->
+  <g filter="url(#shadow)">
+    <rect x="250" y="735" width="700" height="94" rx="18" fill="#e6f5f4" stroke="#1a9a99" stroke-width="2"/>
+    <text x="600" y="776" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="21" font-weight="700" fill="#124e59">是否强绑定某个云厂商或模型供应商的运行时？</text>
+    <text x="600" y="805" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="15" fill="#46636b">平台治理、托管服务和原生集成比跨供应商自由更重要</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="994" y="737" width="158" height="90" rx="16" fill="#fff1dd" stroke="#e29a36" stroke-width="2"/>
+    <text x="1073" y="776" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="17" font-weight="700" fill="#7b4b12">是</text>
+    <text x="1073" y="801" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="13" fill="#7b5a2c">OpenAI Agents SDK /</text>
+    <text x="1073" y="819" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="13" fill="#7b5a2c">Google ADK / Microsoft AF</text>
+  </g>
+  <path d="M600 679 V735" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <path d="M950 782 H994" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="958" y="768" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#64748b">是</text>
+
+  <!-- question 5 -->
+  <g filter="url(#shadow)">
+    <rect x="250" y="885" width="700" height="94" rx="18" fill="#e6f5f4" stroke="#1a9a99" stroke-width="2"/>
+    <text x="600" y="926" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="21" font-weight="700" fill="#124e59">你的核心抽象是“角色和团队协作”吗？</text>
+    <text x="600" y="955" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="15" fill="#46636b">希望用角色、任务、Crew 或 Flow 表达协作，而不是手写每条状态转移</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="48" y="887" width="158" height="90" rx="16" fill="#fff1dd" stroke="#e29a36" stroke-width="2"/>
+    <text x="127" y="926" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="17" font-weight="700" fill="#7b4b12">是</text>
+    <text x="127" y="953" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#7b5a2c">CrewAI</text>
+  </g>
+  <path d="M250 932 H206" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <path d="M600 829 V885" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="620" y="865" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#64748b">否</text>
+
+  <!-- question 6 -->
+  <g filter="url(#shadow)">
+    <rect x="250" y="1035" width="700" height="94" rx="18" fill="#e6f5f4" stroke="#1a9a99" stroke-width="2"/>
+    <text x="600" y="1076" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="21" font-weight="700" fill="#124e59">检索、索引和数据工作流是产品的主轴吗？</text>
+    <text x="600" y="1105" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="15" fill="#46636b">Agent 只是数据处理链的一部分，数据抽取和查询语义占主导</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="994" y="1037" width="158" height="90" rx="16" fill="#fff1dd" stroke="#e29a36" stroke-width="2"/>
+    <text x="1073" y="1076" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="17" font-weight="700" fill="#7b4b12">是</text>
+    <text x="1073" y="1103" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#7b5a2c">LlamaIndex</text>
+    <text x="1073" y="1121" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="13" fill="#7b5a2c">Workflows</text>
+  </g>
+  <path d="M600 979 V1035" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <path d="M950 1082 H994" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="958" y="1068" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#64748b">是</text>
+
+  <!-- question 7 -->
+  <g filter="url(#shadow)">
+    <rect x="250" y="1185" width="700" height="94" rx="18" fill="#e6f5f4" stroke="#1a9a99" stroke-width="2"/>
+    <text x="600" y="1226" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="21" font-weight="700" fill="#124e59">你要的是类型优先的 Python Agent，且图编排不是主需求吗？</text>
+    <text x="600" y="1255" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="15" fill="#46636b">结构化输入输出和类型约束是第一生产力</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="48" y="1187" width="158" height="90" rx="16" fill="#fff1dd" stroke="#e29a36" stroke-width="2"/>
+    <text x="127" y="1226" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="17" font-weight="700" fill="#7b4b12">是</text>
+    <text x="127" y="1253" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#7b5a2c">PydanticAI</text>
+  </g>
+  <path d="M250 1232 H206" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <path d="M600 1129 V1185" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="620" y="1165" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#64748b">否</text>
+
+  <!-- LangGraph outcome -->
+  <path d="M600 1279 V1330" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <g filter="url(#shadow)">
+    <rect x="150" y="1330" width="900" height="166" rx="22" fill="#1d7f83"/>
+    <text x="600" y="1382" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="29" font-weight="700" fill="#ffffff">选择 LangGraph</text>
+    <text x="600" y="1420" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="17" fill="#e6ffff">需要显式的状态、分支、循环、重试、暂停 / 恢复或人工确认</text>
+    <text x="600" y="1450" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="17" fill="#e6ffff">并且团队愿意拥有图设计、幂等性、持久化与运行治理</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="150" y="1550" width="900" height="92" rx="18" fill="#fffdf8" stroke="#c9c2b5" stroke-width="2"/>
+    <text x="600" y="1588" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="17" font-weight="700" fill="#172033">没有走到 LangGraph，也不是失败</text>
+    <text x="600" y="1617" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="15" fill="#64748b">它只说明更简单或更专用的抽象更贴近当前需求</text>
+  </g>
+  <text x="600" y="1685" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif" font-size="14" fill="#8a847a">决策树是讨论起点；真实选型仍要用自己的任务集、故障注入和治理约束验证</text>
+</svg>
