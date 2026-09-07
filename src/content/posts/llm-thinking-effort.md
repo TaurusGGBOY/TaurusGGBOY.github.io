@@ -1,141 +1,266 @@
 ---
-title: "大模型为什么能调节 thinking 强度？"
+title: "调整 thinking effort 后，推理链路到底变了什么？"
 published: 2026-09-07T16:00:00+08:00
-description: "从固定权重与推理时计算的区别出发，解释 thinking 开关、effort 档位、预算控制与停止机制，以及为什么想得更久不一定答得更好。"
-tags: ["llm", "reasoning", "thinking", "qwen", "inference"]
+updated: 2026-09-07T17:22:00+08:00
+description: "从 effort 控制量一路算到推理 token、上下文长度、decode FLOPs、KV cache、延迟、计费与答案截断。"
+tags: ["llm", "reasoning", "thinking", "inference", "transformer"]
 category: "AI / Architecture"
 lang: "zh_CN"
 draft: false
 ---
 
-同一个模型，为什么能一会儿“不思考”，一会儿又切到 high？如果模型的参数已经训练好了，界面上的一个选项，究竟还能改变什么？
+同一个模型，把 thinking effort 从 low 调到 high，权重通常没有变化。真正改变的是这次请求的**生成策略与停止边界**，它们先改变推理段的长度与路径，再把差异传导到后续每一个 token 的计算。
 
-答案藏在两个不同的量里：**模型有多少参数，与它为一道题执行多少计算，并不是一回事。** 参数可以保持不变，回答前生成的中间步骤却可以变多、变少，甚至省去独立的推理段。训练让模型学会使用这些步骤，运行时的控制信息与停止规则决定它怎样使用。
-
-因此，thinking 强度不是一个通用的“智力刻度”。要理解它，最好把一次请求拆成三层：模型学会了什么、请求告诉了它什么、生成过程什么时候被允许结束。
-
-## 参数不变，为什么计算量可以变化
-
-先看常见的自回归生成。模型根据问题和已经生成的内容，继续预测下一个 token。每生成一个新 token，都需要进行相应的神经网络计算；之前生成的内容，又成为后续计算可以利用的上下文。
-
-直接回答，大致是：
+把链路压缩成一行：
 
 ```text
-问题 → 答案
+effort e
+  → 推理策略 / 停止规则
+  → 实际推理长度 R 与轨迹 r₁…rᴿ
+  → 最终答案 a₁…aᴬ
+  → 总 decode 步数 T = R + A
+  → FLOPs、KV cache、延迟、输出额度与费用
 ```
 
-带有显式推理轨迹的回答，则增加了一段中间序列：
+本文只算这条链。训练史、界面设计、思维链是否展示等问题，除非会改变公式，否则不展开。
 
-```text
-问题 → 拆解条件 → 推导 → 检查或修正 → 答案
-```
+## 第一步：effort 改变的是条件分布，不是参数
 
-后一条路径可以把中间结果留在序列里，供后面的步骤继续使用。它没有在这一刻重新训练模型，而是让已有模型沿着更长的序列运行。这是增加推理时计算的一种方式，常被称为 sequential test-time scaling，即串行的推理时扩展。[s1 论文](https://arxiv.org/html/2501.19393v1)
+设模型参数为 \(\theta\)，输入为 \(x\)，effort 为 \(e\)，生成序列为 \(z=(r,a)\)。第 \(t\) 步仍然是一次普通的自回归采样：
 
-拿一个自拟例子说明：求满足几个约束的排班方案。模型可以直接猜一份排班，也可以先列出不可同时出现的人，再填班次，最后核对是否有人连续值班。后者多出的计算有机会帮助它发现冲突。
+$$
+p_\theta(z_t\mid x,e,z_{<t})
+=\operatorname{softmax}(\ell_\theta(x,e,z_{<t}))_{z_t}.
+$$
 
-这里的关键不是“多写了文字”，而是**后面的生成能够利用前面的中间结果**。如果新增内容只是重复“我要仔细检查”，没有改变推导，token 数变多也不代表解题能力提升。
+从 low 改成 high 时，\(\theta\) 不动；变化的是条件 \(e\)，以及服务端可能随 \(e\) 选择的停止规则。于是 logits、采到的 token、后续上下文都可能从第一步开始分叉。
 
-## 推理步骤为什么不是随便续写的独白
+这里有两类实现，必须分开：
 
-生成一长段分析并不难，难的是让分析有助于做对题。
+1. **软控制**：把 effort 编码进提示、控制 token 或模型条件，使停止时间 \(\tau_e(x)\) 的分布改变。high 往往更容易继续拆解、复核或回溯，但并不保证生成固定数量的 token。
+2. **硬控制**：解码器直接设置推理段预算 \(B_e\)，到上限便插入或强制接受结束推理的标记。简化后可写成
 
-监督微调可以让模型模仿高质量的解题轨迹：看到怎样拆解条件、如何计算、如何把过程收束为答案。蒸馏也可以把更强模型生成的推理样本用于这种训练。
+$$
+R=\min\bigl(\tau_e(x),B_e\bigr).
+$$
 
-强化学习则提供另一种信号：让模型尝试不同解法，再根据结果更新生成策略。例如 DeepSeek-R1-Zero 的公开方案对数学答案进行规则校验，对代码使用测试反馈，并另设格式奖励，把推理和答案分开。它没有要求人工给每一个中间步骤写标准答案。[DeepSeek-R1 技术报告，§2.2](https://arxiv.org/html/2501.12948v1)
+两者也可以叠加。公开的 s1 `budget forcing` 就展示了硬干预：模型想结束时抑制结束标记并追加 “Wait”，或在达到上限时强制结束推理。[s1 论文 §3.1](https://arxiv.org/html/2501.19393v1#S3.SS1) 但这只能证明“可以这样控制”，不能反推任何闭源产品的 high 都等于某个 \(B_e\)。社区复现实验也发现，相同干预在不同模型上可能提升、平台期甚至退化。[ICLR Blogposts 复现实验](https://iclr-blogposts.github.io/2026/blog/2026/wait-do-we-need-to-wait/)
 
-“根据最终结果奖励”不等于“推理 token 不参与训练”。奖励评价的是结果，策略更新仍会作用于生成轨迹；只是不能据此认为每一步都获得了独立的正确性认证。
+因此，用户能观察或统计的是 \(R\)，不是 effort 标签本身。后面的数学都从实际的 \(R\) 开始。
 
-训练阶段改变权重，使用阶段利用这些权重。普通提示中的“请认真思考”也可能影响输出，但经过相应训练、明确支持 effort 控制的模型，才为这种调节提供了更明确的行为约定。
+## 第二步：多出的推理 token 会进入后续每一步
 
-## “不思考”开关，可以落到聊天模板里
+假设输入有 \(N\) 个 token，模型先生成 \(R\) 个推理 token，再生成 \(A\) 个答案 token：
 
-2025 年首发的 Qwen3 hybrid 模型提供了一个可以看清的例子。其后训练流程包含长思维链冷启动、推理强化学习、thinking mode fusion 和通用强化学习。融合阶段把带推理轨迹的数据与直接回答的数据放在同一模型中训练，使它能够支持两种输出方式。[Qwen3 发布说明](https://qwenlm.github.io/blog/qwen3/)
+$$
+z=(r_1,\ldots,r_R,a_1,\ldots,a_A),\qquad T=R+A.
+$$
 
-这不是每次点击开关就加载一套新权重。开关可以改变模型接下来看到的输入格式。
+第一个答案 token 不是只看原问题，而是看长度为 \(N+R\) 的前缀：
 
-在 Qwen3 的非思考训练样本中，助手回复保留了一个空的 thinking 块。相应地，推理时可以在助手前缀中放入：
+$$
+p(a_1\mid x,e)=\sum_r p_\theta(r\mid x,e)\,p_\theta(a_1\mid x,r,e).
+$$
 
-```text
-<think>
+这个式子同时说明 high 的潜在收益与风险：它改变了模型在推理轨迹 \(r\) 上的概率质量。多出来的轨迹可能包含有效分解与纠错，也可能把原本正确的路径带偏。effort 不是给同一个答案“多算几遍”，而是在改变通向答案的路径分布。
 
-</think>
+![effort 先改变生成策略和停止条件，推理段随后成为最终答案的上下文；总输出耗尽时可能没有答案](/images/posts/llm-thinking-effort/control-flow.svg)
 
-```
+图中最重要的箭头是“推理序列 → 最终答案”：每个 \(r_i\) 都先被写入 KV cache，后面的 \(r_{i+1}\) 和 \(a_j\) 才能注意到它。
 
-从序列位置看，推理段已经结束，接下来该生成答案了。Qwen3 的聊天模板通过 `enable_thinking=False` 提供这个控制；`/think` 与 `/no_think` 则属于另一种软切换方式。[Qwen3 技术报告，§4.3](https://arxiv.org/html/2505.09388v1)
+## 第三步：精确到一次 decode forward 的 FLOPs
 
-下面只是构造输入的片段，不会自行加载或运行模型：
+下面采用一个可复算的一阶模型：batch size 为 1、dense decoder-only Transformer、标准 multi-head attention、KV cache 开启；一次乘法加一次加法按 2 FLOPs 计。忽略 softmax、归一化、激活函数和采样等低阶项。
 
-```python
-# tokenizer 已由支持 hybrid 模式的 Qwen3 模型加载
-text = tokenizer.apply_chat_template(
-    messages,
-    tokenize=False,
-    add_generation_prompt=True,
-    enable_thinking=False,
-)
-```
+记：
 
-所以，“不思考”更准确的意思是：**不展开这一段额外的推理序列**。网络仍然要处理输入并生成答案，模型也仍然可能直接完成计算、判断或代码生成。它没有停止神经网络运算，更不是把所有推理能力从参数里删除。
+- \(P\)：每个 token 实际激活的非 embedding 参数量；dense 模型近似等于参数量，MoE 应换成 active parameters；
+- \(L\)：Transformer 层数；
+- \(d\)：hidden size；
+- \(S\)：当前 decode forward 能注意到的 token 总数，包含这一步新送入模型的 token。
 
-这个例子有明确范围：它解释的是上述 Qwen3 模型与模板，不是所有厂商、所有版本通用的隐藏开关。
+一次 decode 主要有两块计算。
 
-## low、medium、high，如何变成生成行为
+**参数矩阵计算。** 当前 token 依次经过各层的 Q/K/V/O 投影和 FFN。每个权重对当前 token 大致参与一次乘加：
 
-开关解决“要不要展开”，强度还要解决“展开到什么程度”。这里至少有两种不同的控制。
+$$
+C_{\text{weights}}\approx 2P.
+$$
 
-第一种是**条件化的生成策略**。请求传入 effort 等级，模型据此调整生成行为。一个固定权重的模型，本来就可以根据不同输入生成不同内容；如果训练让它学会对应的推理模式，控制信息就能影响它如何分配步骤、何时收尾。OpenAI 的开放权重 gpt-oss 就公开支持 low、medium、high 三档，用于取舍速度与推理表现。[gpt-oss 官方说明](https://github.com/openai/gpt-oss#highlights)
+**对 KV cache 的注意力。** 每层中，当前 query 与 \(S\) 个 key（历史 cache 加当前 token）做点积约需 \(2Sd\) FLOPs；注意力权重再乘 value 约需 \(2Sd\) FLOPs。共 \(L\) 层：
 
-第二种是**生成过程的预算约束**。服务端统计推理 token，在满足停止条件时结束推理段，再进入答案阶段。这是运行时的控制，不必等模型自愿停止。
+$$
+C_{\text{attn}}(S)\approx 4LSd.
+$$
 
-![请求中的模式与强度先影响生成策略；推理段在自然结束或预算控制后进入最终答案；关闭模式可直接进入答案阶段](/images/posts/llm-thinking-effort/control-flow.svg)
+所以生成一个新 token 的计算量近似为：
 
-图示是几种控制方式的逻辑组合，不是某一家闭源服务的内部架构。
+$$
+\boxed{C_{\text{token}}(S)\approx 2P+4LSd}
+$$
 
-两种方式可以配合，但不能混为一谈。要求模型优先处理关键条件，与让它写到第 N 个 token 就停止，产生的行为可能不同。前者关乎怎样使用预算，后者关乎预算用到哪里必须结束。
+KV cache 省掉的是对旧 token 的 K/V 投影重算，却没有让历史消失。上下文每增长 1，下一步仍要多读并注意一个位置。关于 \(2P\) 与 KV cache 的矩阵推导，可对照 [Transformer Inference Arithmetic](https://kipply.github.io/blog/transformer-inference-arithmetic/) 和 [LLM Inference from First Principles](https://mlkan.substack.com/p/llm-inference-from-first-principles)。
 
-OpenAI 的 API 文档把 `reasoning.effort` 描述为对思考程度的引导，并强调具体支持值因模型而异。因此，不能自行给 `high` 换算成固定的 token 数，也不能把 `none` 当成每个模型都接受的值。[Reasoning 文档](https://developers.openai.com/api/docs/guides/reasoning)
+## 第四步：把整段 reasoning 与答案加总
 
-## 不重新训练，也能让模型继续或提前收尾吗
+prefill 一次性处理 \(N\) 个输入 token，并直接给出第一个生成 token 的 logits。此后，已采样的第 \(j\) 个 token 被送回模型，才得到第 \(j+1\) 个 token 的 logits。因此，生成 \(T=R+A\) 个 token 需要 **1 次 prefill 加 \(T-1\) 次单-token decode forward**，不是 \(T\) 次 decode。
 
-能。s1 的 budget forcing 就是一个直观实验。
+第 \(j\) 次 decode forward（\(j=1,\ldots,T-1\)）能注意到 \(S_j=N+j\) 个 token。只加总 decode：
 
-模型准备结束推理时，解码程序可以暂时阻止结束，并追加一个 “Wait”，让它继续生成；需要缩短过程时，则插入结束标记，转入最终答案。研究者因而能够在不更换权重的情况下，干预推理长度。[s1 实现](https://github.com/simplescaling/s1)
+$$
+\begin{aligned}
+C_{\text{decode}}(T)
+&\approx\sum_{j=1}^{T-1}\left[2P+4Ld(N+j)\right]\\
+&=2P(T-1)+4Ld\left[(T-1)N+\frac{T(T-1)}{2}\right].
+\end{aligned}
+$$
 
-这个方法揭示了一件重要的事：停止时机不仅可以由模型决定，也可以受到生成程序控制。不过，“s1 可以这么做”不等于“某个闭源 API 的 high 就是在追加 Wait”。
+输入和模型相同，则 prefill 是 low 与 high 的共同项，做差时抵消。decode 的第一项随生成长度线性增长；第二项包含 \(T(T-1)/2\)，因为越晚执行的 forward 面对越长的历史。于是“thinking token 增加 \(k\) 倍”不等于“总计算恰好增加 \(k\) 倍”。
 
-Qwen3 报告展示了另一种收尾方式：推理长度达到阈值后，插入停止思考的指令，让模型根据已有过程给出答案。报告明确说，对这种中间预算情形的适应能力来自模式融合，并非单独显式训练出来的预算能力。因此，也不应把它改写成“Qwen3 专门训练了每一个 token 档位”。[Qwen3 技术报告，Thinking Budget](https://arxiv.org/html/2505.09388v1)
+若 effort 调高后多生成 \(\Delta\) 个推理 token，而答案长度暂时不变，从原来的 \(T\) 增长到 \(T+\Delta\)，额外计算为：
 
-还要区别两种“停止”：**结束推理后继续作答，与终止整个输出，不是同一个操作。** 如果总输出额度耗尽，模型可能根本还没来得及给答案。
+$$
+\boxed{
+\Delta C
+\approx 2P\Delta
++4Ld\left[\Delta(N+T)+\frac{\Delta(\Delta-1)}{2}\right]
+}
+$$
 
-## 别把这几个旋钮当成同一个
+括号中的第一部分，是新增 token 都要看原有 \(N+T\) 个位置；第二部分，是这些新增 token 彼此又形成了一个逐步增长的三角形。
 
-| 控制项 | 主要控制什么 | 不能直接推出什么 |
-| --- | --- | --- |
-| thinking 开关 | 是否启用额外推理模式 | 关闭后不再进行神经网络计算 |
-| reasoning effort | 模型或服务定义的推理投入档位 | 每题固定生成同样多的推理 token |
-| thinking token budget | 推理段的预算，语义以实现为准 | 必须花完预算，或花完一定正确 |
-| 总输出上限 | 一次生成允许输出的总量 | 全部额度都能用于用户可见的答案 |
-| verbosity／回答长度要求 | 最终呈现得多详细 | 回答短就一定想得少 |
-| temperature | 采样分布的随机程度 | 调高温度等于增加推理预算 |
+## 第五步：算一个 low → high 的完整例子
 
-例如 OpenAI Responses API 的 `max_output_tokens` 会覆盖 reasoning tokens、可见输出及不可见格式 token。达到上限时可能返回 `incomplete`，甚至在产生可见答案前就耗尽额度。它不能当成单独的 thinking budget 使用。[输出额度与未完成响应](https://developers.openai.com/api/docs/guides/reasoning#controlling-costs)
+取一个便于复算的假想 dense 模型：
 
-同理，“思考过程显示了多少字”也不是可靠计量。产品可能隐藏推理轨迹，或者展示摘要；即使展示原始轨迹，它也不是神经网络内部全部计算的逐字记录。Anthropic 对可见 extended thinking 的研究同样提醒，思维链的忠实性仍有局限。[Claude extended thinking 研究](https://www.anthropic.com/research/visible-extended-thinking)
+| 量 | 数值 |
+| --- | ---: |
+| 参数 \(P\) | \(7\times10^9\) |
+| 层数 \(L\) | 32 |
+| hidden size \(d\) | 4096 |
+| 输入 \(N\) | 2048 tokens |
+| 最终答案 \(A\) | 512 tokens |
+| low 的实际推理 \(R_l\) | 512 tokens |
+| high 的实际推理 \(R_h\) | 4096 tokens |
 
-至于界面上的某个“专业模式”是否还调用了其他模型、并行采样或验证器，需要该产品自己的证据。一个 high 标签不足以证明这些事情发生了。
+注意：512 与 4096 是为了演算而设的**实际观测长度**，不是任何厂商对 low/high 的承诺。
 
-## 为什么不永远开最高
+low 时 \(T_l=512+512=1024\)：
 
-更多步骤提供的是继续计算的机会，不是正确性的保证。
+$$
+\begin{aligned}
+C_l
+&\approx 2(7\times10^9)(1023)\\
+&\quad+4(32)(4096)\left[1023(2048)+\frac{1024\times1023}{2}\right]\\
+&=14.322\ \text{TFLOPs}+1.373\ \text{TFLOPs}\\
+&=15.695\ \text{TFLOPs}.
+\end{aligned}
+$$
 
-s1 原论文已经观察到，过度阻止模型结束，可能使它进入重复循环；性能提升也会趋于平缓。后续一篇社区复现实验还展示了答案反复切换的情形：模型确实继续生成了，却没有稳定地变得更好。这些结果针对各自测试的模型和任务，不能转化成适用于所有模型的最佳 token 数。[s1 实验结果](https://arxiv.org/html/2501.19393v1)、[Budget forcing 复现实验](https://iclr-blogposts.github.io/2026/blog/2026/wait-do-we-need-to-wait/)
+high 时 \(T_h=4096+512=4608\)：
 
-实际选档位，可以先问：这道题缺的是推导步骤，还是输入信息？
+$$
+\begin{aligned}
+C_h
+&\approx 2(7\times10^9)(4607)\\
+&\quad+4(32)(4096)\left[4607(2048)+\frac{4608\times4607}{2}\right]\\
+&=64.498\ \text{TFLOPs}+10.512\ \text{TFLOPs}\\
+&=75.010\ \text{TFLOPs}.
+\end{aligned}
+$$
 
-排班约束都已经给全，增加检查步骤可能有用；如果缺少某个人哪天请假的信息，多想一会儿并不能把事实补出来。代码调试也是如此：测试失败的原因可能需要多步推导，也可能只是缺了一段关键日志。
+结果是：推理段从 512 增到 4096，变成 8 倍；但因为 512-token 答案固定存在，总生成长度从 1024 增到 4608，是 4.5 倍；再加上后段注意力面对更长历史，decode 近似计算量从 15.695 增到 75.010 TFLOPs，是 **4.779 倍**，额外增加 **59.315 TFLOPs**。共同的 prefill 未计入这两个数；若计入，两档的比值会更接近 1，但差值不变。
 
-对自己的应用，最有价值的做法是固定一组代表性任务，分别测可用的几个档位，记录成功率、耗时、实际推理 token 和未完成响应。任务与工具条件保持一致，多次运行后再比较。把预算花在可验证的改善上，比根据某次回答的“思考感”选档更可靠。
+在这一演算中，“调高 effort”使模型多执行了 3584 个串行 decode forward，并且越靠后的 forward 越贵；并不是某个抽象的思考模块临时变强。
 
-归根结底，大模型能够调节 thinking 强度，是因为**同一套权重可以执行不同长度、不同策略的生成过程**。训练提供可用的推理行为，输入控制选择行为，运行时预算约束过程。所谓“不思考”，省去的是额外推理段；所谓“更强思考”，增加的是解决这一次问题的计算投入，而不是临时长出一套更聪明的参数。
+## 第六步：KV cache 增长多少
+
+标准 multi-head attention 中，每层、每个 token 都要保存一份 key 和一份 value。设 KV 元素精度为 \(b\) bytes，则：
+
+$$
+M_{\text{KV/token}}=2Ldb.
+$$
+
+例子使用 BF16，即 \(b=2\)：
+
+$$
+2\times32\times4096\times2
+=524{,}288\ \text{bytes}
+=0.5\ \text{MiB/token}.
+$$
+
+生成最后一个 token 时无需再把它送回模型，因此响应刚结束时，cache 中通常有 \(N+T-1\) 个位置；若服务为后续续写保留最后一个 token，则是 \(N+T\)。按前一种口径，low 的 cache 长度为 3071：
+
+$$
+3071\times0.5\ \text{MiB}=1535.5\ \text{MiB}\approx1.500\ \text{GiB}.
+$$
+
+high 的 cache 长度为 6655：
+
+$$
+6655\times0.5\ \text{MiB}=3327.5\ \text{MiB}\approx3.250\ \text{GiB}.
+$$
+
+只改 effort，这个请求的峰值 KV cache 就增加了 **1.75 GiB**。如果模型使用 GQA/MQA，应把 \(d\) 换成 KV heads 的总宽度 \(H_{kv}d_h\)：
+
+$$
+M_{\text{KV/token}}=2L H_{kv}d_h b.
+$$
+
+所以 GQA 会显著改变内存常数，却不改变“每多一个推理 token，cache 线性增长；后续注意力历史变长”这条链。[KV cache 内存推导](https://mbrenndoerfer.com/writing/kv-cache-memory-calculation-llm-inference-gpu)
+
+## 第七步：为什么 FLOPs、延迟和费用不是同一个倍率
+
+FLOPs 是工作量，延迟还取决于硬件与服务方式。batch 为 1 时，一次 decode 往往需要读取大量权重，可能受显存带宽而非峰值算力限制。一个一阶下界是：
+
+$$
+t_j\gtrsim\max\left(
+\frac{2P+4LS_jd}{F_{\text{eff}}},
+\frac{Pb_w+2LdS_jb}{B_{\text{eff}}}
+\right),
+$$
+
+其中 \(F_{\text{eff}}\) 是有效 FLOP/s，\(B_{\text{eff}}\) 是有效显存带宽，\(b_w\) 是权重字节数。实际服务还会加入 batching、张量并行通信、调度排队、分页 KV、量化与推测解码，因此不能拿 4.779 直接断言墙钟时间也恰好变成 4.779 倍。[prefill/decode 与带宽分析](https://jamwithai.substack.com/p/llm-inference-101)
+
+计费则通常更接近 token 账本。若输入单价为 \(p_{in}\)，输出侧把隐藏推理与可见答案都按 \(p_{out}\) 计费，单次费用可写成：
+
+$$
+\text{cost}=\frac{Np_{in}+(R+A)p_{out}}{10^6}.
+$$
+
+若 \(A\) 不变，low 调到 high 的增量就是：
+
+$$
+\Delta\text{cost}=\frac{(4096-512)p_{out}}{10^6}
+=0.003584p_{out}.
+$$
+
+例如仅为演算，若 \(p_{out}=10\) 美元/百万 token，增量为 0.03584 美元。实际是否把 reasoning tokens 计入输出、如何定价，以具体服务的当期规则为准。
+
+## 第八步：high 还可能挤掉答案
+
+设一次响应的总生成上限为 \(M\)，格式或工具协议占用 \(O\) 个 token，那么留给最终答案的最大空间是：
+
+$$
+A_{\max}=\max(0,M-R-O).
+$$
+
+若 \(M=5000\)、\(O=100\)：
+
+- low 的 \(R=512\)，还剩 \(4388\) 个答案 token；
+- high 的 \(R=4096\)，只剩 \(804\) 个答案 token。
+
+如果任务原本需要 1200 个 token 才能完整作答，high 路径会在数学上必然截断，除非服务把“推理预算”和“总输出上限”分开管理或提前收尾。结束 thinking 与结束整个 response 是两个不同的停止事件。
+
+## 最后：真正该比较的是整条函数
+
+对同一批任务，effort 的有效性应记录成：
+
+$$
+e\longmapsto
+(R,A,C_{\text{decode}},M_{\text{KV}},t,\text{cost},\text{correct}).
+$$
+
+只看回答是否更长，会漏掉隐藏推理；只看 reasoning tokens，会漏掉答案被挤压；只看 FLOPs，会漏掉显存带宽与排队；只看正确率，又看不出同样收益付出了多少计算。
+
+调整 thinking effort 后，最先变的是生成轨迹与停止时间，随后才是可精确计算的系统后果。对固定权重的模型，high 的本质不是“临时获得更多参数”，而是允许或迫使这一次请求走过更多串行 token；这些 token 既是后续推理的上下文，也是 FLOPs、KV cache、延迟、额度和费用的共同来源。至于它们有没有换来更高正确率，只能由同任务、同工具、重复采样的评测回答，不能由 effort 标签本身保证。
