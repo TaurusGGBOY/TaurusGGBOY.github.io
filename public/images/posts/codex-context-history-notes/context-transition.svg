@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700" role="img" aria-labelledby="title desc">
+  <title id="title">Codex 上下文窗口与外部记忆</title>
+  <desc id="desc">旧窗口通过模型笔记与历史服务保存信息。新窗口重建基础上下文，获得短提示，再按需读取 Notes 和 History。箭头表示逻辑数据流，不表示事务保证。</desc>
+  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10" fill="none" stroke="#50736e" stroke-width="1.5"/></marker></defs>
+  <rect width="1200" height="700" rx="24" fill="#f6f4ed"/>
+  <g font-family="system-ui, -apple-system, 'PingFang SC', sans-serif" fill="#213b38">
+    <text x="55" y="62" font-size="18" letter-spacing="3" fill="#50736e">CODEX / CONTEXT MANAGEMENT</text>
+    <text x="55" y="112" font-size="34" font-weight="700">换一个窗口，按需找回工作状态</text>
+    <rect x="45" y="165" width="320" height="330" rx="18" fill="#fff" stroke="#cbd8d1" stroke-width="2"/>
+    <text x="73" y="207" font-size="25" font-weight="700">旧窗口</text>
+    <text x="73" y="244" font-size="19" fill="#50736e">当前请求中的工作集</text>
+    <text x="73" y="306" font-size="21">对话与工具结果</text>
+    <text x="73" y="378" font-size="21">模型整理的任务状态</text>
+    <text x="73" y="458" font-size="17" fill="#66736c">new_context：请求换窗</text>
+    <rect x="450" y="165" width="320" height="330" rx="18" fill="#e9f0e8" stroke="#aebead" stroke-width="2"/>
+    <text x="478" y="207" font-size="25" font-weight="700">Codex Backend</text>
+    <text x="478" y="244" font-size="19" fill="#50736e">窗口之外的任务记录</text>
+    <text x="478" y="301" font-size="23" font-weight="600">History</text>
+    <text x="478" y="330" font-size="17">只读、可寻址的历史条目</text>
+    <text x="478" y="381" font-size="23" font-weight="600">Notes</text>
+    <text x="478" y="411" font-size="17">模型维护的虚拟文本文件</text>
+    <text x="478" y="462" font-size="17" fill="#66736c">thread hint：短恢复提示</text>
+    <rect x="850" y="165" width="305" height="330" rx="18" fill="#fff" stroke="#cbd8d1" stroke-width="2"/>
+    <text x="878" y="207" font-size="25" font-weight="700">新窗口</text>
+    <text x="878" y="244" font-size="19" fill="#50736e">重建基础上下文</text>
+    <text x="878" y="303" font-size="21">读取需要的历史</text>
+    <text x="878" y="382" font-size="21">恢复当前工作状态</text>
+    <text x="878" y="460" font-size="17" fill="#66736c">提示不等于全部笔记</text>
+    <g fill="none" stroke="#50736e" stroke-width="2.5" marker-end="url(#arrow)"><path d="M365 303 H439"/><path d="M365 379 H439"/><path d="M770 303 H839"/><path d="M770 379 H839"/><path d="M770 456 H839"/></g>
+    <rect x="45" y="535" width="1110" height="114" rx="16" fill="#e5e6dc"/>
+    <text x="73" y="577" font-size="21" font-weight="600">换窗步骤跳过摘要生成；恢复仍依赖写入、可用性与模型读取。</text>
+    <text x="73" y="617" font-size="18" fill="#50736e">逻辑数据流示意 · 箭头不代表原子事务或持久化确认 · 源码快照 2026-09-07</text>
+  </g>
+</svg>

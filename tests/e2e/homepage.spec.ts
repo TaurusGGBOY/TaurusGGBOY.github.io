@@ -22,7 +22,9 @@ test("Fuwari core routes respond and identify the site", async ({ page }) => {
 test("Fuwari search interaction opens the search results panel", async ({ page }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
 
-  const mobileSearchButton = page.getByRole("button", { name: "Search Panel" });
+  const mobileSearchButton = page.locator("#search-switch");
+  // Search is client-only; wait for hydration before choosing a responsive branch.
+  await expect(mobileSearchButton).toBeAttached();
   if (await mobileSearchButton.isVisible()) {
     await mobileSearchButton.click();
     await page.getByPlaceholder("Search").fill("backend");
