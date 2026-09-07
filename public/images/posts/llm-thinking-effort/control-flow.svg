@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600" role="img" aria-labelledby="title desc">
+<title id="title">Thinking 控制作用于生成过程</title>
+<desc id="desc">请求中的模式和强度影响同一模型的生成策略。关闭额外推理时进入答案；开启时先生成推理序列，再在自然结束或预算控制后进入答案。总输出耗尽可能使响应未完成。</desc>
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0L0 6L8 3Z" fill="#64748b"/></marker></defs>
+<rect width="960" height="600" rx="24" fill="#f1f5f9"/>
+<g font-family="system-ui, sans-serif" fill="#0f172a">
+<text x="44" y="57" font-size="30" font-weight="700">同一套权重，不同的生成路径</text>
+<text x="44" y="94" font-size="20" fill="#475569">逻辑示意 · 不代表某一闭源服务的内部实现</text>
+<rect x="44" y="140" width="245" height="104" rx="14" fill="#dbeafe" stroke="#93c5fd"/>
+<text x="65" y="181" font-size="25" font-weight="600">请求控制信息</text>
+<text x="65" y="217" font-size="21">模式 / effort 等级</text>
+<rect x="355" y="140" width="265" height="104" rx="14" fill="#e0e7ff" stroke="#a5b4fc"/>
+<text x="377" y="181" font-size="25" font-weight="600">已训练的模型</text>
+<text x="377" y="217" font-size="21">按条件生成 · 权重不变</text>
+<path d="M289 192H350" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+<rect x="355" y="325" width="265" height="104" rx="14" fill="#e0f2fe" stroke="#7dd3fc"/>
+<text x="377" y="368" font-size="25" font-weight="600">额外推理序列</text>
+<text x="377" y="402" font-size="21">中间结果供后续利用</text>
+<path d="M487 244V316" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+<text x="505" y="288" font-size="20" fill="#475569">开启</text>
+<rect x="706" y="325" width="210" height="104" rx="14" fill="#dcfce7" stroke="#86efac"/>
+<text x="735" y="370" font-size="25" font-weight="600">最终答案</text>
+<text x="735" y="404" font-size="20">仍需模型计算</text>
+<path d="M620 190H812V316" fill="none" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+<text x="668" y="170" font-size="20" fill="#475569">关闭额外推理</text>
+<path d="M620 378H698" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+<text x="629" y="290" font-size="19" fill="#475569">自然结束</text>
+<text x="629" y="316" font-size="19" fill="#475569">或预算收尾</text>
+<rect x="44" y="325" width="245" height="104" rx="14" fill="#fff7ed" stroke="#fdba74"/>
+<text x="66" y="369" font-size="25" font-weight="600">运行时预算控制</text>
+<text x="66" y="403" font-size="21">计数 / 停止条件</text>
+<path d="M289 378H347" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M44 477H916" stroke="#cbd5e1"/>
+<text x="44" y="520" font-size="22" fill="#334155">结束推理 ≠ 终止整个输出</text>
+<text x="44" y="555" font-size="20" fill="#475569">总输出额度耗尽时，可能还没有生成最终答案。</text>
+</g></svg>
