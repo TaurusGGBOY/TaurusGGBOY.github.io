@@ -2,7 +2,7 @@
 title: "图解 Anthropic 的五种多 Agent 协调模式：机制、取舍与选型"
 published: 2026-08-28
 updated: 2026-09-08
-description: "详解 Generator-verifier、Orchestrator-subagent、Agent teams、Message bus、Shared state，以五张示意图和文档更新案例解释上下文、任务生命周期、通信、失败恢复与选型。"
+description: "详解 Generator-verifier、Orchestrator-subagent、Agent teams、Message bus、Shared state，以五张模式图、选型决策树和文档更新案例解释上下文、任务生命周期、通信、失败恢复与选型。"
 tags: ["ai-agent", "multi-agent", "anthropic", "coordination", "agent-architecture"]
 category: "AI / Architecture"
 draft: false
@@ -194,7 +194,31 @@ Shared state 让 Agent 通过共同读写持久化存储协作，其他成员可
 
 两者结合时，事件可以携带资料条目的位置和版本，Agent 收到通知后读取对应记录。这样不必把所有历史发现都塞进消息，也能避免拿旧事件解释新版资料。
 
-## 七、先把交付条件写出来，再选择协调方式
+## 七、Multi-agent 选型决策树
+
+实际选型时，可以先确定目前最影响交付的问题，再沿下面的树选择一个起点。这张图是对前文机制和取舍的工程整理；同一系统可能满足多个分支，叶子节点不要求你只用一种模式。
+
+![Multi-agent 选型决策树：先判断单 Agent 是否足够，再依次检查输出验收、共享发现、事件触发、任务独立性和上下文持续性，选择五种协调模式之一，并允许组合使用](/images/posts/agent-paradigms-three-layers/selection-decision-tree.svg)
+
+*图 6：以当前主要瓶颈选择起点。分支顺序便于阅读，不表示 Anthropic 给出的固定优先级。*
+
+### 怎样沿着树判断
+
+先检查已有方案是否能完成任务。单 Agent 已经能够满足事实、覆盖范围和交付时间要求时，多 Agent 就需要额外的理由。若唯一明显的问题是产物经常漏项，而验收规则已经清楚，可以先加 Generator-verifier。
+
+需要多个执行者时，再看信息怎样流动。成员必须反复利用彼此的发现，优先考虑 Shared state；工作主要由持续到来的事件触发，而且处理者会增加，优先考虑 Message bus。这两个条件可以同时成立：用消息唤起处理者，用共享存储保留它需要读取的事实。
+
+如果这两类需求都不突出，就检查任务边界。能够独立交付的一次性调查，可以从 Orchestrator-subagent 开始；同一成员需要连续处理多项相关工作，并复用领域上下文，再考虑 Agent teams。仅仅“任务耗时长”，不足以说明需要长期团队。
+
+树上“先重新划分任务”这个出口也需要保留。如果几个执行者必须不断等待对方修改同一份材料，先把紧密相关的工作合并，通常比继续增加成员更容易判断责任与进度。
+
+### 用文档更新项目走一遍
+
+如果目标只是修订一篇指南，主要问题是旧字段遗漏，可以先用 Generator-verifier。若一次版本更新需要分别扫描接口、示例和链接，且各项能交付明确清单，就用 Orchestrator-subagent；当每种语言都需要持续处理一系列相关任务，再把相应执行者保留为长期成员。
+
+持续接收接口变更通知，是考虑 Message bus 的理由；多个成员需要共同调查一项兼容行为，则可以给这部分工作增加 Shared state。无论外层选了哪一种，最终文档仍然可以经过独立验证。**决定主模式的是工作怎样推进，决定验证层的是产物怎样验收。**
+
+## 八、先把交付条件写出来，再选择协调方式
 
 对这个文档项目，我会先做一次有边界的尝试：选一个真实版本，列出必须更新的接口、必须验证的示例和不能丢失的迁移条件。主 Agent 负责总体任务，范围明确的检查交给子 Agent，产物用 Generator-verifier 的方式验收。
 
