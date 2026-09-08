@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="670" viewBox="0 0 960 670" role="img" aria-labelledby="title desc">
+  <title id="title">游戏自动化的三份说明书</title>
+  <desc id="desc">顺序需要调整时，路线优化技能分析日志和任务顺序。任务卡住时，任务修复技能检查截图、识别和跳转。工具读不到界面时，插件维修技能恢复连接并重新读取界面。</desc>
+  <rect width="960" height="670" rx="24" fill="#f6f4ef"/>
+  <g font-family="PingFang SC, Microsoft YaHei, sans-serif">
+    <text x="48" y="66" fill="#253f43" font-size="32" font-weight="700">游戏自动化的三份说明书</text>
+    <text x="48" y="106" fill="#637477" font-size="21">先分清问题发生在哪里，再找对应的 Skill</text>
+    <rect x="36" y="142" width="888" height="142" rx="18" fill="#e5efeb"/>
+    <rect x="36" y="302" width="888" height="142" rx="18" fill="#f4e9d6"/>
+    <rect x="36" y="462" width="888" height="142" rx="18" fill="#e5ebf4"/>
+    <g font-size="19" font-weight="700">
+      <text x="58" y="177" fill="#42766b">01 / 路线安排</text>
+      <text x="58" y="337" fill="#93703e">02 / 任务故障</text>
+      <text x="58" y="497" fill="#54779d">03 / 工具故障</text>
+    </g>
+    <g fill="#253f43" font-size="28" font-weight="600">
+      <text x="58" y="222">顺序需要调整</text>
+      <text x="58" y="382">任务卡在页面上</text>
+      <text x="58" y="542">工具读不到界面</text>
+    </g>
+    <g fill="#41595c" font-size="25">
+      <text x="420" y="215">分析日志，对照任务顺序</text>
+      <text x="420" y="255" font-size="21">路线优化技能</text>
+      <text x="420" y="375">检查截图、识别和流程</text>
+      <text x="420" y="415" font-size="21">MFW 任务修复技能</text>
+      <text x="420" y="535">恢复连接，重新读取界面</text>
+      <text x="420" y="575" font-size="21">Computer Use 插件维修技能</text>
+    </g>
+    <g stroke="#849391" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M330 215h48m-10-8 10 8-10 8"/>
+      <path d="M330 375h48m-10-8 10 8-10 8"/>
+      <path d="M330 535h48m-10-8 10 8-10 8"/>
+    </g>
+    <text x="48" y="643" fill="#637477" font-size="18">职责对照示意 · 运行环境按各自项目准备</text>
+  </g>
+</svg>
