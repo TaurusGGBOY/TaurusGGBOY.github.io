@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读17：长会话如何继续运行"
 published: 2026-07-24T16:47:04+08:00
-updated: 2026-08-25
+updated: 2026-09-08
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -707,11 +707,97 @@ export function createCompactCanUseTool(): CanUseToolFn {
 
 所以传统 Autocompact 的模型任务是"阅读已有消息并产生摘要"，不是在压缩过程中继续执行 Bash、Read 或 MCP 工具。压缩请求本身如果遇到 `prompt-too-long`，代码会按 API round 从头部截掉一批消息并重试；摘要为空或返回 API error 时，压缩失败，不会把一个空摘要当成成功。
 
-摘要生成成功后，代码会清理旧的文件读取状态，再重新附加当前仍有意义的状态，已读文件和嵌套 memory 的附件；async agent、plan、plan mode 和已调用 skills 的信息；deferred tools、agent listing 和 MCP instruction 的 delta；`SessionStart` hooks 的结果。源码特意不重置 `sentSkillNames`，因为重新注入完整 skill listing 会带来一大段新的 cache creation；已调用 skill 的内容通过 attachment 保留。
+#### 压缩提示词要求模型交接哪些内容
+
+沿着 `compactConversation()` 再往下看，`getCompactPrompt()` 生成的文本会被包装为一条 user 消息，追加到待总结的对话后面。它的拼接顺序是：禁止工具的前置指令、`BASE_COMPACT_PROMPT`、可选的 `Additional Instructions`，最后再次提醒不要调用工具。`customInstructions` 是开放字符串；`undefined`、空字符串或只有空白时不追加，有内容时按原文追加。前面的 `PreCompact` hook 也可以提供补充指令，合并时用户指令在前、hook 指令在后。
+
+提示词的任务原文是：
+
+```text
+Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
+This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
+```
+
+这里的目标是让下一轮能够接着开发。提示词要求按时间顺序检查对话，保留用户的明确意图、已经采取的行动、技术决策、文件名、函数签名、代码片段、修改记录和错误修复，特别注意用户要求改变做法的反馈。上下文中已有的 `Compact Instructions` 等摘要要求，也要纳入这次总结。
+
+> 证据，`restored-src/src/services/compact/prompt.ts:19-143,269-303`（前后置指令、基础模板和拼接）；`compact.ts:368-380,420-443`（hook 指令合并与摘要请求消息）。
+
+#### 九部分摘要怎样变成下一轮看到的文本
+
+基础模板明确要求以下九个部分。仍用金额单位工单来理解：下一轮既要知道“金额换算在哪里出错”，也要知道“用户后来补了什么限制、测试停在哪里”。
+
+| 摘要标题 | 要交接的内容 |
+| --- | --- |
+| `1. Primary Request and Intent` | 用户的明确请求和意图 |
+| `2. Key Technical Concepts` | 讨论过的重要概念、技术和框架 |
+| `3. Files and Code Sections` | 查看、修改或创建的文件，文件为何重要，改动和适用的完整代码片段 |
+| `4. Errors and fixes` | 错误、修复方式，以及用户对此的反馈 |
+| `5. Problem Solving` | 已解决的问题和仍在进行的排查 |
+| `6. All user messages` | 所有非工具结果的用户消息，保留反馈与意图变化 |
+| `7. Pending Tasks` | 用户明确要求、尚未完成的任务 |
+| `8. Current Work` | 压缩前一刻正在做的具体工作、文件和代码 |
+| `9. Optional Next Step` | 与最近明确请求直接相关的下一步，如有；引用最近对话原文说明停在哪里 |
+
+最后一项还有约束：已经结束的任务不能被擅自重新启动，下一步不能偏到无关工作或早已完成的旧请求。提示词要求引用最近对话的原话，是为了减少摘要转述带来的任务偏移。
+
+模型被要求先输出 `<analysis>...</analysis>`，再输出 `<summary>...</summary>`。但前者只是起草阶段的文本，`formatCompactSummary()` 会把它删除，再把后者的标签替换成 `Summary:`，整理多余空行。因此，最终放回上下文的是下面这样的结构。方括号是本文的说明占位符：
+
+```text
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Summary:
+1. Primary Request and Intent:
+   [用户请求]
+2. Key Technical Concepts:
+   [技术概念]
+3. Files and Code Sections:
+   [文件、修改和代码]
+4. Errors and fixes:
+   [错误及修复]
+5. Problem Solving:
+   [已解决和仍在排查的问题]
+6. All user messages:
+   [非工具结果的用户消息]
+7. Pending Tasks:
+   [尚未完成的任务]
+8. Current Work:
+   [压缩前正在做什么]
+9. Optional Next Step:
+   [与最近请求一致的下一步，如有]
+
+[存在 transcriptPath 时：完整历史记录的读取路径]
+[要求直接续接时：恢复上一项工作、不重复开场的指令]
+```
+
+`getCompactUserSummaryMessage(summary, suppressFollowUpQuestions?, transcriptPath?, recentMessagesPreserved?)` 负责添加外层说明。`summary` 是模型返回的文本；`suppressFollowUpQuestions` 为 `true` 时追加直接恢复工作的指令，`false` 或 `undefined` 时不追加；`transcriptPath` 是运行时提供的路径，有值时告诉模型到哪里查旧细节；`recentMessagesPreserved` 为 `true` 时追加“最近消息原样保留”的说明，`false` 或 `undefined` 时省略。传统全量调用只传前三个参数，不能从这条包装函数的存在推断最近几轮必然保留。
+
+这段文本随后被包装为带 `isCompactSummary: true` 的 user 消息。九个部分属于提示词约定，格式化函数没有逐项验证标题是否齐全，也没有用 JSON Schema 强制字段。因此可以确认模型被要求怎样写，不能把每次实际输出都当成严格符合模板的结构化对象。
+
+> 证据，`restored-src/src/services/compact/prompt.ts:66-143,311-374`（九部分模板、清理和包装）；`compact.ts:614-624`（摘要消息标记）。这里讲的是传统模型摘要路径，前面的 session memory 分支复用已有内容，不应套用这份生成模板。
+
+#### 摘要之外，哪些工作资料会被补回来
+
+只剩九部分摘要，仍然可能缺少马上要修改的代码。传统全量和部分模型压缩在成功后，还会从当前运行状态生成附件，让下一轮重新看到关键资料。
+
+| 内容 | 恢复方式和范围 |
+| --- | --- |
+| 最近读取的文件 | 按访问时间倒序选取，最多尝试恢复 5 个文件，重新生成文件附件。每个文件的读取上限为 5,000 tokens，附件合计预算为 50,000 tokens；生成失败或超预算的附件不会加入。保留消息中已有有效 Read 结果的路径会去重。 |
+| 当前计划 | 存在计划内容时，补回 `plan_file_reference`，包含计划路径和内容；没有计划时不生成。 |
+| 计划模式约束 | 当前权限模式为 `plan` 时，补回完整的 `plan_mode` 提醒，避免下一轮丢失模式要求。 |
+| 已调用的 Skill | 只恢复当前 Agent 范围内已调用的技能，包含名称、路径和内容。最近使用的优先，每个最多约 5,000 tokens，内容总预算 25,000 tokens；过长时保留开头并提示按路径读取全文。 |
+| 后台 Agent 状态 | 为运行中、或已结束但尚未取回结果的本地 Agent 补回任务描述、状态、进展摘要或错误、输出文件路径。跳过已取回、`pending` 和当前 Agent 自身；不复制子 Agent 的完整对话。 |
+| 工具和 Agent 信息 | 重新通知延迟加载工具、Agent 列表与 MCP 指令。部分压缩会扫描保留消息，避免重复通知已有内容。 |
+| Hook 上下文 | 成功压缩后执行 `SessionStart('compact')`，把生成的 hook 消息加入结果。 |
+
+文件预算是上限，不表示必然补回五个完整文件，也不表示一定用满 50,000 tokens。计划文件和源码识别出的 memory 路径会从普通文件恢复候选中排除；计划走单独的附件通道。`readFileState` 与 `loadedNestedMemoryPaths` 会被清空，但清空去重状态本身不能证明所有嵌套 memory 已经立即重注入。
+
+Skill 也要区分“已用内容”和“完整目录”。源码特意保留 `sentSkillNames`，避免再次发送整份 skill listing；真正需要续接的已调用技能内容由 `invoked_skills` 附件补回。系统提示词、工具 schema 和项目上下文则仍由下一次请求的上下文组装负责，它们不属于九部分摘要。源码计算压缩后消息大小时，也明确把这些额外请求内容分开讨论。
+
+> 证据，`restored-src/src/services/compact/compact.ts:122-130,516-594,920-983,1415-1602,1674-1705`（附件恢复、预算与排除规则），以及 `compact.ts:633-644`（消息大小与系统提示、工具、userContext 的区别）。这张表描述传统模型压缩的恢复流程，不表示每条 session memory 或其他压缩路径都会运行同一套附件生成器。
 
 #### 重建顺序决定"压缩之后还能做什么"
 
-所有压缩结果最后都要交给 `buildPostCompactMessages()`，
+通用的压缩后消息构造器 `buildPostCompactMessages()` 按下面的顺序组装结果，
 
 ```ts
 export function buildPostCompactMessages(result: CompactionResult): Message[] {
@@ -727,7 +813,13 @@ export function buildPostCompactMessages(result: CompactionResult): Message[] {
 
 > 证据，`restored-src/src/services/compact/compact.ts:330-345`（2.1.88 source map 还原源码），压缩后消息的固定拼接顺序。
 
-固定顺序是，compact boundary → 摘要消息 → 仍然保留的原始消息 → 文件、plan、tool 和其他状态附件 → hook 结果。`messagesToKeep` 可以是 `undefined`，此时按空数组处理。这个顺序解释了为什么 compact 不是"把摘要字符串插回原数组"，boundary 提供压缩元数据，摘要提供可执行的历史概览，尾部原始消息保留最近细节，附件把状态重新水化，hooks 最后补上本轮环境。
+这条通用顺序是：compact boundary → 摘要消息 → 保留的原始消息 → 状态附件 → hook 结果。`messagesToKeep` 为 `undefined` 时按空数组处理；传统 `compactConversation()` 的返回值没有提供这一段，所以不能把“压缩后保留最近几轮原文”当成全量压缩的保证。session memory、保留尾部的压缩路径和手动部分压缩各有自己的保留范围；手动 `from` 保留前缀时，调用方还要按前缀在摘要之前的顺序接回。
+
+boundary 也承担程序状态的交接。摘要不保留原来的 `tool_reference` 块，因此源码把已发现的工具名写入 `preCompactDiscoveredTools`，让后续 schema 过滤继续识别已加载的延迟工具；有保留区间时，`preservedSegment` 记录 head、anchor、tail UUID，供恢复历史时重连消息链。这些是程序使用的元数据，不是让模型阅读的九部分摘要正文。
+
+最后还有磁盘上的历史。摘要里的 transcript 路径给模型一个找回旧代码、错误和原文的入口；只有再读取，相应细节才会重新进入上下文。项目文件也不会因为对话被总结而撤销修改。于是压缩后的信息分布在三处：模型当前看到的摘要与附件、程序维护的任务和工具状态、磁盘上可按需读取的完整资料。
+
+> 证据，`restored-src/src/services/compact/compact.ts:344-365,603-612,737-749,1021-1028`（保留区间、工具状态与全量返回值）；`restored-src/src/screens/REPL.tsx:4943-4953`（局部压缩的前后缀顺序）；`prompt.ts:345-355`（transcript 路径和续接说明）。
 
 ![压缩后的 boundary、摘要、保留消息与附件重新接回主循环](/images/posts/claude-code-source-reading-17/17-compaction-rehydration-detail-handdrawn.png)
 
@@ -748,7 +840,11 @@ export async function partialCompactConversation(
 
 > 证据，`restored-src/src/services/compact/compact.ts:772`（2.1.88 source map 还原源码），手动局部压缩的签名。
 
-源码确认的 `direction` 只有 `'from'` 和 `'up_to'`，`'from'` 从 pivot 开始总结后半段，保留前缀；`'up_to'` 总结 pivot 之前的部分，保留较新的后缀。`userFeedback` 可以是 `undefined`，用于给局部摘要补充用户要求；`pivotIndex` 来自调用方选定的消息位置，不是一个可以从函数内部穷举的固定值。局部摘要同样会过滤旧 boundary / summary，写入新的 head、anchor、tail UUID，保证保存后的消息链仍然可以恢复。
+源码确认的 `direction` 只有 `'from'` 和 `'up_to'`，`'from'` 从 pivot 开始总结后半段，保留前缀；`'up_to'` 总结 pivot 之前的部分，保留较新的后缀。`userFeedback` 可以是 `undefined`，用于给局部摘要补充用户要求；`pivotIndex` 来自调用方选定的消息位置，不是一个可以从函数内部穷举的固定值。`up_to` 的保留区会过滤旧 boundary / summary，`from` 则保留它们，避免丢失更早摘要覆盖的历史；两者都去掉 progress 消息，并记录 head、anchor、tail UUID，供恢复时重连。
+
+局部压缩的提示词也随方向改变。`getPartialCompactPrompt(customInstructions?, direction = 'from')` 默认使用“只总结最近部分”的模板，仍有前面的九个部分；`up_to` 总结前段时，第 8、9 部分改为 `Work Completed` 和 `Context for Continuing Work`，交代这一段完成了什么，以及后续消息需要的状态。自定义指令的空值处理和禁止工具的前后置提醒，与全量模板一致。
+
+> 证据，`restored-src/src/services/compact/prompt.ts:145-291`（局部模板与默认方向）；`compact.ts:780-803,1077-1091`（保留范围和恢复锚点）。
 
 #### 压缩完成后的 cleanup 也属于重建的一部分
 
@@ -875,6 +971,9 @@ GitHub issue [#42338](https://github.com/anthropics/claude-code/issues/42338) �
 | Autocompact | `trySessionMemoryCompaction()` / `DEFAULT_SM_COMPACT_CONFIG` | `src/services/compact/sessionMemoryCompact.ts:514,57` | 已确认 |
 | Autocompact | `compactConversation()` / `buildPostCompactMessages()` / `partialCompactConversation()` | `src/services/compact/compact.ts:387,330,772` | 已确认 |
 | Autocompact | `createCompactCanUseTool()` 压缩 agent 拒绝工具 | `src/services/compact/compact.ts:1125` | 已确认 |
+| Autocompact | `getCompactPrompt()` / `getPartialCompactPrompt()` | `src/services/compact/prompt.ts:293,274` | 已确认 |
+| Autocompact | `formatCompactSummary()` / `getCompactUserSummaryMessage()` | `src/services/compact/prompt.ts:311,337` | 已确认 |
+| Autocompact | 文件、计划、Skill、后台 Agent 的恢复附件 | `src/services/compact/compact.ts:1415-1602` | 已确认 |
 | Autocompact | `runPostCompactCleanup()` | `src/services/compact/postCompactCleanup.ts:31` | 已确认 |
 
 > 证据说明，标记 ⚠️ MISSING 的行遵循 [known-gaps.md](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/main/docs/blog/reference/known-gaps.md) 的 missing 类别，能确定"怎样接入、返回什么、怎样持久化"，不能确定选择启发式、删除策略或风险评分。另有两类边界，远程配置（`tengu_slate_heron`、`tengu_sm_compact*`）属于 runtime-only，历史事故数字属于 external-version。
