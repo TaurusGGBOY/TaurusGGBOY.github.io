@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读11：一次调用如何从校验走到持久化"
 published: 2026-07-24T16:46:58+08:00
-updated: 2026-08-04
+updated: 2026-09-09
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -138,7 +138,7 @@ export async function* runToolUse(
 
 这里有一个容易忽略的限制，它先在 `toolUseContext.options.tools` 中找，也就是当前运行上下文真正提供给模型的工具集合。只有找不到时，才会去基础工具池检查兼容别名，而且必须是 `aliases` 命中，不能借此绕过当前工具集合直接调用任意基础工具。如果仍然找不到，程序会直接构造 `is_error: true` 的 `tool_result` 并返回，该分支终止于名称解析阶段，输入校验与工具调用保持未触发状态。
 
-取消也有同样的边界。`abortController.signal.aborted` 在进入执行器前已经为 `true` 时，`runToolUse` 会返回 stop result。至于工具运行期间收到新输入是取消还是等待，则由工具可选的 `interruptBehavior()` 决定；源码可确认的返回值是 `'cancel'` 或 `'block'`，未实现、返回异常时都回退到 `'block'`。
+取消也有同样的边界。`abortController.signal.aborted` 在进入执行器前已经为 `true` 时，`runToolUse` 会返回 stop result。工具运行期间普通插话是否触发取消，还要结合 `interruptBehavior()` 与整批执行状态：返回值只有 `'cancel'` 或 `'block'`，未实现或抛异常时回退到 `'block'`；只有当前正在执行的工具全部允许 cancel，提交入口才自动中断。block 让插话等待后续模型请求，不禁止显式停止。本发布包未找到实际声明 cancel 的工具，声明核对与批次条件分别见第 09、10 章。
 
 ### 第二扇门｜结构校验之后再做语义校验
 

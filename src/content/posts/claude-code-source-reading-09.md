@@ -7,7 +7,7 @@ category: "AI / Architecture"
 draft: false
 image: "/images/posts/claude-code-source-reading-09/claude-code-source-reading-00.png"
 imagePosition: "left"
-updated: 2026-08-28
+updated: 2026-09-09
 ---
 ## Claude Code
 
@@ -17,7 +17,7 @@ updated: 2026-08-28
 
 Claude Code 2.1.88 的 `Tool` 不是单纯的 JSON Schema，也不是一个可以直接调用的 JavaScript 函数。它把两侧放在同一个对象里：`name`、`aliases`、`description()`、`inputSchema` 和可选的 `inputJSONSchema` 决定模型能看到什么；`validateInput()`、`checkPermissions()`、`call()`、`isConcurrencySafe()`、`isReadOnly()`、`isDestructive()` 和 `interruptBehavior()` 决定宿主怎样执行。模型拿到的是从该对象投影出的契约，Claude Code 运行时保留完整对象。模型输出同名 `tool_use` 后，宿主还要重新查注册表、校验输入、判断权限，不能把“模型选中了工具”直接等同于“函数获得执行权”。
 
-`buildTool()` 把保守缺省值集中起来。没有覆盖时，工具默认启用，默认不允许并发，默认既不声明只读，也不声明破坏性；默认 `checkPermissions()` 返回 allow，但仍要进入通用权限系统，而不是绕过授权。`interruptBehavior()` 的可选返回值只有 `cancel` 和 `block`：前者允许用户中断取消工具，后者阻止中断；没有实现该函数时按 `block` 处理。`shouldDefer?: boolean` 表示 Schema 是否可以延后发送，`alwaysLoad?: boolean` 用于强制常驻，两者负责模型可见性，不负责选择执行机器。
+`buildTool()` 把保守缺省值集中起来。没有覆盖时，工具默认启用，默认不允许并发，默认既不声明只读，也不声明破坏性；默认 `checkPermissions()` 返回 allow，但仍要进入通用权限系统，而不是绕过授权。`interruptBehavior()` 的可选返回值只有 `cancel` 和 `block`：前者允许普通插话触发工具取消，后者让工具继续执行、插话等待；没有实现该函数时按 `block` 处理。`shouldDefer?: boolean` 表示 Schema 是否可以延后发送，`alwaysLoad?: boolean` 用于强制常驻，两者负责模型可见性，不负责选择执行机器。
 
 当前会话的工具池由 `tools.ts` 装配。内置工具先经过运行模式、配置、deny 规则和 `isEnabled()` 过滤，再与 MCP 工具合并。`assembleToolPool()` 会先把内置和扩展来源分区排序，以保持请求中的工具顺序稳定，随后按名称去重；同名冲突时内置工具在前，所以内置实现胜出。这个数组既是下一次请求生成工具 Schema 的来源，也是收到 `tool_use` 后寻找执行对象的依据。注册表因此不是静态的全局清单，而是“这个会话、这一轮条件下实际可见且可执行的工具快照”。
 
@@ -28,6 +28,21 @@ Claude Code 2.1.88 的 `Tool` 不是单纯的 JSON Schema，也不是一个可�
 API 服务端仍参与后半段。Claude Code 在请求中发送对应 Beta 和 `defer_loading` 协议字段，从消息历史中收集已经发现的名称，下一轮只携带这些 deferred 工具的完整 Schema；第一方和 Foundry 路径可让服务端根据 `tool_reference` 展开定义。源码还提示 Bedrock、Vertex 对客户端产生的 reference 支持存在差异。因此，准确结论不是“`tool_search` 在服务端”，而是：**Claude Code 的目录检索在本地；API 服务端接受延迟加载协议，并参与 reference 到完整工具定义的展开。**
 
 服务端工具则是另一类对象：模型供应商执行能力，CLI 消费其结果块，不调用本地 `Tool.call()`。固定窗口中能直接确认进入普通路径的是 `web_search`，其协议类型为 `web_search_20250305`，可带 `allowed_domains`、`blocked_domains`，并把 `max_uses` 设为 8；源码还会在条件满足时追加内部、实验性的 `advisor_20260301`。消息解析器认识 `server_tool_use`、`code_execution_tool_result`、`web_fetch_tool_result`、`bash_code_execution_tool_result`、`text_editor_code_execution_tool_result`、`tool_search_tool_result` 等更多 block，只能证明 CLI 有兼容解析能力，不能据此宣称这些服务端工具全都在 2.1.88 的正常请求中注册。回答“有哪些服务端工具”时，必须把“直接注册”“条件注册”和“仅认识结果格式”分开。
+
+### 哪些工具会因普通插话取消
+
+`interruptBehavior()` 控制普通提交是否取消工具，不能据此判断模型以后会不会收到插话。`block` 表示工具继续执行，消息等待后续注入；它不禁止显式停止操作，也不屏蔽下一次模型请求中的用户消息。`cancel` 表示工具允许因普通提交而取消，是否真的触发还要检查当前其他执行中的工具。
+
+在本仓库的 2.1.88 还原源码与 `package/cli.js` 中检索 `interruptBehavior`，没有找到实际工具声明返回 `cancel`。Bash、Read、Write、Edit、Grep、Agent 等可见工具没有实现该方法，执行器因此按默认 `block` 处理。`handlePromptSubmit()` 的注释以 SleepTool 举例，但仓库只保留它的 `prompt.ts`，不能把注释示例当成已核实的 `cancel` 工具实现。
+
+| 声明或执行情况 | `StreamingToolExecutor` 的处理 |
+|---|---|
+| 未实现 `interruptBehavior()` | 回退为 `block` |
+| 方法抛异常 | 回退为 `block` |
+| 返回 `block` | 普通插话等待，工具继续执行 |
+| 返回 `cancel` | 允许提交取消；仍需满足整批自动中断条件 |
+
+这里能够确认的是契约与这份发布包中的声明情况，不能外推其他版本或运行时另外装配的工具。具体回退在 `restored-src/src/services/tools/StreamingToolExecutor.ts::getToolInterruptBehavior()`。
 
 ## Codex CLI
 

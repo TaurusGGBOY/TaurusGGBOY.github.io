@@ -7,7 +7,7 @@ category: "AI / Architecture"
 draft: false
 image: "/images/posts/claude-code-source-reading-06/claude-code-source-reading-00.png"
 imagePosition: "left"
-updated: 2026-08-28
+updated: 2026-09-09
 ---
 ## Claude Code
 
@@ -37,6 +37,26 @@ Token Budget 还有收益递减刹车。续写次数达到 3 次后，如果本�
 这些 reason 的检查位置决定了它们能控制什么。`maxTurns?: number` 在工具批次收束、准备进入下一次模型请求时检查；`undefined` 或 0 不启用该分支。流式消费期间取消返回 `aborted_streaming`，工具执行期间取消返回 `aborted_tools`。两条取消路径都会先补齐必要的 `tool_result`，再退出协议链。
 
 `maxBudgetUsd?: number` 又在更外层。`QueryEngine` 消费消息并累计成本后，若 `getTotalCost() >= maxBudgetUsd`，它产出 subtype 为 `error_max_budget_usd` 的 result 并返回。这个门禁不会倒流回已经发生的工具副作用，也不是 `queryLoop()` 的 Terminal reason。类似地，`taskBudget?: { total: number }` 会进入 API 的 `output_config.task_budget`，而“`+500k` 自动续写”走本地 Token Budget；名字都含 budget，作用域却分别是 API 请求、Harness 续写和整个 QueryEngine 成本。
+
+### 工具还在运行时，用户插话何时进入模型
+
+假设模型一次请求了 A、B、C 三个工具，A 已经返回，B、C 还在执行，用户补了一句“先别改文件”。普通提交先由 `restored-src/src/utils/handlePromptSubmit.ts::handlePromptSubmit()` 写进统一 `commandQueue`，`enqueue()` 没收到 priority 时默认使用 `next`。消息已经被界面接收，此时模型还没有看到它。
+
+`queryLoop()` 完整消费 `getRemainingResults()` 或 `runTools()` 之后，才调用 `getCommandsByMaxPriority()` 取得待注入消息，再通过 `getAttachmentMessages()` 追加到下一次请求的上下文。因此 A 先完成并不会触发插话投递；正常路径要等当前响应产生的整批工具结果收齐，但不用等整个 Agent 任务结束。后台工作已经返回“已启动”结果时，其 tool use 已经结算，不要求后台进程也在此刻结束。
+
+下面是这条普通路径的时序示意，不是源码摘录：
+
+```text
+模型请求 A、B、C → 工具执行 → 收齐本批 tool_result → 读取消息队列 → 下一次模型请求
+                              ↑                         ↑
+                    用户插话先入 commandQueue ──────────┘
+```
+
+读取队列前，源码专门提醒不要把普通 user message 插在尚未收齐的工具结果中间，否则 API 会报错。取消路径则用中断结果补齐配对，不能把“需要 result”理解成“必须正常执行成功”。消息如果错过本次队列快照，也要等后续消费点；已经发出的模型请求不会被这次提交改写。
+
+这也解释了 steer、queue/follow-up 与 abort 的区别。steer 指当前工作链内的后续请求接收补充指令；queue/follow-up 指当前工作链准备结束以后再处理；abort 才要求取消当前执行。steer 同样可以通过队列实现，关键是消费位置。Claude Code 的普通 prompt 会被主循环中途取走，slash command 与 bash-mode 输入则不走这个普通 prompt 注入分支，而是留给回合间的队列处理器。
+
+还有一层模型侧语义：`restored-src/src/utils/messages.ts::wrapCommandText()` 将普通插话包装为“用户在工作期间发来了新消息”，并要求完成当前任务后处理它。因此中途送达不等于强制抢占当前任务。工具是否因这次提交取消，由第 09、10 章介绍的 `interruptBehavior()` 和整批判断决定。
 
 ## Codex CLI
 

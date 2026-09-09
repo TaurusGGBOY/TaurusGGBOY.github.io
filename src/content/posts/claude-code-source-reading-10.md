@@ -7,7 +7,7 @@ category: "AI / Architecture"
 draft: false
 image: "/images/posts/claude-code-source-reading-10/claude-code-source-reading-00.png"
 imagePosition: "left"
-updated: 2026-08-28
+updated: 2026-09-09
 ---
 ## Claude Code
 
@@ -30,6 +30,21 @@ StreamingToolExecutor 没有调用静态路径的数字 cap，因此固定窗口
 进度和最终结果也采用不同排序承诺。每个工具的 progress 会放入 `pendingProgress`，只要可用就立即 yield；最终结果按内部工具数组扫描。一个仍在执行的并发安全工具不会阻止后面的安全 sibling 先交付结果，因为 `tool_use_id` 能保持配对；但执行中的独占工具会让扫描停止，阻止后续结果跨越屏障。换句话说，Claude Code 维护必要的因果顺序，不把所有可观察事件强制压成一条完成顺序。
 
 错误级联同样按依赖假设收口。只有 `Bash` 产生 error tool_result 时，streaming executor 才触发 `siblingAbortController.abort('sibling_error')`；源码解释 shell 命令更可能构成隐式依赖链。Read、WebFetch 等错误不会取消其他 siblings。用户中断与 streaming fallback 使用另外的 abort reason 和 synthetic result。下一轮模型请求仍要等当前 response 结束并把剩余工具结果 drain 完；提前并行只缩短等待窗口，不改变第 08 篇确认的双门禁。
+
+### 普通插话要看全部正在执行的工具
+
+普通输入能否自动中断当前执行，判断点在 `StreamingToolExecutor.updateInterruptibleState()`。下面保留其核心条件，省略外层状态回调：
+
+```ts
+executing.length > 0 &&
+  executing.every(t => this.getToolInterruptBehavior(t) === 'cancel')
+```
+
+`executing` 只包含状态为 `executing` 的调用。至少有一个正在执行的工具，并且这些工具全部声明 `cancel`，宿主才把 `hasInterruptibleToolInProgress` 设为 true。`handlePromptSubmit()` 读取这个状态，满足条件才调用 `abortController.abort('interrupt')`，随后仍把新消息入队。一个允许取消的工具与一个默认 `block` 工具并行时，普通提交不会走这条自动中断路径。
+
+这个条件描述的是机制；第 09 章核对的发布包中没有找到实际声明 `cancel` 的工具，不能据此宣称某个内建工具已启用它。默认 `block` 时，工具继续执行，主循环在本批结果收齐后注入普通插话。若是显式停止或其他取消原因，则走各自的 abort 路径，工具是否及时退出取决于其 signal 处理与清理逻辑。
+
+因此，三个时间点需要分开：界面接收消息、模型在下一次请求中看到消息、工具响应取消。`block` 只约束普通提交取消这条路径，不意味着无法 steer 后续行动，也不意味着工具永远不能停止。
 
 ## Codex CLI
 
