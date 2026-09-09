@@ -1,6 +1,7 @@
 ---
 title: "Anthropic 的 Memory 分几类？读完官方文章，再看 Claude Code 源码"
 published: 2026-09-09T10:07:00+08:00
+updated: 2026-09-09
 description: "通读 17 篇 Anthropic 官方资料，结合 Claude Code 源码，区分记忆的用途、四种内容类型与作用域，追踪写入、召回、会话压缩和 dreaming。"
 tags: ["claude-code", "source-code", "ai-agent", "memory"]
 category: "AI / Architecture"
@@ -65,6 +66,8 @@ export const MEMORY_TYPES = [
 
 定义位于 [memoryTypes.ts](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/ae63175c5bf1d46e2471d067cd18c84b59e65906/restored-src/src/memdir/memoryTypes.ts)。当前官方文档也已经给出这四类。
 
+**这四类是平级的内容分类，没有高低优先级，也不决定在哪个范围生效。** 在本节讨论的 Auto Memory 中，它们用于组织跨会话可复用的信息。
+
 | 类型 | 保存什么 | 示例（本文构造） | 容易放错的内容 |
 | --- | --- | --- | --- |
 | `user` | 用户角色、知识背景，以及对协作有帮助的个人信息 | 用户熟悉后端，但希望前端解释多一些背景 | 当前任务的临时进度 |
@@ -75,6 +78,25 @@ export const MEMORY_TYPES = [
 `feedback` 不只记录批评，也可以保存用户认可、以后希望继续采用的做法。源码提示要求保留原因与应用方式；这比“永远不要 mock”更有用，因为用户可能只是在限定某一类集成测试。
 
 `project` 也不等于“任何和仓库有关的东西”。源码明确排除可以从当前代码、目录结构或 Git 历史推导的信息。记忆更适合保存**代码里看不出的动机和协作背景**。
+
+再给每类三个具体例子。下面的内容都是示意；若信息已经记录在 CLAUDE.md 中，源码提示要求避免重复保存。
+
+| 类型 | 值得保存的信息 |
+| --- | --- |
+| `user` | 用户有多年 Go 经验，刚开始接触 React |
+| `user` | 用户负责后端架构和技术评审 |
+| `user` | 用户的学习目标是理解 Agent 上下文管理机制 |
+| `feedback` | 解释函数时，要说明参数可选值及默认行为 |
+| `feedback` | 数据库集成测试要验证真实 SQL 行为，因为测试替身曾掩盖迁移问题 |
+| `feedback` | 用户认可这类紧密关联的重构合并成一个 PR，便于整体评审 |
+| `project` | 保留旧接口是因为外部客户端尚未完成升级 |
+| `project` | 为准备发布，从 2026-09-15 起冻结非关键变更 |
+| `project` | 重写认证模块主要由合规要求驱动 |
+| `reference` | 接口规范维护在指定飞书文档中，保存其链接与用途 |
+| `reference` | 数据管道问题统一在某个 Linear 项目追踪，保存项目入口 |
+| `reference` | 某个 Grafana 看板用于观察请求延迟，保存看板入口 |
+
+“我刚开始学 React”描述用户背景，适合归入 `user`；“解释 React 时，请用后端概念作类比”直接指导协作方式，适合归入 `feedback`。分类帮助后续理解内容，无法替代对具体语境的判断。
 
 类型解析也有一个边界：
 
@@ -107,6 +129,20 @@ type AgentMemoryScope = 'user' | 'project' | 'local'
 路径函数 `getAgentMemoryDir(agentType, scope)` 的第二个参数必须是以上三值之一，没有默认作用域；第一个参数来自配置中的 Agent 名称，是开放字符串，并非固定 Agent 名单。远程记忆挂载环境另有路径分支，上表不适合直接套到所有运行方式。目录位于项目内也不自动意味着它已经被 Git 提交或跨机器同步。
 
 源码还有一组大写名称：`User`、`Project`、`Local`、`Managed`、`AutoMem`，以及受编译特性控制的 `TeamMem`。它们出现在[记忆加载类型](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/ae63175c5bf1d46e2471d067cd18c84b59e65906/restored-src/src/utils/memory/types.ts)中，用于区分加载来源。不能把这组来源、子 Agent 作用域和四种内容类型拼成一张“官方记忆等级表”。
+
+### 同一个项目的所有会话都会读取吗
+
+普通本地会话在解析到同一个 Auto Memory 目录时，可以共享其中的记忆。[paths.ts](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/ae63175c5bf1d46e2471d067cd18c84b59e65906/restored-src/src/memdir/paths.ts)的默认路径以规范化的 Git 仓库根目录确定项目，因此同一仓库的 worktree 也可落到共同的项目记忆目录；显式目录配置和远程环境另有分支。
+
+但“共享”要分成三个动作看：
+
+| 动作 | 发生条件 |
+| --- | --- |
+| 加载 MEMORY.md 索引 | Auto Memory 启用，入口存在且能读取；进入上下文的内容受长度限制 |
+| 读取某个主题文件 | 与当前任务相关时按需展开，不保证每条都读取 |
+| 新增或更新记忆 | 出现值得保存的信息时进行；后台提炼另有功能条件 |
+
+这个共享范围不自动覆盖另一台机器、团队其他成员或所有子 Agent。子 Agent 可以使用自己的目录。**`type: project` 只描述项目背景，真正决定跨哪些会话共享的是目录解析和加载机制。**
 
 ## 一条反馈怎样进入下一次会话
 
@@ -145,15 +181,42 @@ MEMORY.md 只保留简短入口：
 
 这个提示构造函数的 `skipIndex` 参数默认是 `false`，要求维护索引；取 `true` 时省去索引写入指引，保留主题文件规则。它不是“禁用记忆”的开关。可选的 `extraGuidelines` 是追加指引的字符串数组，未提供时按空数组处理；目录与显示名称是调用方传入的开放字符串。
 
+### 什么时候分文件，文件名由谁决定
+
+**准备保存时，就由模型判断应当新建主题还是更新已有文件。** `buildMemoryLines()` 的提示要求每份记忆使用独立文件，按语义主题组织，并在新建前检查是否已有可更新的记忆。这些是给模型的组织规则；这里没有按正文长度自动切文件的算法。
+
+例如，第一次得知数据库集成测试的要求，可以创建 `feedback_integration_testing.md`。后来用户补充“因为以前测试替身掩盖过迁移失败”，应当更新同一文件的原因；再得知“解释源码时要说明默认值”，则适合新建 `feedback_source_explanation.md`。两条都属于 `feedback`，但分别影响测试与解释工作，可以独立召回。
+
+所以，四种类型不意味着只有四个大文件，也不要求一句话一个文件。具体主题边界由模型判断。MEMORY.md 的 200 行预算限制索引加载，**不是等写满 200 行才开始拆文件的触发器**。
+
+源码提示给出的文件名例子包括 `user_role.md` 和 `feedback_testing.md`。`<类型>_<具体主题>.md` 是容易理解的命名方式，但在这段实现中不是强制命名算法；文件名由模型选择，索引链接应与实际路径一致。名字应让主题容易辨认，而不是按日期堆成一份会话日志。
+
+文件名与文件内的字段也要分开：
+
+| 项目 | 用途 | 示例 |
+| --- | --- | --- |
+| 文件名 | 定位主题文件 | `feedback_source_explanation.md` |
+| `name` | 记忆名称 | 源码解释要求 |
+| `description` | 提供召回时判断相关性的线索 | 讲解函数时说明参数可选值、默认值和行为差异 |
+| `type` | 声明内容类型 | `feedback` |
+
+类型解析读取 `type` 字段，不是从文件名的 `feedback_` 前缀推导。普通索引模式下，创建主题文件之后，还要在 MEMORY.md 中补上入口。
+
 ### 入口有预算，正文按需读取
 
 [claudemd.ts](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/ae63175c5bf1d46e2471d067cd18c84b59e65906/restored-src/src/utils/claudemd.ts#L980)在 Auto Memory 启用且入口存在时，将它作为 `AutoMem` 来源加入加载结果。加载索引不等于启动时把所有主题文件全文读进来。
 
 [memdir.ts 的截断实现](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/ae63175c5bf1d46e2471d067cd18c84b59e65906/restored-src/src/memdir/memdir.ts)还有一个值得对照文档的小细节：入口限制包含 **200 行**与名为字节上限的 **25,000**。但这份快照计算长度用的是 JavaScript 字符串的 `.length`，实际是 UTF-16 码元计数，并非 UTF-8 文件字节数。中文内容不能简单按“严格 25KB 文件上限”理解。
 
+这种“先给入口，再展开正文”的方式，就是渐进式披露。会话判断该读什么，首先靠索引里的标题和短描述。例如模型已经看到“数据库集成测试需验证真实 SQL 行为”，你再要求它补数据库测试，它就可以判断这条记忆相关，通过 Read 工具打开对应文件，取得完整原因和范围。若索引只写“项目经验”，提供的召回线索就弱得多。
+
+[记忆访问提示](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/ae63175c5bf1d46e2471d067cd18c84b59e65906/restored-src/src/memdir/memoryTypes.ts)要求在记忆看起来相关、用户提及之前的工作时访问记忆；用户明确要求检查或回忆时，也要求访问。这条路径依赖主模型的相关性判断，不保证每次选对。
+
 源码还提供一种相关记忆筛选路径。[findRelevantMemories()](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/ae63175c5bf1d46e2471d067cd18c84b59e65906/restored-src/src/memdir/findRelevantMemories.ts)把候选文件的名称、描述交给一次辅助模型请求，选择与当前输入相关的记忆，再由[附件构造函数](https://github.com/TaurusGGBOY/claude-code-sourcemap/blob/ae63175c5bf1d46e2471d067cd18c84b59e65906/restored-src/src/utils/attachments.ts#L2196)过滤已读内容、最终截取最多五份并读取。
 
 这条路径展示的是“先筛元信息，再展开正文”。筛选函数本身的“五份”是提示目标，调用方的 `.slice(0, 5)` 才提供实际数量上限。它受相关功能路径控制，不能由源码存在就推断每位用户每轮都会运行；筛选失败返回空结果，也不意味着记忆已被删除。
+
+这就是第二条召回路径：程序把当前输入、最近使用的工具以及候选元信息用于辅助筛选，再把选中文件的正文作为附件交给主模型。此时主模型不必先自行发出 Read。两条路径都依据任务相关性展开内容，不会因为某份记忆标了 `project` 就无条件全文加载。
 
 ### 写入还可以由后台提炼完成
 
