@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读26：Plan Mode 与 Worktree 如何隔离规划与执行"
 published: 2026-07-24T16:47:13+08:00
-updated: 2026-08-04
+updated: 2026-09-09
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -38,12 +38,12 @@ imagePosition: "left"
 
 Anthropic 对两类模式的实践区分与源码边界相互印证，orchestrator-subagent 适合清晰、短小、低耦合的结果，由父 Agent 负责综合；agent team 适合独立任务的持续推进，让 worker 在多轮工作中保持上下文并相互协调，但要承担更高的 token 和通信成本。因此选择标准取决于任务是否需要持久身份和团队控制面。
 
-同一个自定义 Agent 定义可以作为 `subagent_type` 被普通路径使用，也可以作为 teammate 的角色模板；定义里的模型、工具和提示词描述“它是谁”，而 `spawnTeammate` 还是 `runAgent` 决定“它以什么协作关系存在”。本篇仍以 `@anthropic-ai/claude-code@2.1.88` 的还原源码为边界，下一节接着看 Plan mode 与 worktree 如何分别隔离行为与文件。
+最后再强调一个容易混淆的点，同一个自定义 Agent 定义可以作为 `subagent_type` 被普通路径使用，也可以作为 teammate 的角色模板；定义里的模型、工具和提示词描述“它是谁”，而 `spawnTeammate` 还是 `runAgent` 决定“它以什么协作关系存在”。本文后续仍以 `@anthropic-ai/claude-code@2.1.88` 的还原源码为边界，继续看 Plan mode 和 worktree 如何分别隔离行为与文件。
 
 ## 介绍本章的一些概念
 
 - Plan mode 的本质是 `ToolPermissionContext.mode` 的**权限状态转换**。进入时用 `prePlanMode` 记住"从哪里进来"，退出时恢复；计划文本只是这个状态机的产物。
-- "只读"是三层叠加，**Plan mode reminder 高优先级指令 + 工具自身契约（`isReadOnly()` / `validateInput()` / `checkPermissions()`）+ 权限上下文**，plan file 是刻意保留的唯一写入例外。
+- "只读"目标由三层配合，**Plan mode reminder 高优先级指令 + 工具自身契约（`isReadOnly()` / `validateInput()` / `checkPermissions()`）+ 权限上下文**，提示词只允许写 plan file，但实际权限路径还允许部分内部文件，并可能被 allow 规则或 bypass 放行。
 - `/plan` 命令与 `EnterPlanMode` 工具共用 `prepareContextForPlanMode()` + `applyPermissionUpdate()` 同一组状态函数，只有入口不同。
 - 退出计划的审批链**按身份分流**，普通会话返回 `ask` 必须经过用户确认；teammate 返回 `allow` 跳过本地权限弹窗，plan-required 的 teammate 改经 mailbox 向 leader 请求 `plan_approval_request`。
 - Worktree 与 Plan mode 是**两种正交的隔离**，Plan mode 管"现在能不能改"，worktree 管"改哪份文件"，后者用 slug 校验、Hook/Git 双路径、cwd 切换与缓存失效实现文件边界，进入计划模式不会自动创建 worktree。
@@ -62,6 +62,8 @@ Anthropic 对两类模式的实践区分与源码边界相互印证，orchestrat
 
 ## 问题｜先写计划再改代码，和并行改代码为什么不能混用
 
+本篇把 Plan Mode 与 Worktree 放进同一条隔离链：权限状态限制当前阶段能做什么，plan file 保存可审查的意图，worktree 把并行执行的文件状态隔开。它们分别隔离“动作资格”和“磁盘现场”，不能由一个 prompt 或一个布尔开关替代。
+
 "先写计划再改代码"和"让多个 Agent 并行改代码"经常被当成同一件事。前者限制的是权限状态，后者隔离的是目录与分支；混用两套机制，计划通过了仍可能在同一工作树里互相覆盖。
 
 ![Plan Mode 与 Worktree 的两种隔离](/images/posts/claude-code-source-reading-26/26-two-isolations-detail-handdrawn.png)
@@ -74,7 +76,7 @@ Plan Mode 能说明“如何先计划再执行”：它是权限状态、计划�
 
 ## 正文
 
-本篇使用 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 还原源码重建控制流。代码块只保留证明当前机制所需的字段，省略无关参数、UI 分支和实验逻辑；每个代码块后标注证据位置。`restored-src/` 只用于定位证据，不表示内部仓库原始目录。
+本文源码引用以 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 还原源码为边界。后文“补充推测”单独讨论后续版本的公开修复记录与读者观察，不将它们当作本版本源码事实。代码块只保留证明控制流所需的字段，省略与当前机制无关的参数、UI 分支和实验逻辑；每个代码块后标注证据位置。`restored-src/` 只用于定位证据，不表示内部仓库原始目录。
 
 ### 两种隔离，解决的是两个不同问题
 
@@ -101,7 +103,7 @@ Worktree 只解决目录和分支边界；方案是否正确、用户是否同�
 
 > 先读取支付服务、回调样例和相关测试，给出证据、根因假设和修复计划；不要修改文件，不要执行会改变外部状态的命令。计划批准后，在独立 worktree 中修复这张金额单位工单。
 
-Plan Mode 先通过权限状态限制写入、命令和其他副作用，计划得到批准后才退出只读阶段；worktree 再把允许的写入放到独立目录。工程师可以在原工作树继续看日志，在实验 worktree 比较整数分方案；一个隔离的是"现在能不能改"，另一个隔离的是"改哪份文件"。
+Plan Mode 的预期流程是先规划、批准后再实施，但本版本的 allow 规则和 bypass 路径仍可能放行规划期间的操作；worktree 再把允许的写入放到独立目录。工程师可以在原工作树继续看日志，在实验 worktree 比较整数分方案；一个隔离的是"现在能不能改"，另一个隔离的是"改哪份文件"。
 
 下面沿这两次输入之间的状态转换，进入计划文件、审批和 worktree 生命周期。
 
@@ -259,7 +261,7 @@ async validateInput(_input, { getAppState, options }) {
 }
 ```
 
-> 证据，`restored-src/src/tools/ExitPlanModeV2Tool/ExitPlanModeV2Tool.ts`（2.1.88 source map 还原源码）。
+> 证据，`restored-src/src/tools/ExitPlanModeTool/ExitPlanModeV2Tool.ts`（2.1.88 source map 还原源码）。
 
 `_input` 在这个校验阶段不使用。`getAppState` 用来读取最新权限模式，`options.mainLoopModel` 只进入省略的遥测字段。普通会话在 `mode !== 'plan'` 时返回 `result: false` 和 `errorCode: 1`，从而在展示审批对话框之前拒绝误调用。
 
@@ -282,7 +284,7 @@ async checkPermissions(input, context) {
 }
 ```
 
-> 证据，`restored-src/src/tools/ExitPlanModeV2Tool/ExitPlanModeV2Tool.ts`（2.1.88 source map 还原源码）。
+> 证据，`restored-src/src/tools/ExitPlanModeTool/ExitPlanModeV2Tool.ts`（2.1.88 source map 还原源码）。
 
 `input` 是规范化后的 ExitPlanMode 输入，原样放入 `updatedInput`；`context` 在这段实现里未使用。普通会话返回 `ask`，必须经过用户确认。Teammate 返回 `allow` 以跳过本地权限 UI；需要强制计划审批的 teammate 会在 `call()` 中写入 `plan_approval_request` 到 team lead mailbox，并进入等待状态。
 
@@ -303,13 +305,63 @@ return {
 }
 ```
 
-> 证据，`restored-src/src/tools/ExitPlanModeV2Tool/ExitPlanModeV2Tool.ts`（2.1.88 source map 还原源码）。
+> 证据，`restored-src/src/tools/ExitPlanModeTool/ExitPlanModeV2Tool.ts`（2.1.88 source map 还原源码）。
 
 **字段说明，** 状态更新保留 `prev`，并用 `toolPermissionContext` 写入恢复后的 `baseContext`；其中 `mode` 取 `restoreMode`，`prePlanMode` 设为 `undefined`，防止下次退出复用旧入口。
 
 `restoreMode` 优先使用 `prePlanMode`；若它是 `undefined`，回退到 `default`。源码还会处理 auto gate 被关闭的情况，即使 `prePlanMode` 是 `auto`，也可能因为 circuit breaker 或设置禁用而退回 `default`。最后把 `prePlanMode` 清空，避免下一次退出错误地复用旧状态。
 
 到这里，Plan mode 让"可以开始执行"成为一个可观察、可审批的状态转换；并行任务目录由独立的 worktree 机制准备。
+
+### 补充推测｜为什么现在会先询问退出 Plan，再继续执行
+
+有读者观察到，以前规划到一半就开始改代码，现在会先弹出“是否退出 Plan”的询问，用户确认以后才继续。这个变化最值得注意的地方，是**执行动作前多了一个必须等到审批结果的停顿**。
+
+先划清证据范围。本节基于读者描述推测改法，没有新版源码 diff，也没有这次会话的工具调用日志。官方 [2.1.136 发布记录](https://github.com/anthropics/claude-code/releases/tag/v2.1.136)确认修复了“存在匹配的 `Edit(...)` allow 规则时，Plan mode 未能阻止文件写入”；[2.1.132 发布记录](https://github.com/anthropics/claude-code/releases/tag/v2.1.132)另行修复了无头恢复会话中的权限模式参数和 Plan 状态重新应用问题。这两项能证明权限与状态路径有过修复，不能证明读者看到的弹窗由其中哪一项引入。
+
+#### 旧实现里，缺口在哪里
+
+假设当前是 `plan`，配置里有允许编辑业务目录的 `Edit(...)` 规则，模型却发起了修改。`checkWritePermissionForTool()` 在检查拒绝规则、内部可编辑路径和安全条件之后，会继续匹配 allow 规则；命中就返回 `allow`。这个分支没有先把普通 Plan 写入拦下来。因此，一旦模型偏离“只规划”的提示词，已有权限就可能把修改放过去。
+
+> 源码证据：`restored-src/src/utils/permissions/filesystem.ts`，`checkWritePermissionForTool()`，尤其是 allow 规则匹配与默认 `ask` 分支。
+
+退出审批本身已经存在。普通会话的 `ExitPlanModeV2Tool.checkPermissions()` 返回 `ask`，`requiresUserInteraction()` 返回 `true`；`hasPermissionsToUseToolInner()` 会在通用 bypass 和 allow 放行之前保留这类询问。用户批准后，审批组件更新模式并调用 `onAllow`；退出工具随后把获准实施的结果交回模型。
+
+> 源码证据：`restored-src/src/tools/ExitPlanModeTool/ExitPlanModeV2Tool.ts`；`restored-src/src/utils/permissions/permissions.ts`，`hasPermissionsToUseToolInner()`；`restored-src/src/components/permissions/ExitPlanModePermissionRequest/ExitPlanModePermissionRequest.tsx`。
+
+这意味着，修复未必需要新增一个计划状态机。**更小的改法，是堵住直接执行的入口，再复用已经存在的退出审批。**
+
+#### 按这个现象推测，最小改动会落在两处
+
+第一处在权限决策：普通 Plan 会话尝试业务文件写入时，要先停住，不能让后面的 `Edit(...)` allow 规则直接放行。计划文件等现有内部路径例外继续沿用；是否保留 bypass 例外则遵循产品原有语义。
+
+第二处在审批衔接：把“继续实施”交给退出 Plan 的交互，批准后才切换模式、恢复执行资格。下面是描述这一方案的流程伪代码，**不是新版源码，也不是现有 API 签名**：
+
+```text
+收到执行请求
+  → 若属于需要拦截的 Plan 写入，暂停执行
+  → 请求用户批准退出 Plan（等待期间仍保持 plan）
+      → 拒绝或取消：保持 plan，不执行这次写入
+      → 批准：应用用户选择的权限模式
+          → 按新模式检查后续执行请求
+          → 获准后执行
+```
+
+这里的 `ask` 是权限决策结果，不必等同于 `AskUserQuestion` 工具。现有 `ExitPlanMode` 自己就会触发审批 UI。用户选择自动接受编辑时可以切到 `acceptEdits`；选择逐次审批时切到 `default`，后面的编辑仍可能继续询问。“批准计划”与“批准所有后续工具调用”是两个不同的授权范围。
+
+还要特别检查 `ask` 的优先级。只在写工具里把 `allow` 改成普通 `ask` 并不够：旧的通用权限链仍可能用整工具 allow 规则覆盖它，auto 分支也可能处理一般询问。要实现读者描述的等待效果，这次 Plan 审批必须在相关自动放行分支之前被保留，或者直接复用 `ExitPlanMode` 的强制交互路径；不能仅靠修改弹窗文字。
+
+#### 同一个弹窗，还可能来自另一条链
+
+还有一种改动更少的实现：写权限先返回拒绝，并告诉模型“请先通过 `ExitPlanMode` 请求批准”。模型收到工具结果后，重新发起 `ExitPlanMode`，现有审批链就会显示同一个弹窗。
+
+两种实现的界面表现可以相同，调用顺序不同。权限层直接转入审批时，原执行请求可能一直挂起；模型重新申请时，日志会先出现被阻止的写工具结果，再出现新的 `ExitPlanMode` 调用，批准后由模型重新提出编辑。因此，目前更有把握的推测是“**阻止直接写入，接回退出审批**”；是否由权限层直接跳转、是否自动重试原调用，仅凭弹窗无法确定。
+
+这也说明，单独加一个 `deny` 提前返回，只完成了阻止写入；要解释“询问退出、批准后继续”，还必须把后面的审批与继续执行串起来。反过来，收到 `ask` 就先切出 `plan` 也不对：等待用户回答期间，其他调用不应提前获得实施权限。
+
+验证这个修法只需围绕同一个现场：Plan 加编辑白名单，确认审批前业务文件没变；拒绝或取消后模式仍是 Plan；批准后模式符合所选选项，后续动作通过对应权限检查；计划文件仍能正常增量编辑。这些观察比“模型现在更听话了”更能定位改动所在。
+
+最后保留一个配置边界：截至本节核对的[官方权限文档](https://code.claude.com/docs/en/permission-modes#skip-all-checks-with-bypasspermissions-mode)，启用 bypass permissions 的会话仍不强制执行 Plan 的阻止规则，模型尝试的编辑或命令可能直接运行。本节推测的是普通 Plan 的审批衔接，不把 bypass 场景也算作已经获得同样保证。
 
 ### Worktree 为什么比复制目录可靠
 
@@ -546,9 +598,9 @@ z.strictObject({
 
 ## 设计决策｜为什么是权限状态 + 独立目录，而不是一个"开关"
 
-**第一，为什么 Plan mode 用权限状态机而不是文本约定？** 如果只靠提示词说"不要改文件"，模型行为无法被工具层强制，权限判断发生在每个工具的 `checkPermissions()` 里，而 `mode: 'plan'` 是它们读取的共享状态。把"规划中"变成可观察、可审批的状态，`ExitPlanMode` 才能成为唯一出口，`prePlanMode` 才能保证退出后回到原状。计划文本只是状态机的产物，不是机制本身。
+**第一，为什么 Plan mode 用权限状态机而不是文本约定？** 如果只靠提示词说"不要改文件"，模型行为无法被工具层强制，权限判断发生在每个工具的 `checkPermissions()` 里，而 `mode: 'plan'` 是它们读取的共享状态。把"规划中"变成可观察、可审批的状态，`ExitPlanMode` 才能承接模型提出的退出审批，`prePlanMode` 则为退出工具提供恢复模式的回退值；用户在审批 UI 中选择的模式也会影响最终状态。计划文本只是状态机的产物，不是机制本身。
 
-**第二，为什么"只读"要三层叠加？** 高优先级指令约束行为、工具自身契约计算 allow/ask/deny、权限上下文承载模式，任何一层单独都不可靠，只靠指令会有越界，只靠工具契约会失去统一入口。plan file 作为刻意保留的写入例外，让"写计划"和"改代码"在同一个状态里被严格区分。
+**第二，为什么"只读"要三层叠加？** 高优先级指令约束行为、工具自身契约计算 allow/ask/deny、权限上下文承载模式，任何一层单独都不可靠，只靠指令会有越界，只靠工具契约会失去统一入口。plan file 作为刻意保留的写入例外，让规划阶段可以增量保存方案；本版本实际权限放行的缺口与后续修复推测，见前文补充。
 
 **第三，为什么普通会话问用户、teammate 问 leader？** 权限的归属不同，终端会话的审批权属于坐在屏幕前的人；teammate 没有可见的权限弹窗，其 AppState 甚至可能显示 leader 的模式，所以本地校验放行、审批权改由团队控制面（mailbox + `plan_approval_request`）承担。同一个工具在两种身份下走完全不同的授权链。
 
@@ -620,8 +672,8 @@ z.strictObject({
 
 ## 相关链接
 
-- **上一篇**，[25 团队控制面如何协调成员](./25-agent-teams-and-coordinator.md)
-- **下一篇**，[27 如何连接外部工具与资源](./27-mcp-integration.md)，MCP 如何把外部能力接进统一的工具契约
+- **上一篇**，[25 团队控制面如何协调成员](/posts/claude-code-source-reading-25/)
+- **下一篇**，[27 如何连接外部工具与资源](/posts/claude-code-source-reading-27/)，MCP 如何把外部能力接进统一的工具契约
 - [Claude Code Permission Modes](https://code.claude.com/docs/en/permission-modes)
 - [Claude Code Worktrees](https://code.claude.com/docs/en/worktrees)
 - [Subagents - Claude Code Docs](https://code.claude.com/docs/en/sub-agents)
