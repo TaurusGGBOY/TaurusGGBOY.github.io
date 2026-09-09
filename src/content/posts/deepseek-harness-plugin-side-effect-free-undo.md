@@ -1,6 +1,7 @@
 ---
 title: "DeepSeek Harness 如何开发无工作区副作用的撤回插件：以 dsh-message-edit 为例"
 published: 2026-08-24
+updated: 2026-09-09
 description: "从 dsh-message-edit 的源码出发，区分会话版本撤回、Cordis effect 与 DSH coeffect，并给出一种不修改工作区的插件设计。"
 tags: ["deepseek-harness", "plugin-system", "session-versioning", "coeffect", "typescript"]
 category: "AI / Architecture"
@@ -8,7 +9,7 @@ draft: false
 image: ""
 ---
 
-在 DeepSeek Harness（DSH）里，撤回至少对应三种不同对象：会话上下文版本、Cordis 的运行时注册效果，以及已经发生的文件或网络副作用。它们的证据和失败方式不同，不能用一个词覆盖。在 DSH 中，这些对象分别落到 `coeffect`、Cordis 的 `effect` 和业务副作用补偿上。
+在 DeepSeek Harness（DSH）里，撤回至少对应三种不同对象：会话上下文版本、Cordis 的运行时注册效果，以及已经发生的文件或网络副作用。它们分别由会话版本记录、Cordis 的 effect 清理和业务副作用补偿处理。Coeffect 描述插件对运行环境的依赖，不是一种撤回操作。
 
 社区插件 [`dsh-message-edit`](https://github.com/Moeblack/dsh-message-edit) 提供了一个边界清楚的案例：它实现消息编辑、重生成、任意回合重试和版本时间线；不原地改写旧 Session 事件，也不恢复工作区文件、命令外部效果或已经产生的产物。撤回发生在“会话版本”这一层，所以本文把它称为**无工作区副作用的上下文撤回**。
 
@@ -16,7 +17,7 @@ image: ""
 
 ## 先把三个概念拆开
 
-DSH 的插件代码里至少会遇到三种容易混淆的“逆操作”：
+DSH 的插件代码里至少会遇到三个需要区分的概念：
 
 | 概念 | 它管理的对象 | 典型代码 | 它不承诺什么 |
 | --- | --- | --- | --- |
@@ -25,6 +26,8 @@ DSH 的插件代码里至少会遇到三种容易混淆的“逆操作”：
 | 会话版本 inverse | 一个版本分支与其父分支的关系 | `restore-version`、父 Session 导航 | 不会撤回已经发出的外部请求 |
 
 这张表是全文的边界。`coeffect` 解决的是“这段代码依赖什么，以及依赖变化时怎样重新组合”；会话版本解决的是“下一次模型请求应该从哪一段历史开始”；`ctx.effect()` 解决的是“插件卸载时如何撤销自己的注册”。三者可以同时出现在一个插件里，但不是同一条撤回链路。
+
+Cordis 用插件的 `inject` 声明 coeffect，并在依赖服务出现、消失或替换时驱动插件生命周期，因此不需要另设一个同名的 `coeffect()` 函数。[Cordis 论文解读中的最小插件示例](/posts/cordis-spatiotemporal-composability/#2-reactive-coeffect依赖变化驱动生命周期)展示了这一过程。
 
 ## 真实插件：dsh-message-edit 做了什么
 

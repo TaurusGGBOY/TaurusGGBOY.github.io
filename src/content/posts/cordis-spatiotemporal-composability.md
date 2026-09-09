@@ -1,6 +1,7 @@
 ---
 title: "从插件能加载到组件可撤回：Spatiotemporal Composability 论文与 DeepSeek Harness"
 published: 2026-08-13
+updated: 2026-09-09
 description: "读完 A Programming Paradigm for Spatiotemporal Composability 后，结合 Cordis 与 DeepSeek Harness 源码，解释可撤回副作用、响应式依赖、组件生命周期，以及这套理论的适用边界。"
 tags: ["spatiotemporal-composability", "cordis", "deepseek-harness", "agent-runtime", "plugin-system"]
 category: "AI / Architecture"
@@ -11,7 +12,7 @@ imagePosition: "center"
 
 插件系统的关键问题不是把模块加载进来，而是组件离开后能否撤回自己的运行时修改；当依赖服务消失或换了实现，使用它的组件能否按生命周期重新连接。这个问题在 Agent harness 中更明显：模型流、工具、沙盒、审批、子 Agent 和持久化会话的生命周期彼此交错；如果只靠入口函数里的几组 `if` 维护，很快就会失控。
 
-本文用 [A Programming Paradigm for Spatiotemporal Composability](https://github.com/cordiverse/paper/blob/main/paper.pdf) 的两个概念——可撤回效果与响应式依赖——阅读论文仓库的 [README](https://github.com/cordiverse/paper) 、[Cordis](https://github.com/cordiverse/cordis) 以及 DeepSeek Harness 当前的 [README](https://github.com/deepseek-ai/deepseek-harness/blob/master/README.md) 和[架构文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)。论文 README 把它标为 2026 年 8 月 13 日的 Draft，并说明仍是可能大幅变化的活跃预印本。下文因此分开写“论文的形式化保证”“Cordis 的实现”和“DeepSeek Harness 的应用”，不把预印本结论写成产品承诺。
+本文用 [A Programming Paradigm for Spatiotemporal Composability](https://arxiv.org/abs/2608.25512) 的两个概念——可撤回效果与响应式依赖——阅读论文仓库的 [README](https://github.com/cordiverse/paper)、[Cordis](https://github.com/cordiverse/cordis) 以及 DeepSeek Harness 的 [README](https://github.com/deepseek-ai/deepseek-harness/blob/master/README.md) 和[架构文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)。论文已转至 arXiv，仍是持续修订的预印本。下文区分论文的形式化保证、Cordis 实现和 DeepSeek Harness 的工程应用。
 
 ## 先给结论：这不是另一种 Agent Loop，而是动态组合的运行时基础
 
@@ -66,6 +67,29 @@ const dispose = ctx.effect(function* () {
 
 ### 2. Reactive coeffect：依赖变化驱动生命周期
 
+**Coeffect 就是：这个插件要运行，环境必须先给它什么。** 假设另一个插件提供了 `greeter` 服务，其中有一个返回问候语的 `hello()` 方法。使用它的最小插件可以写成下面这样；为突出依赖关系，示例省略 TypeScript 的服务类型声明：
+
+```js
+export const inject = ['greeter']
+
+export function apply(ctx) {
+  console.log(ctx.greeter.hello())
+}
+```
+
+`inject` 声明“我需要 greeter”，这是插件的 coeffect specification；`ctx.greeter` 读取已解析的服务，`hello()` 调用它，`console.log()` 输出结果。Coeffect 描述插件运行所需的条件，打印则是执行中的副作用。
+
+Cordis 会随依赖变化管理这个插件：
+
+```text
+没有 greeter       → 插件等待，不执行 apply
+greeter 可用       → 执行 apply
+greeter 被移除     → 插件卸载
+新的 greeter 可用  → 再次执行 apply
+```
+
+重新加载会再次输出问候语；卸载不会擦掉已经打印的内容。需要撤销的注册或资源仍须提供 disposer，由 `ctx.effect()` 或内部使用它的 API 托管。
+
 Coeffect 可以先理解成“组件运行所需要的上下文”。组件声明依赖集合 `d`，context 中的 key 由不同 fiber 提供。每次 key 的提供关系发生变化，运行时重新判断依赖是否满足：
 
 - 从不满足变成满足，组件进入加载或激活；
@@ -79,6 +103,8 @@ Coeffect 可以先理解成“组件运行所需要的上下文”。组件声�
 ### 3. 统一 context：效果和依赖其实是同一个组合问题
 
 论文把 effect context 和 coeffect context 统一成递归的 context。一个组件拥有自己的 fiber 和子 context：它的 effect 修改自己能看到的上下文，它的 coeffect 从声明的 provider 中解析依赖，它的子组件又可以挂在同一个生命周期树下。
+
+**提供服务本身是一个 effect；这个服务又可以满足其他插件的 coeffect。** 例如，provider 安装 `greeter`，consumer 声明 `inject = ['greeter']`。provider 退出时撤销服务提供关系，依赖通知再驱动 consumer 卸载；两种机制通过同一个 context 协同工作。
 
 这里最容易被忽略的是 observational equivalence。卸载之后，内存布局、对象身份或内部计数器未必能逐字节恢复；论文因此允许按照观察者真正能区分的操作定义“等价”。例如，一个资源分配器只要在释放后表现出与原状态相同的可观察行为，就可以认为恢复成立。
 
@@ -107,6 +133,25 @@ Coeffect 可以先理解成“组件运行所需要的上下文”。组件声�
 最后一条尤其重要，也最容易被误读。论文明确排除了失败对 confluence 的无条件保证：某个效果是否失败可能取决于它实际运行时看到的状态，不同调度可能得到不同的失败结果。论文证明的是有条件的动态组合性质，不是“热更新永远成功”或“组件作者写错 inverse 也没有后果”。
 
 ## 五、Cordis 怎样把形式化模型变成工程 API
+
+### 为什么有 `effect()`，却没有 `coeffect()`？
+
+两者对应不同种类的操作。`ctx.effect()` 接收并执行一个效果函数，跟踪它提供的清理操作；coeffect 则涉及依赖的声明、提供、读取和变化响应，由一组 API 与生命周期机制共同实现：
+
+| 语义 | DeepSeek Harness 所用 Cordis 的实现入口 |
+| --- | --- |
+| 声明需要哪些服务 | 插件的 `inject`，或 `ctx.inject(deps, callback)` |
+| 提供服务 | `ctx.provide(name, value)` |
+| 使用依赖 | `ctx.greeter` 这样的属性访问 |
+| 调整依赖解析与访问元数据 | `ctx.isolate()`、`ctx.intercept()` |
+| 依赖变化后重新判断是否运行 | 内部的通知、刷新和 fiber 生命周期 |
+| 安装效果并托管撤销操作 | `ctx.effect()` |
+
+因此，没有 `coeffect()` 这个函数名，不代表缺少 coeffect 机制。论文 §5.1 的对应表明确把 coeffect specification 映射为 `fiber.inject`；coeffect 也不是 effect 的撤销函数，撤销函数叫 disposer 或 inverse。
+
+论文 §5.1.2 用 `ctx.set()` 演示安装服务并通知依赖者；本地 vendored Cordis 的对应操作叫 `ctx.provide()`，而 `ctx.set()` 用于覆盖当前 fiber 已提供的服务值。阅读下面的论文算法概述时，需要区分论文记法和项目实际 API。
+
+### 论文中的实现路径
 
 论文第五章给出了理论对象与 Cordis 实现的对应关系：`Γ∞` 对应一棵 context 树，effect 对应 `ctx.effect()`，fiber 对应 `ctx.use()` 创建的组件实例，`fiber.dispose` 对应累计的恢复函数，`fiber.committed` 保存已经提交的依赖视图，`refresh()` 负责重新解析 target。
 
@@ -216,7 +261,7 @@ Cordis 的 context/fiber 模型回答的是“运行时有哪些能力、这些�
 
 ## 参考资料与源码入口
 
-- [论文原文：A Programming Paradigm for Spatiotemporal Composability](https://github.com/cordiverse/paper/blob/main/paper.pdf)
+- [论文原文：A Programming Paradigm for Spatiotemporal Composability](https://arxiv.org/pdf/2608.25512)
 - [论文仓库 README（摘要、贡献与预印本状态）](https://github.com/cordiverse/paper)
 - [Cordis 官方仓库](https://github.com/cordiverse/cordis)
 - [DeepSeek Harness README](https://github.com/deepseek-ai/deepseek-harness/blob/master/README.md)
