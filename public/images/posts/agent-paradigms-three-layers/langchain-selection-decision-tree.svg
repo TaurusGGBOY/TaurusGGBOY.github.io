@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1200" viewBox="0 0 1000 1200" role="img"><title>LangChain 编排方式选型决策树</title><desc>按精确流程、阶段交接、知识加载、入口分流与持续委派选择，可组合使用。</desc><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#547080"/></marker></defs><rect width="1000" height="1200" rx="20" fill="#f5f7fa"/><g font-family="PingFang SC,Microsoft YaHei,Noto Sans CJK SC,sans-serif">
+<text x="40" y="48" text-anchor="start" font-size="28" fill="#182b3a" font-weight="700">LangChain / 编排方式选型</text>
+<text x="40" y="82" text-anchor="start" font-size="18" fill="#536677" font-weight="400">先选主要需求，再组合能力；Skills 和部分 Handoffs 仍是单 Agent。</text>
+<rect x="40" y="130" width="465" height="110" rx="12" fill="#fff" stroke="#adbdca"/>
+<text x="272.5" y="164" text-anchor="middle" font-size="21" fill="#182b3a" font-weight="700">精确的流程约束</text>
+<text x="272.5" y="193" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">标准模式无法容纳分支、循环</text>
+<text x="272.5" y="222" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">或程序步骤？</text>
+<rect x="600" y="130" width="360" height="110" rx="12" fill="#eae4f7" stroke="#adbdca"/>
+<text x="780.0" y="164" text-anchor="middle" font-size="21" fill="#182b3a" font-weight="700">Custom workflow</text>
+<text x="780.0" y="193" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">用 LangGraph 定义执行结构</text>
+<text x="780.0" y="222" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">内部可嵌入其余模式</text>
+<path d="M505 185 L600 185" fill="none" stroke="#547080" stroke-width="2.4" marker-end="url(#arrow)"/>
+<text x="552" y="170" text-anchor="middle" font-size="17" fill="#536677" font-weight="400">是</text>
+<path d="M272 240 L272 320" fill="none" stroke="#547080" stroke-width="2.4" marker-end="url(#arrow)"/>
+<text x="298" y="283" text-anchor="middle" font-size="17" fill="#536677" font-weight="400">否</text>
+<rect x="40" y="320" width="465" height="110" rx="12" fill="#fff" stroke="#adbdca"/>
+<text x="272.5" y="354" text-anchor="middle" font-size="21" fill="#182b3a" font-weight="700">阶段或对话控制权需要变化？</text>
+<text x="272.5" y="383" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">当前行为由状态驱动</text>
+<text x="272.5" y="412" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">或专家接手后续对话</text>
+<rect x="600" y="320" width="360" height="110" rx="12" fill="#e1edf8" stroke="#adbdca"/>
+<text x="780.0" y="354" text-anchor="middle" font-size="21" fill="#182b3a" font-weight="700">Handoffs</text>
+<text x="780.0" y="383" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">配置切换：单 Agent middleware</text>
+<text x="780.0" y="412" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">独立专家实现：多 Agent 子图</text>
+<path d="M505 375 L600 375" fill="none" stroke="#547080" stroke-width="2.4" marker-end="url(#arrow)"/>
+<text x="552" y="360" text-anchor="middle" font-size="17" fill="#536677" font-weight="400">是</text>
+<path d="M272 430 L272 510" fill="none" stroke="#547080" stroke-width="2.4" marker-end="url(#arrow)"/>
+<text x="298" y="473" text-anchor="middle" font-size="17" fill="#536677" font-weight="400">否</text>
+<rect x="40" y="510" width="465" height="110" rx="12" fill="#fff" stroke="#adbdca"/>
+<text x="272.5" y="544" text-anchor="middle" font-size="21" fill="#182b3a" font-weight="700">同一个 Agent 能完成任务？</text>
+<text x="272.5" y="573" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">只需按需加载专业知识</text>
+<text x="272.5" y="602" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">无需独立探索上下文</text>
+<rect x="600" y="510" width="360" height="110" rx="12" fill="#fff0d4" stroke="#adbdca"/>
+<text x="780.0" y="544" text-anchor="middle" font-size="21" fill="#182b3a" font-weight="700">Skills</text>
+<text x="780.0" y="573" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">按需加载提示与知识</text>
+<text x="780.0" y="602" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">仍由同一个 Agent 控制</text>
+<path d="M505 565 L600 565" fill="none" stroke="#547080" stroke-width="2.4" marker-end="url(#arrow)"/>
+<text x="552" y="550" text-anchor="middle" font-size="17" fill="#536677" font-weight="400">是</text>
+<path d="M272 620 L272 700" fill="none" stroke="#547080" stroke-width="2.4" marker-end="url(#arrow)"/>
+<text x="298" y="663" text-anchor="middle" font-size="17" fill="#536677" font-weight="400">否</text>
+<rect x="40" y="700" width="465" height="110" rx="12" fill="#fff" stroke="#adbdca"/>
+<text x="272.5" y="734" text-anchor="middle" font-size="21" fill="#182b3a" font-weight="700">需要独立专业执行者</text>
+<text x="272.5" y="763" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">入口分类即可确定去哪些领域</text>
+<text x="272.5" y="792" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">随后合并结果？</text>
+<rect x="600" y="700" width="360" height="110" rx="12" fill="#def1e8" stroke="#adbdca"/>
+<text x="780.0" y="734" text-anchor="middle" font-size="21" fill="#182b3a" font-weight="700">Router</text>
+<text x="780.0" y="763" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">规则或模型分类后分发</text>
+<text x="780.0" y="792" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">单路调用或并行扇出</text>
+<path d="M505 755 L600 755" fill="none" stroke="#547080" stroke-width="2.4" marker-end="url(#arrow)"/>
+<text x="552" y="740" text-anchor="middle" font-size="17" fill="#536677" font-weight="400">是</text>
+<path d="M272 810 L272 890" fill="none" stroke="#547080" stroke-width="2.4" marker-end="url(#arrow)"/>
+<text x="298" y="853" text-anchor="middle" font-size="17" fill="#536677" font-weight="400">否</text>
+<rect x="40" y="890" width="465" height="110" rx="12" fill="#def1e8" stroke="#adbdca"/>
+<text x="272.5" y="924" text-anchor="middle" font-size="21" fill="#182b3a" font-weight="700">Subagents / supervisor</text>
+<text x="272.5" y="953" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">结合历史与新结果持续委派</text>
+<text x="272.5" y="982" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">主 Agent 负责综合与后续决策</text>
+<text x="600" y="931" text-anchor="start" font-size="18" fill="#536677" font-weight="400">先确认独立执行者确有收益；</text>
+<text x="600" y="961" text-anchor="start" font-size="18" fill="#536677" font-weight="400">否则回到简单方案。</text>
+<rect x="40" y="1060" width="920" height="100" rx="12" fill="#eae4f7"/>
+<text x="500" y="1100" text-anchor="middle" font-size="19" fill="#536677" font-weight="400">组合示例：Custom workflow → Subagents → 各自加载 Skills</text>
+<text x="500" y="1135" text-anchor="middle" font-size="18" fill="#536677" font-weight="400">本文工程整理；分支表示起点，不是官方排名或互斥分类。</text>
+</g></svg>
