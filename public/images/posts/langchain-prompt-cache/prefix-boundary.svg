@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="540" viewBox="0 0 1080 540" role="img" aria-labelledby="title desc">
+  <title id="title">稳定前缀与缓存边界</title>
+  <desc id="desc">请求 A 与 B 共享系统指令及手册，在手册末尾设缓存边界。请求 C 在最前面插入变化时间戳，后续手册无法沿用同一前缀状态。</desc>
+  <rect width="1080" height="540" rx="24" fill="#f2f6fb"/>
+  <g font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <text x="48" y="62" font-size="29" font-weight="700" fill="#152a43">前缀复用：稳定内容在前，变化从边界之后开始</text>
+    <text x="48" y="98" font-size="18" fill="#52647a">命中还要求：长度达标 · 断点可查找 · 缓存条目可用</text>
+    <g font-size="22" font-weight="600" text-anchor="middle">
+      <text x="91" y="177" fill="#233951">请求 A</text>
+      <rect x="158" y="137" width="220" height="66" rx="12" fill="#d1e8ff"/>
+      <text x="268" y="178" fill="#204c7c">系统指令</text>
+      <rect x="394" y="137" width="338" height="66" rx="12" fill="#c6eee0"/>
+      <text x="563" y="178" fill="#20584b">产品手册 P</text>
+      <rect x="774" y="137" width="260" height="66" rx="12" fill="#ffe3bf"/>
+      <text x="904" y="178" fill="#78491b">怎么安装？</text>
+      <text x="91" y="277" fill="#233951">请求 B</text>
+      <rect x="158" y="237" width="220" height="66" rx="12" fill="#d1e8ff"/>
+      <text x="268" y="278" fill="#204c7c">系统指令</text>
+      <rect x="394" y="237" width="338" height="66" rx="12" fill="#c6eee0"/>
+      <text x="563" y="278" fill="#20584b">产品手册 P</text>
+      <rect x="774" y="237" width="260" height="66" rx="12" fill="#ffe3bf"/>
+      <text x="904" y="278" fill="#78491b">怎么升级？</text>
+    </g>
+    <path d="M752 125V319" stroke="#227966" stroke-width="3" stroke-dasharray="7 6"/>
+    <text x="445" y="338" font-size="19" fill="#227966" text-anchor="middle">这一段相同，可在末尾设置缓存断点</text>
+    <text x="904" y="338" font-size="19" fill="#976026" text-anchor="middle">新增输入继续计算</text>
+    <path d="M48 364H1032" stroke="#ced8e5"/>
+    <text x="91" y="426" font-size="22" font-weight="600" text-anchor="middle" fill="#233951">请求 C</text>
+    <rect x="158" y="388" width="220" height="62" rx="12" fill="#fbd4d4"/>
+    <text x="268" y="427" font-size="21" text-anchor="middle" fill="#913737">变化时间戳</text>
+    <rect x="394" y="388" width="338" height="62" rx="12" fill="#e1e7ef"/>
+    <text x="563" y="427" font-size="21" text-anchor="middle" fill="#52647a">相同指令 + 手册</text>
+    <rect x="774" y="388" width="260" height="62" rx="12" fill="#ffe3bf"/>
+    <text x="904" y="427" font-size="21" text-anchor="middle" fill="#78491b">当前问题</text>
+    <text x="158" y="495" font-size="19" fill="#913737">前文已变：后面的相同文字，处在不同上下文中。</text>
+  </g>
+</svg>
