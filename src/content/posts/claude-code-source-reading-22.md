@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读22：提示词如何变成可执行能力"
 published: 2026-07-24T16:47:09+08:00
-updated: 2026-08-25
+updated: 2026-09-10
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -256,6 +256,10 @@ const [
 
 合并后还会用 `realpath()` 解析符号链接，对"同一真实文件从多个路径被发现"的情况做 first-wins 去重。该阶段按文件身份去重；不同文件即使同名，仍可能继续进入后续命令装配，最终由数组顺序和 `findCommand()` 的第一个匹配决定命中项。
 
+这里的“加载”要分清程序内存和模型上下文。发现阶段已经通过 `fs.readFile()` 读取完整文件，`createSkillCommand()` 的闭包保留 `markdownContent`；`getSkillDirCommands` 又用 `memoize` 缓存目录命令结果。模型此时只收到短索引，选中技能后才调用 `getPromptForCommand()` 加工正文并加入对话。因此，渐进披露推迟的是全文进入模型上下文的时机，不能据此说磁盘全文也一定等到调用时才读。发现缓存也不等于“这个 Skill 在会话中只能展开一次”。
+
+> 证据：`restored-src/src/skills/loadSkillsDir.ts:344-399,407-480,638`。这里描述本地目录式 Skill；远端实验入口有自己的加载与缓存路径。
+
 文件目录只是来源之一。`getSkills()` 还并行加载插件 Skill，并读取启动时同步注册的 bundled Skill 与内置插件 Skill，
 
 ```ts
@@ -422,25 +426,36 @@ return [{
 
    ```json
    {
-     "skill": "pdf",
-     "args": "转成 Markdown，保留表格结构"
+     "type": "tool_use",
+     "id": "toolu_pdf_1",
+     "name": "Skill",
+     "input": {
+       "skill": "pdf",
+       "args": "转成 Markdown，保留表格结构"
+     }
    }
    ```
 
-   随后的代码路径才会把名称交给 `SkillTool`：
+   这是 assistant 响应中的一个内容块示例。`name` 选择通用的 `Skill` 工具，`input.skill` 选择当前注册的技能，`id` 用于随后与 `tool_result.tool_use_id` 配对。技能名是受注册表约束的开放字符串，支持插件限定名，不是固定枚举；`args` 是可选字符串，省略或为空时在普通调用路径回退为 `''`，`null` 不通过 Schema。模型只说一句“我会使用 pdf 技能”不会触发这条执行链。
+
+   随后的普通 inline 路径才会把名称交给 `SkillTool`：
 
    ```text
    自然语言
      → skill_listing / skill_discovery
      → 模型判断是否匹配
      → tool_use(name="Skill", input={skill, args})
-     → SkillTool.getAllCommands()
+     → runToolUse() 查工具、校验输入并经过权限流程
+     → SkillTool.call() / getAllCommands(context)
      → findCommand(name, commands)
+     → processPromptSlashCommand() / getMessagesForPromptSlashCommand()
      → getPromptForCommand()
-     → SKILL.md 正文进入 messages 或 fork Agent 上下文
+     → 展开正文通过 newMessages 进入当前会话
    ```
 
-   这里的“模型判断”与“运行时查找”是两件事。前者默认由模型根据名称、描述和 `whenToUse` 做语义匹配；后者不是再次做向量搜索，而是调用 `findCommand()`，按命令名、展示名或别名做精确匹配。`SkillTool.getAllCommands()` 会先合并本地命令与 MCP prompt 命令，再执行这次查找。因此，自然语言本身不会让运行时直接扫描所有 `SKILL.md` 并猜一个 Skill 名称；它先让模型选出一个 Skill 名称，运行时再验证这个名称是否存在、是否允许模型调用，并展开对应正文。
+   如果 command 声明 `context: fork`，`SkillTool.call()` 会提前转入 `executeForkedSkill()`，由独立 Agent 执行；后文再说明这条分支。
+
+   这里的“模型判断”与“运行时查找”是两件事。前者由模型根据名称、描述和 `whenToUse` 做语义匹配；后者调用 `findCommand()`，按命令名、展示名或别名做匹配。`SkillTool.ts` 中的 `getAllCommands(context)` 合并本地命令与 MCP Skill，后者限定为 `type === 'prompt' && loadedFrom === 'mcp'`。自然语言先让模型选出名称，运行时再验证名称是否存在、是否允许模型调用，并展开对应正文。
 
 如果索引中没有明显匹配，模型通常不会凭空调用一个不存在的 Skill；启用实验性 Skill Search 时，运行时可能先依据用户输入补充一批 `skill_discovery` 结果，但这仍然只是发现提示，最终仍需要 `Skill` Tool 调用才能展开正文。直接输入 `/pdf` 则是另一条本地 slash 入口，通常不会先产生 `Skill` `tool_use`；下文会单独展开这条路径。
 
@@ -714,6 +729,87 @@ addInvokedSkill(
 **函数说明，** `addInvokedSkill()` 把 Skill 名称、来源路径、已展开内容、时间和 Agent ID 写进 bootstrap state。第 17 篇讲过，compaction 后系统需要重新提供仍有效的执行指令；这份状态就是恢复已调用 Skill 的依据之一。
 **参数说明，** `skillName`、`skillPath`、`content` 都是必填字符串。`agentId` 类型为 `string | null`，Agent 上下文缺失时通过 `?? null` 明确归到主会话。内部 key 使用 `${agentId ?? ''}:${skillName}`，使同名 Skill 在不同 Agent 之间隔离，避免压缩恢复时串线。fork Agent 结束后还会清理该 Agent 的 Skill 状态。
 
+### 展开后的正文怎样进入下一次模型请求
+
+普通 inline 调用完成后，模型会收到两类内容：一份调用回执，以及一份供后续执行的技能正文。`SkillTool` 的 `mapToolResultToToolResultBlockParam()` 把回执映射为 `tool_result`，文本是 `Launching skill: ${result.commandName}`；正文则来自 `processPromptSlashCommand()` 生成的 `isMeta: true` user message，经 `newMessages` 交回通用工具执行器。
+
+下面省略权限附件、Hook 消息和缓存标记，只示意一次成功调用在 API 消息中的形状，不是完整请求抓包：
+
+```json
+[
+  {
+    "role": "assistant",
+    "content": [
+      {
+        "type": "tool_use",
+        "id": "toolu_pdf_1",
+        "name": "Skill",
+        "input": { "skill": "pdf", "args": "invoice.pdf" }
+      }
+    ]
+  },
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "tool_result",
+        "tool_use_id": "toolu_pdf_1",
+        "content": "Launching skill: pdf"
+      },
+      {
+        "type": "text",
+        "text": "Base directory for this skill: ...\n\n展开后的技能正文……"
+      }
+    ]
+  }
+]
+```
+
+正文原本是独立的内部消息；`normalizeMessagesForAPI()` 合并连续 user messages 后，可以和回执处于同一个 user turn。这里的正文 text block 与 `tool_result` 同级。`createUserMessage()` 明确写入 `message.role: 'user'`，`isMeta` 留在内部信封中，不会把它升级成 system 指令。API 请求分别设置 `messages`、`system` 和 `tools`，Skill 正文沿 `messages` 进入下一轮推理。正文进上下文只表示加载完成，模型还要继续调用 Read、Bash 或 MCP 工具，才能完成技能要求的实际工作。
+
+> 证据：`restored-src/src/tools/SkillTool/SkillTool.ts:728-774,843-862` → `src/services/tools/toolExecution.ts:1565-1570` → `src/utils/messages.ts:500-508,1989-2370` → `src/services/api/claude.ts:1266,1699-1712`。调用链和角色是源码事实；上面的 JSON 是省略其他分支的结构示意。
+
+### 为什么正文通过 newMessages 返回
+
+把正文直接放进 `tool_result.content`，从内容形式上也可以表达技能指令。这个版本选择复用命令的消息生成流程：用户输入 `/pdf` 时没有模型发出的 `tool_use`，本地命令展开直接生成正文消息；模型调用 `Skill` 时，仍然通过 `processPromptSlashCommand()` 获得这组消息，再用 `newMessages` 追加到对话。它还可以携带提取出的附件与 `command_permissions`，不需要先把整组内部消息压成一个文本结果。
+
+这里可以确认的是两条入口共享实现。由此推断，沿用统一消息产物能减少入口分支；源码没有直接记录最初的设计动机，不能把这种解释写成作者已经证明的唯一原因。
+
+inline 和 fork 的返回值也支持这个理解。inline 返回“正在启动技能”，正文交给当前模型继续执行；fork 等独立 Agent 完成后，才把结果写入 `tool_result`。前者追加后续指令，后者交付执行结果。分开返回也让正文与普通工具输出各走自己的后处理路径，但不能仅凭这一点断言设计目的就是避免截断，或断言独立 user message 会让模型更服从指令。
+
+### 模型重复调用同一个 Skill，会不会展开 N 遍
+
+会。在普通 inline 路径上，如果模型发出 N 次独立、有效且获准执行的 `Skill` 调用，每次都会进入 `getPromptForCommand()`，生成正文并追加消息。这里说的是同名技能的多次工具调用，不是同一响应的流式片段重放；并不表示会话一定无限循环，也不表示每次都会重新从磁盘读取文件。
+
+`SkillTool/prompt.ts` 确实要求模型不要调用正在运行的技能，并提醒：当前轮看到 `<command-name>` 标签，就说明技能已经加载，应直接遵循指令。它是给模型的行为约束。`validateInput()` 检查名称、可调用性和 command 类型，普通 `call()` 路径并没有先查询 `invokedSkills`，再按“已经调用过”跳过执行。
+
+还要留意标签的来源。用户 slash 入口保留含 `<command-name>` 的命令元信息；Skill 工具入口会过滤含 `<command-message>` 的展示消息，而这两个标签通常位于同一条元信息中。因此，不能把标签提示理解成“每次工具调用都留下一个供执行器检查的已加载标志”。
+
+状态登记发生在展开之后。以下是 `addInvokedSkill()` 的关键源码，省略类型声明：
+
+```ts
+const key = `${agentId ?? ''}:${skillName}`
+STATE.invokedSkills.set(key, {
+  skillName,
+  skillPath,
+  content,
+  invokedAt: Date.now(),
+  agentId,
+})
+```
+
+同一 Agent、同一技能只保留最新记录，`agentId: null` 表示主会话，字符串表示对应 Agent。这个 `Map.set()` 不会删除之前追加的对话正文，也不阻止下次展开。重复调用还会重新经过参数替换和非 MCP 来源的 shell 插值处理；如果正文含可执行的动态命令且相关校验放行，命令也可能再次执行。
+
+| 层次 | 同一个技能再次调用时 |
+| --- | --- |
+| 目录发现与磁盘读取 | 可以命中命令缓存，不一定再次读文件 |
+| 正文展开与消息追加 | 每次成功 inline 调用重新生成并追加 |
+| `invokedSkills` 恢复状态 | 按 Agent 与技能名覆盖同一个记录 |
+
+compact cleanup 刻意保留这个 Map，让后续多次压缩仍能恢复技能指令。传统压缩生成的 `invoked_skills` 附件按最近使用优先选择，每个技能最多约 5,000 tokens，总预算 25,000 tokens；附件截断不会反过来截断 Map 中保存的正文。恢复直接读取已保存文本，不重新执行 `getPromptForCommand()`。`/clear` 才会清理相应会话记录，fork Skill 结束时也会清理该 Agent 的记录。详细恢复流程见[第 17 篇](/posts/claude-code-source-reading-17/)。
+
+> 证据：`restored-src/src/tools/SkillTool/prompt.ts:188-194`（提示模型）与 `SkillTool.ts:353-431,580-642,734-755`（校验、执行和元信息过滤）；`src/utils/processUserInput/processSlashCommand.tsx:861-880` → `src/bootstrap/state.ts:1510-1563`（先展开再登记）；`src/services/compact/postCompactCleanup.ts:16-20` 与 `compact.ts:1494-1534`（保留和恢复）；`src/commands/clear/caches.ts:117`、`src/tools/SkillTool/SkillTool.ts:285-287`（清理）。这些机制支持“可重复展开”的结论，不提供模型重复调用频率的运行数据。
+
 ### 动态发现让 Skill 跟着文件位置出现
 
 启动扫描之后，文件工具触及项目深处的路径时，Claude Code 还会从文件父目录向 cwd 回溯，寻找嵌套的 `.claude/skills`，
@@ -840,8 +936,8 @@ Claude Code 的 Skill 系统复用 Command 与 Query Loop 执行内核。它把�
 
 ## 相关链接
 
-- **上一篇**，[21 用户如何进入不同执行流程](./21-command-system.md)，Command 三类型路由
-- **下一篇**，[23 前台、后台与状态机如何协作](./23-task-runtime.md)，回答本文的 Skill 自定义问题
-- **平行阅读**，[17 长会话如何继续运行](./17-context-compaction.md)，`addInvokedSkill` 与压缩恢复
+- **上一篇**，[21 用户如何进入不同执行流程](/posts/claude-code-source-reading-21/)，Command 三类型路由
+- **下一篇**，[23 前台、后台与状态机如何协作](/posts/claude-code-source-reading-23/)，回答本文的 Skill 自定义问题
+- **平行阅读**，[17 长会话如何继续运行](/posts/claude-code-source-reading-17/)，`addInvokedSkill` 与压缩恢复
 - **官方文档**，[Claude Code Skills](https://code.claude.com/docs/en/skills)、[扩展能力总览](https://code.claude.com/docs/en/features-overview)、[Extend Claude with skills](https://code.claude.com/docs/en/slash-commands)
 - **外部资料**，[Lessons from building Claude Code， How we use skills](https://claude.com/blog/lessons-from-building-claude-code-how-we-use-skills)、[Skills from marketplace plugins don't appear in slash command autocomplete #18949](https://github.com/anthropics/claude-code/issues/18949)

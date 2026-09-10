@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读11：一次调用如何从校验走到持久化"
 published: 2026-07-24T16:46:58+08:00
-updated: 2026-09-09
+updated: 2026-09-10
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -307,6 +307,27 @@ resultingMessages.push({
 参数说明，映射函数的第一个参数是工具特有输出，第二个参数 `toolUseID` 必须原样配对。`mappedToolResultBlock` 是首次映射结果；`preMappedBlock` 存在时交给 `processPreMappedToolResultBlock` 按 `tool.name` 和 `maxResultSizeChars` 处理，否则 `processToolResultBlock` 根据工具、原始 `toolUseResult` 与调用 ID 重新映射。`contentBlocks` 以最终结果块开头，随后可追加授权反馈和图片。外层 `message` 是 user message；`content` 发给模型，`toolUseResult` 给宿主保留原始结果，但 Agent 且未开启 `preserveToolUseResults` 时省略；`mcpMeta` 只在非 Agent 路径保留，`sourceToolAssistantUUID` 指回发起调用的 assistant 节点。
 
 映射层有两个意义。第一，它把 Bash、Read、Edit、MCP 等不同返回类型统一到 `tool_result`。第二，它允许工具决定哪些内容给模型看，文件写入工具不需要把整个新文件再次回传，通常只返回成功说明；Read 则可以返回文本块、图片块或 PDF 元数据。空结果也有明确回退，`undefined`、`null`、空字符串、纯空白字符串、空数组，以及只包含空白 text block 的数组，都会被替换为 `(<tool> completed with no output)`；非文本块不被当作空结果。
+
+### 一次工具调用还可以追加 newMessages
+
+`tool_result` 并不包含工具返回的所有内容。`ToolResult<T>` 将原始输出放在 `data`，还允许用 `newMessages` 返回一组额外内部消息。执行器先映射调用结果，随后把额外消息加入返回列表：
+
+```ts [source]
+// restored-src/src/services/tools/toolExecution.ts
+if (result.newMessages && result.newMessages.length > 0) {
+  for (const message of result.newMessages) {
+    resultingMessages.push({ message })
+  }
+}
+```
+
+`newMessages` 可省略，空数组也不会追加任何内容；数组元素允许 `UserMessage`、`AssistantMessage`、`AttachmentMessage` 和 `SystemMessage`。这是内部消息契约，进入 API 前仍要按消息类型归一化，不能理解成所有内部消息都原样传给模型。这里的 `newMessages` 也不同于后文 transcript 持久化中“筛选后首次写入的消息”那个同名局部变量。
+
+Skill 是一个具体例子。普通 inline `Skill` 调用的 `data` 映射成 `Launching skill: xxx` 回执，展开正文通过 `newMessages` 返回为 `isMeta: true` user message。准备下一次请求时，相邻 user messages 会合并，所以正文可以作为 `tool_result` 同级的 text block 出现在同一个 user turn。`isMeta` 是内部标记，API 角色仍是 `user`，不会变成顶层 `system`。
+
+这样，用户直接输入 `/skill` 与模型调用 `Skill` 能共享 `processPromptSlashCommand()` 的消息生成结果。源码能证明复用关系；减少两套消息包装分支是据此作出的设计解释，不能说协议禁止把正文放进 `tool_result`。fork Skill 则等独立 Agent 执行完毕，把实际结果放进 `tool_result`。第 22 篇会继续追踪[Skill 的展开、重复调用和恢复](/posts/claude-code-source-reading-22/)。
+
+> 证据：`restored-src/src/Tool.ts:321-334`、`src/services/tools/toolExecution.ts:1565-1570`、`src/tools/SkillTool/SkillTool.ts:632-642,734-774,843-862`、`src/utils/messages.ts:500-508,1989-2370`。普通工具结果与额外消息走不同通道；不能据此推断后者获得更高指令优先级。
 
 ### 大结果持久化到独立文件并返回预览
 

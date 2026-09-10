@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读17：长会话如何继续运行"
 published: 2026-07-24T16:47:04+08:00
-updated: 2026-09-08
+updated: 2026-09-10
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -794,6 +794,28 @@ Summary:
 Skill 也要区分“已用内容”和“完整目录”。源码特意保留 `sentSkillNames`，避免再次发送整份 skill listing；真正需要续接的已调用技能内容由 `invoked_skills` 附件补回。系统提示词、工具 schema 和项目上下文则仍由下一次请求的上下文组装负责，它们不属于九部分摘要。源码计算压缩后消息大小时，也明确把这些额外请求内容分开讨论。
 
 > 证据，`restored-src/src/services/compact/compact.ts:122-130,516-594,920-983,1415-1602,1674-1705`（附件恢复、预算与排除规则），以及 `compact.ts:633-644`（消息大小与系统提示、工具、userContext 的区别）。这张表描述传统模型压缩的恢复流程，不表示每条 session memory 或其他压缩路径都会运行同一套附件生成器。
+
+#### invokedSkills 为什么能跨多次 compact 保留
+
+Skill 调用时，`getMessagesForPromptSlashCommand()` 先执行 `getPromptForCommand()`，再把展开后的正文交给 `addInvokedSkill()`。后者在进程状态中按 `${agentId ?? ''}:${skillName}` 保存名称、来源路径、内容和调用时间。同一 Agent 再次调用同一技能会覆盖这个记录，因此它保存的是最近一次展开结果，不是每次调用的历史副本；`agentId: null` 对应主会话，字符串对应子 Agent。
+
+compact 后，这个 Map 仍然保留。`runPostCompactCleanup()` 的注释明确要求技能内容跨多次压缩存活，使后续 `createSkillAttachmentIfNeeded()` 还能取回保存的文本。这里应区分三份东西：
+
+| 对象 | 传统模型压缩时的处理 |
+| --- | --- |
+| 旧对话中的 Skill 正文消息 | 随选定的旧消息一起被摘要或保留 |
+| `STATE.invokedSkills` | cleanup 不清空，保留调用时保存的完整展开正文 |
+| 新的 `invoked_skills` 附件 | 读取当前 Agent 的记录，按最近调用优先选择，受单技能约 5,000 tokens、总计 25,000 tokens 的预算限制 |
+
+附件生成时对输出做截断和筛选，不会把截断文本写回 Map。下一次 compact 仍可从保存的正文重新生成附件。整个恢复过程不调用 `getPromptForCommand()`，因此不会为了恢复而再次替换参数或执行技能正文中的动态 shell 命令；模型收到的是上次调用保存的展开结果，不代表重新读取了磁盘上的最新 `SKILL.md`。
+
+附件怎样进入 prompt 也有明确路径。`normalizeAttachmentForAPI()` 将 `invoked_skills` 转成 `isMeta: true` user message，加上提醒“本会话已经调用过以下技能，请继续遵循”，再列出名称、路径与恢复内容，并包裹 `<system-reminder>`。标签只是文本，API 角色仍是 `user`，内容进入 `messages`；它不会被移到顶层 `system`。
+
+真正删除这些记录的路径包括 `/clear` 与 Agent 收尾。`clearInvokedSkills(preservedAgentIds)` 未传集合或集合为空时清空 Map；有保留集合时，删除主会话和不在集合中的 Agent 记录。fork Skill 的 `finally` 调用 `clearInvokedSkillsForAgent(agentId)`，只删除该 Agent 的记录。compact 与这些生命周期结束操作的语义不同。
+
+最后，保存记录并不构成调用去重。Skill 的普通 inline 路径没有用这份 Map 拦截“已经调用过”的名称，模型再次发出有效且获准执行的调用时，正文仍会重新展开并追加。第 22 篇会区分[发现缓存、重复展开与恢复状态](/posts/claude-code-source-reading-22/)。
+
+> 证据：`restored-src/src/utils/processUserInput/processSlashCommand.tsx:861-880` → `src/bootstrap/state.ts:1510-1563`；`src/services/compact/postCompactCleanup.ts:16-20`、`compact.ts:1494-1534`；`src/utils/messages.ts:3644-3662`；`src/commands/clear/caches.ts:117`、`src/tools/SkillTool/SkillTool.ts:285-287`。保留 Map 是 cleanup 的明确约定；生成此附件的路径是前文限定的传统全量、部分模型压缩，不等于所有压缩分支都恢复同一组附件。
 
 #### 重建顺序决定"压缩之后还能做什么"
 
