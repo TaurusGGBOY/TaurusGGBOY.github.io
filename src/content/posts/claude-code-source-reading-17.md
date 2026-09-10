@@ -442,6 +442,32 @@ Context Collapse 的核心目的，就是在自动摘要之前先拥有自己的
 
 ### 第四刀｜Autocompact 负责最后的完整重建
 
+#### 模型窗口大小从哪里来
+
+自动压缩需要先知道一条容量线。这个值由 `getContextWindowForModel(model: string, betas?: string[]): number` 计算，单位是 token。`model` 接收当前模型名称，是由模型选择链提供的开放字符串；`betas` 是可选的 beta 标记数组，传 `undefined` 或 `[]` 都不会命中 beta 的 1M 分支。这里判断的是客户端用于预算的窗口值。
+
+在 2.1.88 中，函数按下面的顺序判断，命中一项就返回，后面的规则不再执行。
+
+| 顺序 | 条件 | 返回的窗口值 |
+| --- | --- | --- |
+| 1 | `USER_TYPE === 'ant'`，且 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 经十进制 `parseInt` 后大于 0 | 使用解析值；无有效正数则继续判断 |
+| 2 | `has1mContext(model)` 为真，即模型名包含大小写不敏感的 `[1m]`，且未禁用 1M | `1_000_000` |
+| 3 | `getModelCapability(model)` 命中缓存，且 `max_input_tokens >= 100_000` | 使用该字段；若禁用 1M 且字段超过 200K，则返回 200K |
+| 4 | `betas` 包含 `context-1m-2025-08-07`，且 `modelSupports1M(model)` 为真 | `1_000_000` |
+| 5 | `getSonnet1mExpTreatmentEnabled(model)` 命中 Sonnet 4.6 的实验配置 | `1_000_000` |
+| 6 | 内部用户的 `resolveAntModel(model)` 结果提供了非零 `contextWindow` | 使用该配置值 |
+| 7 | 前面的条件均未命中 | `MODEL_CONTEXT_WINDOW_DEFAULT = 200_000` |
+
+第 4 项的支持判断仍是本地名称规则：canonical model 包含 `claude-sonnet-4` 或 `opus-4-6`。第 5 项要求 canonical model 包含 `sonnet-4-6`，没有显式 `[1m]`，且 `clientDataCache['coral_reef_sonnet']` 严格等于字符串 `'true'`；是否命中取决于运行时配置。
+
+`CLAUDE_CODE_DISABLE_1M_CONTEXT` 经 `isEnvTruthy()` 解释，忽略大小写和两端空格后，`1`、`true`、`yes`、`on` 表示启用禁用开关，其他字符串或未设置表示关闭。它会关闭 `[1m]`、beta 和实验这三条 1M 路径，并限制能力缓存返回的较大值；内部显式窗口覆盖仍位于这些判断之前。环境数值使用 `parseInt`，这里也没有额外的整串数字校验。
+
+> 证据，`restored-src/src/utils/context.ts:9,31-111`（窗口常量、优先级和 1M 判断）；`restored-src/src/utils/envUtils.ts:32-37`（环境布尔值）。
+
+能力缓存需要单独说明。`getModelCapability()` 只对内部用户、`firstParty` provider 和官方 Anthropic Base URL 的组合生效；普通官方用户、第三方网关和云 provider 在这条路径上都会返回 `undefined`。因此一个未命中其他规则的自定义模型，在客户端会回退到 200K。这个回退值不能证明服务端确实支持 200K；给名称加上 `[1m]` 同样不能让服务端凭空获得 1M 能力。Models API 的获取与缓存过程，以及各家接口的字段差异，放在[第 36 篇](/posts/claude-code-source-reading-36/)展开。
+
+> 证据，`restored-src/src/utils/model/modelCapabilities.ts:46-51,75-83`（能力缓存的适用范围与未命中返回值）。
+
 #### 先算有效窗口，再算自动压缩阈值
 
 `getEffectiveContextWindowSize(model)` 的参数是当前主循环模型名，源码把它交给 `getContextWindowForModel()` 和 `getMaxOutputTokensForModel()`；它不是一个可以在本文静态列举所有模型名的开放字符串。
@@ -470,7 +496,7 @@ export function getEffectiveContextWindowSize(model: string): number {
 
 > 证据，`restored-src/src/services/compact/autoCompact.ts:30-60`（2.1.88 source map 还原源码），有效窗口计算；`MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000` 在 `autoCompact.ts:30`。
 
-所以有效窗口等于模型窗口减去最多 `20_000` 的摘要输出预留。`CLAUDE_CODE_AUTO_COMPACT_WINDOW` 没设置、不是合法正整数或小于等于 0 时被忽略；合法值只能把窗口再缩小。
+所以有效窗口等于模型窗口减去最多 `20_000` 的摘要输出预留。`CLAUDE_CODE_AUTO_COMPACT_WINDOW` 没设置、经 `parseInt` 得到 `NaN` 或小于等于 0 时被忽略；有效值只能把窗口再缩小。它限制的是自动压缩所用预算，不会增大服务端容量。
 
 自动压缩阈值再减去固定的 `13_000`，
 
@@ -500,6 +526,8 @@ export function getAutoCompactThreshold(model: string): number {
 > 证据，`restored-src/src/services/compact/autoCompact.ts:62-100`（2.1.88 source map 还原源码），自动压缩阈值计算；`AUTOCOMPACT_BUFFER_TOKENS = 13_000` 在 `autoCompact.ts:62`。
 
 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` 只有在大于 0 且不超过 100 时才生效；空字符串、`NaN`、负数、0 或超过 100 都回退到默认阈值。即使百分比合法，最终也取它和"有效窗口减 13,000"之间的较小值。
+
+例如，窗口解析结果为 200K、`getMaxOutputTokensForModel()` 返回值至少为 20K，且没有窗口或百分比覆盖时，有效窗口是 `200,000 - 20,000 = 180,000`，自动压缩阈值是 `180,000 - 13,000 = 167,000`。同样的输出预留放到 1M 窗口，阈值就是 967,000。实际值必须代入当前模型的输出预算和环境配置，不能把 167K 当成所有模型共用的固定线。
 
 #### 自动压缩不是永远打开
 
@@ -986,6 +1014,8 @@ GitHub issue [#42338](https://github.com/anthropics/claude-code/issues/42338) �
 | Context Collapse | `applyCollapsesIfNeeded()` 调用点 | `src/query.ts:441` | 调用点已确认，实现 ⚠️ MISSING |
 | Context Collapse | `ContextCollapseCommitEntry` / `ContextCollapseSnapshotEntry` | `src/types/logs.ts:255,282` | 已确认 |
 | Context Collapse | `restoreFromEntries()` 恢复 | `src/utils/sessionStorage.ts:1539` | 已确认 |
+| 窗口预算 | `getContextWindowForModel()` 的规则与 200K 回退 | `src/utils/context.ts:51-98` | 已确认；能力与实验值取决于运行时 |
+| 窗口能力 | `getModelCapability()` 的内部用户与官方端点限制 | `src/utils/model/modelCapabilities.ts:46-83` | 已确认 |
 | Autocompact | `getEffectiveContextWindowSize()` / `MAX_OUTPUT_TOKENS_FOR_SUMMARY` | `src/services/compact/autoCompact.ts:33,30` | 已确认 |
 | Autocompact | `getAutoCompactThreshold()` / `AUTOCOMPACT_BUFFER_TOKENS` | `src/services/compact/autoCompact.ts:72,62` | 已确认 |
 | Autocompact | `isAutoCompactEnabled()` / `shouldAutoCompact()` | `src/services/compact/autoCompact.ts:147,160` | 已确认 |

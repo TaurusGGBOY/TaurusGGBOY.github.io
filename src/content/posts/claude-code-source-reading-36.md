@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读36：认证与云提供商如何接入"
 published: 2026-07-24T16:47:23+08:00
-updated: 2026-08-04
+updated: 2026-09-10
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -385,13 +385,53 @@ if (provider === 'foundry' || provider === 'firstParty') {
 return canonical.includes('sonnet-4') || canonical.includes('opus-4')
 ```
 
-> 证据，`restored-src/src/utils/model/modelCapabilities.ts`（2.1.88 source map 还原源码），`modelSupportsThinking()`。
+> 证据，`restored-src/src/utils/thinking.ts:90-110`（2.1.88 source map 还原源码），`modelSupportsThinking()`。
 
 `modelSupportsThinking(model)` 接受开放模型字符串，先查第三方 capability override；这个结果为 `true` 或 `false` 时直接采用，只有 `undefined` 才走静态规则。第一方与 Foundry 默认允许非 Claude 3 的 canonical model，Bedrock 与 Vertex 静态回退只允许 Sonnet 4 或 Opus 4。canonicalization 会把 provider ID 与配置 override 尽量还原成统一家族名。
 
 adaptive thinking 又有更窄的 allowlist，已知 Opus 4.6 与 Sonnet 4.6 返回 `true`，其他已知 opus/sonnet/haiku 返回 `false`；未知字符串只在第一方与 Foundry 默认 `true`。tool reference 则采用反向规则，命中不支持 pattern 才返回 `false`，新模型默认 `true`。不同能力函数有不同 fail-open / fail-closed 策略，不能从"支持 thinking"推导"支持所有工具协议"。
 
 在请求组装时，如果 thinking 被关闭或模型不支持，`thinking` 保持 `undefined`；支持 adaptive 的模型发送 `{ type: 'adaptive' }`；否则发送 `{ type: 'enabled', budget_tokens }`，且 budget 会被限制在 `maxOutputTokens - 1` 以内。这些差异发生在 client 调用前，不需要让 Query Core 为四个 provider 各写一套循环。
+
+#### 上下文窗口：先确定本地预算，再看能力发现
+
+假设接入了一个自定义模型，服务端可以接受请求，Claude Code 仍按 200K 计算上下文预算。排查时要继续看 `getContextWindowForModel(model, betas?)`：它依次检查内部环境覆盖、`[1m]` 标签、模型能力缓存、1M beta、Sonnet 4.6 实验和内部模型配置，最后回退到 `200_000`。参数 `model` 是当前模型名称；`betas` 是可选字符串数组，`undefined` 或空数组不会命中 beta 分支。完整的优先级和自动压缩计算见[第 17 篇](/posts/claude-code-source-reading-17/)。
+
+这里的能力缓存确实有网络来源。`refreshModelCapabilities()` 调用 `anthropic.models.list({ betas })`，遍历返回的模型，校验后只保留 `id`、可选的 `max_input_tokens` 和 `max_tokens`。这里的 `betas` 在订阅身份下为 `[OAUTH_BETA_HEADER]`，即 `oauth-2025-04-20`，其他身份下为 `undefined`，并非窗口解析使用的 1M 标记。窗口解析读取 `max_input_tokens`，并要求它至少为 100,000；`max_tokens` 不在这里充当窗口大小。
+
+但发请求和读缓存之前，都要经过同一个判断。下面是完整的资格函数：
+
+```ts
+function isModelCapabilitiesEligible(): boolean {
+  if (process.env.USER_TYPE !== 'ant') return false
+  if (getAPIProvider() !== 'firstParty') return false
+  if (!isFirstPartyAnthropicBaseUrl()) return false
+  return true
+}
+```
+
+这三个条件必须同时成立。普通官方用户不满足内部用户条件；Bedrock、Vertex、Foundry 不满足 provider 条件；自定义网关即使沿用 `firstParty` client，也还要通过官方 Base URL 检查。因此，**第三方接口即使返回了完整的窗口字段，2.1.88 的这条能力发现路径也不会去读取它。**
+
+缓存写在 Claude 配置目录的 `cache/model-capabilities.json`，包含 `models` 和 `timestamp`。刷新时先按模型 ID 长度降序排列，内容有变化才写入磁盘并清除进程内读取缓存；查询模型时先忽略大小写做精确匹配，再做子串匹配，让较具体的 ID 优先。文件不存在、格式校验失败、列表为空或没有匹配模型时，`getModelCapability()` 返回 `undefined`，窗口解析继续后面的本地规则。
+
+调用方向是 `startDeferredPrefetches()` → `refreshModelCapabilities()` → Models API → 磁盘缓存；预算计算则走 `getContextWindowForModel()` → `getModelCapability()` → 本地缓存。前者是首屏之后的异步预取，不会让每次预算计算都等待网络。`--bare` 或只测首屏启动的模式会跳过这批预取，刷新函数在仅必要流量模式下也直接返回；网络失败只记调试日志，不会主动删除已有缓存。缓存读取没有按 `timestamp` 做过期判断，所以读到的是本地已有记录，不能保证一定是服务端最新能力。
+
+> 证据，`restored-src/src/utils/context.ts:51-98`（窗口解析）；`restored-src/src/utils/model/modelCapabilities.ts:19-118`（schema、资格检查、匹配、刷新和失败路径）；`restored-src/src/main.tsx:388-419`（延迟预取调用）；`restored-src/src/constants/oauth.ts:36`（OAuth beta 值）。源码能确认这些限制，未给出只向内部用户开放的产品决策说明。
+
+#### 厂商提供 `/v1/models`，为什么还不能统一查询
+
+接口路径相似，返回的能力字段并不统一。下面比较的是 **2026-09-10 查阅的公开 API 文档**，用于解释接口差异；它不代表 2.1.88 发布时各家接口的历史状态，也不代表这版 Claude Code 已经实现了这些服务的适配。
+
+| 服务 | 模型列表里的相关字段 | 能否据此读取窗口 |
+| --- | --- | --- |
+| OpenAI | Model 对象有 `id`、`created`、`object`、`owned_by` 等元数据，没有窗口字段 | 不能直接从该对象读取；见 [Models API 文档](https://developers.openai.com/api/reference/resources/models) |
+| DeepSeek | 列表 schema 为 `id`、`object`、`owned_by` | 没有窗口字段；见 [List Models 文档](https://api-docs.deepseek.com/api/list-models) |
+| Anthropic | `max_input_tokens` 表示最大输入上下文，`max_tokens` 表示输出参数上限，两者允许 `null` | 有数值时可读，还需处理未知值；见 [Models API 文档](https://platform.claude.com/docs/en/api/typescript/models) |
+| OpenRouter | 提供 `context_length`，另有 `top_provider.context_length` 和 `top_provider.max_completion_tokens` | 有能力信息，但需要按该服务的字段层级适配；见 [Models API 文档](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties) |
+
+这里还有一个版本差异：当前 Anthropic 文档允许能力字段为 `null`，2.1.88 的本地 schema 却写成 `z.number().optional()`，接受数字或缺失字段，不接受显式 `null`。若把带 `null` 的记录交给这个旧 schema，`safeParse()` 会失败，刷新循环会跳过该条记录。这是 schema 的直接推论，不能据此声称旧版本线上一定收到过这种响应。
+
+所以，模型列表、模型容量和客户端支持范围需要分别核对。前两项取决于服务端公开了什么，后一项要看客户端有没有调用、解析和使用这些字段。2.1.88 对未命中其他规则的自定义模型采用 200K 回退，是本地预算策略；它既不是容量探测结果，也不能成为“厂商没有 Models API”的证据。
 
 ### 第七步｜失败后的重试、切模与终止边界
 
@@ -452,7 +492,9 @@ if (
 | 模型验证 | `validateModel()` 最小 sideQuery | `src/utils/model/validateModel.ts` | 已确认 |
 | Client 工厂 | `getAnthropicClient()` 四套认证材料 | `src/services/api/client.ts` | 已确认 |
 | 请求骨架 | `paramsFromContext()` / `normalizeModelStringForAPI()` | `src/services/api/client.ts` | 已确认 |
-| 能力 gate | `modelSupportsThinking()` / adaptive allowlist | `src/utils/model/modelCapabilities.ts` | 已确认 |
+| 能力 gate | `modelSupportsThinking()` / adaptive allowlist | `src/utils/thinking.ts:90-145` | 已确认 |
+| 窗口预算 | `getContextWindowForModel()` | `src/utils/context.ts:51-98` | 已确认；200K 是回退值 |
+| 能力发现 | `refreshModelCapabilities()` / `getModelCapability()` | `src/utils/model/modelCapabilities.ts:46-118` | 已确认；限内部用户和官方端点 |
 | 切模 | `MAX_529_RETRIES = 3` + `FallbackTriggeredError` | `src/services/api/client.ts` | 已确认 |
 
 > 证据说明，别名解析与 provider 映射是两层（`model.ts`）；`getAPIProvider()` 只读已生效的进程环境，与 35 篇的 env 信任过滤形成完整链路；`queryLoop()` 是 `FallbackTriggeredError` 的唯一清理与重跑现场（06 篇展开）。
