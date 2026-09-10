@@ -1,8 +1,9 @@
 ---
 title: "2026 年你为什么选 LangGraph"
 published: 2026-09-02
-description: "老板让你在 LangGraph、CrewAI、Google ADK、OpenAI Agents SDK、Microsoft Agent Framework 和现成 Agent 之间选型时，如何从状态、控制、恢复与交付边界出发做决定。"
-tags: ["langgraph", "ai-agent", "agent-framework", "architecture", "decision-making"]
+updated: 2026-09-10
+description: "从 LangChain 的 LCEL、create_agent 到 LangGraph 的 StateGraph 与 Functional API，讲清条件分支、状态传递和 checkpoint 的实际边界，再讨论什么时候值得自己编排。"
+tags: ["langgraph", "langchain", "ai-agent", "agent-framework", "architecture", "decision-making"]
 category: "AI / Architecture"
 draft: false
 image: "/images/posts/2026-why-langgraph/2026-why-langgraph-cover.png"
@@ -15,9 +16,96 @@ imagePosition: "left"
 
 如果任务只是一次问答、一次检索，或者一条稳定的函数调用链，直接使用模型 API 和少量业务代码就够了。如果目标是让编码 Agent 在仓库里改文件、跑测试，Claude Code、Codex、Cursor 或 OpenHands 这样的现成入口应先纳入评估，团队可以直接沿用它们已经装配好的工具和交互边界。
 
-我会在下面这种条件下选择 LangGraph：任务是长流程，下一步取决于前一步的结果；中间状态要保存；工具失败需要重试或改道；流程可能等待人批准后再继续；团队还愿意自己拥有这张图、它的持久化和运行治理。
+我会在下面这种条件下直接选择 LangGraph：应用已经有自己的执行设计，需要把业务步骤、状态转移和恢复范围交给运行时管理；现成 Agent 循环不能清楚表达它，现有后端也没有承担这些责任。只有长任务、分支、重试或人工审批，还不足以得出这个选择。
 
-这篇文章的主张有明确边界：LangGraph 适合把一类问题的控制面放进代码。老板问“为什么选它”，真正有用的回答应该是：“因为我们的失败路径和恢复路径已经是产品需求。”
+LangChain 1.x 的 `create_agent` 本身就运行在 LangGraph 上，能使用持久化、流式输出和人工介入等能力。选型要比较的是：复用现成 Agent 循环，还是自己组织工作流。以下 LangChain / LangGraph 接口说明按 2026-09-10 的官方文档核对；其他框架保留为候选方向，不构成跨框架性能排名。
+
+## LangChain 和 LangGraph：能替代，不等于接口相同
+
+同一个业务往往可以用两者实现。用 LangGraph 重建普通工具调用 Agent，需要维护原本由 `create_agent` 提供的循环行为；用 LangChain 加普通 Python 实现专门流程，则需要自行承担现成接口没有覆盖的编排与恢复逻辑。企业采用某个框架的案例，只能说明一种实现可行，不能证明另一种无法完成。
+
+先把四种入口分开：
+
+| 入口 | 谁定义流程 | 数据与状态 | Checkpoint |
+| --- | --- | --- | --- |
+| LangChain LCEL：`a \| b \| c` | 用 Runnable 组合顺序、分支和并行 | 前一步输出传给下一步 | 普通 pipeline 不会自动获得工作流断点恢复 |
+| LangChain `create_agent` | 工厂构建模型与工具循环，middleware 扩展行为 | 消息与自定义 Agent state | 配置 checkpointer 后使用底层 LangGraph 机制 |
+| LangGraph `StateGraph` | 自己注册节点、连接边、定义路由 | 节点返回状态更新，按字段 reducer 合并 | 配置后按图的 superstep 保存检查点 |
+| LangGraph Functional API | 用 `@entrypoint`、`@task` 和普通控制流组织 | task 结果由运行时保存，可复用 | 配置后使用同一运行时，无须显式定义图 |
+
+`create_agent` 不是 LCEL pipeline。它内部已经是一张编译好的图。LangChain 也没有另外提供一套等价于 `StateGraph` 的通用业务图构建器；需要任意业务节点和连线时，直接使用 LangGraph。[官方分层说明](https://docs.langchain.com/oss/python/concepts/products) · [Functional API](https://docs.langchain.com/oss/python/langgraph/functional-api)
+
+### edge 和 conditional edge 在 LangChain 中怎么表达
+
+对于简单的顺序与条件逻辑，LCEL 可以用 `|` 和 `RunnableBranch`：
+
+```python
+from langchain_core.runnables import RunnableLambda, RunnableBranch
+
+def check_order(order):
+    return {**order, "needs_review": order["amount"] > 1000}
+
+def manual_review(order):
+    return {**order, "status": "pending_review"}
+
+def auto_approve(order):
+    return {**order, "status": "approved"}
+
+workflow = RunnableLambda(check_order) | RunnableBranch(
+    (lambda order: order["needs_review"], RunnableLambda(manual_review)),
+    RunnableLambda(auto_approve),  # 默认分支
+)
+
+result = workflow.invoke({"order_id": "A001", "amount": 1500})
+assert result["status"] == "pending_review"
+```
+
+`a | b` 表达先执行 a，再把输出交给 b；`RunnableBranch` 执行第一个条件成立的分支，否则执行默认分支。这里的判断完全由代码控制，不需要模型选择工具。示例中的人工审核仅返回待审核状态，没有实现持久化暂停或审批后的恢复。[RunnableSequence](https://reference.langchain.com/python/langchain-core/runnables/base/RunnableSequence) · [RunnableBranch](https://reference.langchain.com/python/langchain-core/runnables/branch/RunnableBranch)
+
+这与 LangGraph 的边在控制逻辑上相似，状态语义却不同。LCEL 中，如果 a 输出 `{"name": "张三"}`，b 只输出 `{"score": 90}`，c 就只收到后者。要保留 name，可以显式返回合并后的字典，或用 `RunnablePassthrough.assign` 增加字段。`StateGraph` 则允许 b 只返回 score 的更新，运行时按已声明状态及 reducer 保留或合并其他字段；同一字段如何更新取决于它的规则。
+
+如果使用 `create_agent`，middleware 可以在模型或工具调用周围更新状态、重试、调整工具与提示，也可以条件跳转。但公开的 `jump_to` 目标是 `model`、`tools` 和 `end`，不能仅写 `jump_to="合同审核"` 就注册并连接任意业务节点。自定义流程可以包住 Agent，也可以把 Agent 作为 LangGraph 的节点。[Middleware 跳转](https://docs.langchain.com/oss/python/langchain/middleware/custom#agent-jumps) · [自定义工作流](https://docs.langchain.com/oss/python/langchain/multi-agent/custom-workflow)
+
+### 没有 create_agent，checkpoint 还能用吗
+
+可以。Checkpoint 属于 LangGraph 运行时，并不要求流程里有 Agent，甚至不要求有模型。
+
+如果只运行普通 LCEL 的 `a | b | c`，没有一个给 pipeline 配上 checkpointer 就自动逐步恢复的通用入口。可以把步骤接入 `StateGraph`，也可以采用不显式建图的 Functional API：
+
+```python
+from langgraph.func import entrypoint, task
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command, interrupt
+
+@task
+def prepare_document(text):
+    return {"text": text.strip(), "status": "prepared"}
+
+@entrypoint(checkpointer=InMemorySaver())
+def review_workflow(text):
+    document = prepare_document(text).result()
+    approved = interrupt({"document": document, "action": "approve"})
+    return {**document, "approved": approved}
+
+config = {"configurable": {"thread_id": "review-1"}}
+review_workflow.invoke(" 合同草稿 ", config)  # 暂停，等待审核
+result = review_workflow.invoke(Command(resume=True), config)
+assert result["approved"] is True
+```
+
+恢复时 entrypoint 从函数开头重新进入，已保存的 task 结果可以复用；这不是保存 Python 每一行的执行现场。把需要复用的工作划成 task，有别于把整个长流程放在一个普通函数里。示例用内存 checkpointer，只适合演示；进程重启后继续需要持久化后端。[官方 Functional API 示例与恢复语义](https://docs.langchain.com/oss/python/langgraph/functional-api)
+
+对于 `create_agent`，checkpointer 保存的是预构建 Agent 图的状态与进度。若一个工具内部依次执行提取、审核和发布，给外层 Agent 配 checkpointer，不代表这三个内部函数之间自动各有检查点。要控制内部恢复范围，需要拆成运行时认识的执行单元，或自行记录进度。外部写入的幂等性也不会由 checkpoint 自动保证。
+
+### 真正值得比较的是替换后的维护责任
+
+客服让模型查订单、追问、回答，再用 middleware 限制工具与增加审批，可以优先用 `create_agent`。固定的“检索一次 → 分析 → 评审 → 未通过时重新分析”也能用普通 `for` 和 `if` 实现；仅有循环，不足以要求 LangGraph。
+
+当这几个阶段需要各自的运行状态、恢复范围和明确路由，而现有系统没有相应机制时，LangGraph 才可能减少自研。若退款后端已经负责风控、审批和事务，Agent 只调用一个退款接口，就不必在 Agent 层重复实现整条业务流程。
+
+我的判断是：复用现成 Agent 行为时选 LangChain；已经有专门执行设计、需要运行时管理时评估 LangGraph；普通代码或现有工作流足够时保留它们。LangGraph 外层流程与 LangChain 内层 Agent 也可以组合，业务复杂度本身不能决定二选一。
+
+第三方建议可作对照：[Workflow Builder（2026-07-30）](https://www.workflowbuilder.io/blog/langgraph-vs-langchain)强调默认循环是否匹配；[Uvik（2026-09-03 更新）](https://uvik.net/blog/langchain-vs-langgraph/)根据其交付经验反对仅为未来灵活性提前手写图；[Linfield Labs（2026-02-24）](https://linfieldlabs.com/blog/graph-over-chain-part-2.html)也建议先用 `create_agent`。这些是作者的选型建议，不是独立性能实验。尤其“有循环、有记忆、有人审就必须直接用 LangGraph”的清单，不能忽略 LangChain 1.x 已有的能力。
 
 ## 先别把 Agent 和 Agent 框架混成一层
 
@@ -45,7 +133,7 @@ imagePosition: "left"
 
 固定顺序的流程可以写成函数：读取资料、生成摘要、保存结果。动态流程会在运行中分叉：SQL 校验失败就回到生成节点；退款金额超过阈值就进入人工审批；检索为空就改用另一个数据源；某个专家已经给出结论，就不要重复调用。
 
-这类分支不是 prompt 里的一句“请灵活处理”就能解决。它应该在状态、条件边和节点代码里有可见的位置。
+这类约束应在代码中明确表达。普通条件语句、LCEL 分支、Agent middleware 或 LangGraph 条件边都可以承担相应逻辑；需要运行时管理到什么粒度，才是进一步选择结构的依据。
 
 ### 3. 谁负责副作用
 
@@ -78,13 +166,13 @@ LangGraph 把这些转移组织成可以被检查、暂停和恢复的运行结�
 
 框架负责保存状态；幂等键和邮件去重仍是业务系统的责任。
 
-## 四个老板会真的遇到的场景
+## 五个老板会真的遇到的场景
 
 ### 场景一：内部知识库问答
 
 需求是“查公司文档，回答问题，给出引用”。流程大多是检索、拼接上下文、生成回答。在权限路由、检索失败改道、跨天任务和人工复核都不需要时，我会先选直接 API、高层 Agent SDK 或现成问答产品。
 
-直接 API、一个高层 Agent SDK 或现成问答产品更合适。少一层运行时，团队就少维护一套状态和部署问题。
+如果问答需要模型反复检索和调用工具，可以先用 LangChain 的现成 Agent 循环，无须手写同样的图。
 
 ### 场景二：Text-to-SQL 分析助手
 
@@ -119,6 +207,7 @@ SQL Agent 也可以沿其他路线实现。如果团队已经以 LlamaIndex 的�
 | 方案 | 主要抽象 | 可以优先验证的场景 | 需要提前确认的边界 |
 | --- | --- | --- | --- |
 | 直接 API + 业务代码 | 模型调用、工具函数、普通控制流 | 单轮问答、短链路、固定顺序任务 | 状态、暂停和恢复都要自己写 |
+| LangChain create_agent | 预构建 Agent 循环与 middleware | 标准工具调用、上下文管理、工具审批 | 底层已是 LangGraph；任意业务节点拓扑需另行编排 |
 | LangGraph | 以状态、节点、边组织长流程 Agent | 分支、循环、重试、人审、长任务、需要自有运行控制 | 图设计、状态 schema、幂等性、checkpointer 和运维责任在团队 |
 | CrewAI | Crews 表达角色协作，Flows 表达事件驱动流程 | 角色、任务和团队协作是主要语言 | 需要把业务状态和精确副作用边界再落回代码 |
 | OpenAI Agents SDK | Agent、Runner、tools、handoffs、guardrails、sessions | 已经以 OpenAI 模型和运行方式为中心的应用 | 是否接受供应商路径，以及低层状态控制是否够用 |
@@ -145,27 +234,25 @@ Microsoft 的当前路线需要单独看。[Microsoft Agent Framework 文档](ht
 
 ## 决策树：先问问题，再看到框架名
 
-![2026 年 Agent 框架选型决策树：从现成 Agent、简单 workflow、供应商 SDK 到 LangGraph](/images/posts/2026-why-langgraph/2026-langgraph-decision-tree.svg)
+![Agent 实现入口选择：现成产品、普通代码或 LCEL、LangChain create_agent，以及 LangGraph StateGraph 或 Functional API](/images/posts/2026-why-langgraph/2026-langgraph-decision-tree.svg)
 
 如果图片不方便查看，可以把它压缩成这条路径：
 
 ~~~text
-需要嵌入业务产品吗？
-├─ 否 → 直接 API / 简单脚本
-└─ 是
-   ├─ 只想使用现成编码 Agent？ → Claude Code / Codex / Cursor / OpenHands
-   └─ 否
-      ├─ 流程线性且不需要中途恢复？ → 简单 workflow / 高层 SDK
-      └─ 否
-         ├─ 强绑定 OpenAI、Google 或 Microsoft 运行时？ → 对应原生 SDK
-         ├─ 角色和团队协作是主要抽象？ → CrewAI
-         ├─ 数据、检索和索引是主轴？ → LlamaIndex Workflows
-         ├─ 类型优先的 Python Agent 是主轴？ → PydanticAI
-         └─ 都不是，且需要状态、分支、循环、重试、人审、暂停恢复
-            → LangGraph
+现成 Agent 产品已满足任务与接入要求？
+├─ 是 → 使用现成产品
+└─ 否 → 自己构建应用
+   ├─ 普通代码或现有后端已能管理流程？
+   │  └─ 是 → 保留现有编排；按需加入模型调用或 LCEL
+   └─ 需要 Agent 循环或新的工作流运行机制
+      ├─ create_agent + middleware 能清楚表达？
+      │  └─ 是 → LangChain；按需配置 checkpointer
+      └─ 需要自定义执行流程及运行保障
+         ├─ 用共享状态、节点与边表达 → LangGraph StateGraph
+         └─ 用函数、if / for 与 task 表达 → LangGraph Functional API
 ~~~
 
-LangGraph 出现在树的末端，因为只有当问题落在“我需要一台可编排的 Agent 状态机”上，它才是答案的一部分。
+这棵树用于区分实现入口，各分支可以组合。Google、Microsoft、OpenAI 生态或专门的数据框架仍可按上表并行评估；它们并不是在 LangChain / LangGraph 之间选完后就失去意义。图中没有把“有人工审批”直接连到 LangGraph，因为现成 Agent middleware 也能处理工具审批。
 
 ## 那么，为什么我会选 LangGraph
 
@@ -173,7 +260,7 @@ LangGraph 出现在树的末端，因为只有当问题落在“我需要一台�
 
 第一，状态是业务对象，而不是日志里的附属信息。审批意见、工具错误、检索结果和重试次数会影响下一步，它们应该有明确的 schema 和生命周期。
 
-第二，失败路径和成功路径一样重要。SQL 生成错了怎么办，支付接口超时怎么办，检索没有结果怎么办，人工拒绝怎么办。把这些分支写出来，评审才能逐条讨论；把它们隐藏在 Agent 的自主循环里，评审就无法验证。
+第二，失败路径和成功路径一样重要。SQL 生成错了怎么办，支付接口超时怎么办，检索没有结果怎么办，人工拒绝怎么办。节点和边是一种方便逐条评审的表达方式；普通代码和 middleware 也能表达可测试的约束。选择图的理由应是它更贴合这份执行设计。
 
 第三，暂停和恢复可以进入正常流程。人审不再是运行时外面的一封邮件，而是图里一个有状态的边界。长任务也不必靠一段不断变长的对话历史维持“我跑到哪了”。
 
@@ -181,7 +268,7 @@ LangGraph 出现在树的末端，因为只有当问题落在“我需要一台�
 
 我的结论是条件式选择：
 
-> 当 Agent 的状态转移、失败恢复和人工边界本身就是产品需求时，选择 LangGraph；当需求更简单、更专用或更贴近一个现成产品时，选择简单代码、供应商 SDK、专用框架或现成 Agent。
+> 当专门的执行流程需要由运行时管理，而现成 Agent 循环和已有后端不能清楚承担时，评估直接使用 LangGraph；标准工具循环优先复用 LangChain，需要的只是短流程时，普通代码也可以满足。
 
 ## 交给老板的选型记录
 
