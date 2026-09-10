@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" viewBox="0 0 1000 620" role="img" aria-labelledby="title desc">
+  <title id="title">严格 JSON 的逐 token 解码流程</title>
+  <desc id="desc">Schema 编译为可复用文法。每请求的匹配状态计算合法 token 掩码，与模型 logits 汇合后采样。选中 token 同时更新模型前缀和匹配状态。</desc>
+  <defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#678098" stroke-width="1.5"/></marker></defs>
+  <rect width="1000" height="620" rx="22" fill="#f1f5f9"/>
+  <g font-family="system-ui, -apple-system, 'PingFang SC', sans-serif" fill="#16334c">
+    <text x="42" y="52" font-size="27" font-weight="700">strict 如何进入每一步采样</text>
+    <text x="42" y="82" font-size="17" fill="#536b80">文法决定允许集合 · 模型决定候选分数</text>
+    <g stroke="#678098" stroke-width="2" fill="none" marker-end="url(#arrow)">
+      <path d="M270 141H337"/><path d="M650 141H716"/>
+      <path d="M829 178V254"/><path d="M716 293H653"/>
+      <path d="M286 293H355"/><path d="M502 331V390"/>
+      <path d="M502 467V524"/>
+      <path d="M367 555H157V331"/>
+      <path d="M637 555H829V331"/>
+    </g>
+    <g fill="#fff" stroke="#cbd5e1" stroke-width="1.5">
+      <rect x="42" y="105" width="228" height="73" rx="13"/>
+      <rect x="337" y="105" width="313" height="73" rx="13"/>
+      <rect x="716" y="105" width="228" height="73" rx="13"/>
+      <rect x="42" y="255" width="244" height="76" rx="13"/>
+      <rect x="716" y="255" width="228" height="76" rx="13"/>
+      <rect x="355" y="255" width="298" height="76" rx="13" fill="#e0f2fe" stroke="#38a3cf"/>
+      <rect x="367" y="390" width="270" height="77" rx="13"/>
+      <rect x="367" y="524" width="270" height="63" rx="13" fill="#dcfce7" stroke="#72b48a"/>
+    </g>
+    <g text-anchor="middle" font-size="21" font-weight="600">
+      <text x="156" y="149">JSON Schema</text>
+      <text x="494" y="136">编译为文法</text>
+      <text x="830" y="136">匹配状态</text>
+      <text x="164" y="286">模型 logits</text>
+      <text x="830" y="286">合法 token 集合</text>
+      <text x="504" y="286">应用动态 mask</text>
+      <text x="502" y="422">归一化并采样</text>
+      <text x="502" y="563">选中下一个 token</text>
+    </g>
+    <g text-anchor="middle" font-size="16" fill="#536b80">
+      <text x="494" y="160">编译产物可复用</text>
+      <text x="830" y="160">每个请求独立维护</text>
+      <text x="164" y="312">来自当前上下文</text>
+      <text x="830" y="312">来自当前文法位置</text>
+      <text x="504" y="312">非法候选概率置零</text>
+      <text x="502" y="449">只在合法候选间选择</text>
+      <text x="250" y="581">追加前缀</text>
+      <text x="737" y="581">推进匹配状态</text>
+      <text x="673" y="498">完整结果被接受后，才允许 EOS</text>
+    </g>
+  </g>
+</svg>
