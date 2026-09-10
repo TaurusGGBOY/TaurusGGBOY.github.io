@@ -41,7 +41,7 @@ LangChain 1.x 的 `create_agent` 本身就运行在 LangGraph 上，能使用持
 
 | 入口 | 谁定义流程 | 数据与状态 | Checkpoint |
 | --- | --- | --- | --- |
-| LangChain LCEL：`a \| b \| c` | 用 Runnable 组合顺序、分支和并行 | 前一步输出传给下一步 | 普通 pipeline 不会自动获得工作流断点恢复 |
+| LangChain LCEL：`a \| b \| c` | 用 Runnable 组合顺序、分支和并行；无原生循环编排构件 | 前一步输出传给下一步 | 普通 pipeline 不会自动获得工作流断点恢复 |
 | LangChain `create_agent` | 工厂构建模型与工具循环，middleware 扩展行为 | 消息与自定义 Agent state | 配置 checkpointer 后使用底层 LangGraph 机制 |
 | LangGraph `StateGraph` | 自己注册节点、连接边、定义路由 | 节点返回状态更新，按字段 reducer 合并 | 配置后按图的 superstep 保存检查点 |
 | LangGraph Functional API | 用 `@entrypoint`、`@task` 和普通控制流组织 | task 结果由运行时保存，可复用 | 配置后使用同一运行时，无须显式定义图 |
@@ -78,6 +78,14 @@ assert result["status"] == "pending_review"
 这与 LangGraph 的边在控制逻辑上相似，状态语义却不同。LCEL 中，如果 a 输出 `{"name": "张三"}`，b 只输出 `{"score": 90}`，c 就只收到后者。要保留 name，可以显式返回合并后的字典，或用 `RunnablePassthrough.assign` 增加字段。`StateGraph` 则允许 b 只返回 score 的更新，运行时按已声明状态及 reducer 保留或合并其他字段；同一字段如何更新取决于它的规则。
 
 如果使用 `create_agent`，middleware 可以在模型或工具调用周围更新状态、重试、调整工具与提示，也可以条件跳转。但公开的 `jump_to` 目标是 `model`、`tools` 和 `end`，不能仅写 `jump_to="合同审核"` 就注册并连接任意业务节点。自定义流程可以包住 Agent，也可以把 Agent 作为 LangGraph 的节点。[Middleware 跳转](https://docs.langchain.com/oss/python/langchain/middleware/custom#agent-jumps) · [自定义工作流](https://docs.langchain.com/oss/python/langchain/multi-agent/custom-workflow)
+
+### LCEL 原生不支持循环编排
+
+**LCEL 原生不提供通用的循环编排构件。** `a | b | c` 表达顺序执行，`RunnableBranch` 负责选择分支，都不能直接声明“校验未通过就回到生成步骤，直到通过或达到次数上限”。LangGraph 则可以用条件边连回前面的节点，显式表达这类循环。[RunnableSequence](https://reference.langchain.com/python/langchain-core/runnables/base/RunnableSequence) · [LangGraph 工作流示例](https://docs.langchain.com/oss/python/langgraph/workflows-agents)
+
+需要循环时，可以在 LCEL 外层写 Python `for` / `while`，也可以把循环封装进 `RunnableLambda`；此时循环控制由自定义代码承担，LCEL 不会因此自动获得每轮状态的检查点与恢复能力。异常重试也不等于“根据校验结果修改输入，再运行下一轮”的业务反馈循环。
+
+这里说的是 LCEL 的编排边界。LangChain 的 `create_agent` 已经提供模型与工具的循环，它不属于普通 LCEL pipeline；不能把“LCEL 没有原生循环编排”扩大为“LangChain 不能做循环”。
 
 ### 没有 create_agent，checkpoint 还能用吗
 
