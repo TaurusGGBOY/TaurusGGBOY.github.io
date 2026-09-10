@@ -1,8 +1,8 @@
 ---
 title: "2026 年你为什么选 LangGraph"
 published: 2026-09-02
-updated: 2026-09-10
-description: "从 LangChain 的 LCEL、create_agent 到 LangGraph 的 StateGraph 与 Functional API，讲清条件分支、状态传递和 checkpoint 的实际边界，再讨论什么时候值得自己编排。"
+updated: 2026-09-11
+description: "什么时候用 LangChain，什么时候直接用 LangGraph？从现成 Agent 循环、自定义业务流程和 checkpoint 的恢复粒度，讲清两者的关系与选型边界。"
 tags: ["langgraph", "langchain", "ai-agent", "agent-framework", "architecture", "decision-making"]
 category: "AI / Architecture"
 draft: false
@@ -18,7 +18,20 @@ imagePosition: "left"
 
 我会在下面这种条件下直接选择 LangGraph：应用已经有自己的执行设计，需要把业务步骤、状态转移和恢复范围交给运行时管理；现成 Agent 循环不能清楚表达它，现有后端也没有承担这些责任。只有长任务、分支、重试或人工审批，还不足以得出这个选择。
 
-LangChain 1.x 的 `create_agent` 本身就运行在 LangGraph 上，能使用持久化、流式输出和人工介入等能力。选型要比较的是：复用现成 Agent 循环，还是自己组织工作流。以下 LangChain / LangGraph 接口说明按 2026-09-10 的官方文档核对；其他框架保留为候选方向，不构成跨框架性能排名。
+LangChain 1.x 的 `create_agent` 本身就运行在 LangGraph 上，能使用持久化、流式输出和人工介入等能力。选型要比较的是：复用现成 Agent 循环，还是自己组织工作流。本文的接口说明以 LangChain 1.x 为背景；本次于 2026-09-11 复核两者的分层与 checkpoint 能力，其他框架保留为候选方向，不构成跨框架性能排名。
+
+## 先回答：什么时候用哪一个
+
+| 你要实现的行为 | 优先考虑的入口 | 选择理由 |
+| --- | --- | --- |
+| 检索一次，再生成答案；步骤固定且允许整段重跑 | 普通代码或 LCEL | 用函数和数据传递就能清楚表达 |
+| 模型根据工具结果决定继续调用、追问或回答 | LangChain `create_agent` | 复用模型与工具循环，再按需加 middleware |
+| 在标准 Agent 中保留会话状态、暂停等待工具审批 | `create_agent` 配置 checkpointer 及相应审批 middleware | 可以直接使用底层 LangGraph 的状态与中断机制 |
+| 业务要求独立的生成、校验、审批、执行阶段，并由运行时管理各阶段的路由与恢复 | LangGraph `StateGraph` 或 Functional API | 自己定义运行时可识别的步骤和状态边界 |
+
+例如，“让模型查订单后回答”可以先用 `create_agent`；“无论模型怎样回答，都必须经过业务校验和指定审批步骤才能退款”，就需要把这些约束落实到代码。已有退款后端能完整承担时，Agent 调用它即可；需要新建跨阶段的状态与恢复机制时，再评估直接用 LangGraph。
+
+因此，不能用“LangChain 没有 checkpoint，LangGraph 才有”来区分两者。**普通 LCEL 链不会自动获得工作流检查点；LangChain 的 `create_agent` 可以使用 LangGraph 的 checkpointer。** 真正影响选型的是现成循环是否匹配，以及你要把恢复边界控制到哪里。[LangChain 官方概览](https://docs.langchain.com/oss/python/langchain/overview) · [短期记忆与 checkpointer](https://docs.langchain.com/oss/python/langchain/short-term-memory)
 
 ## LangChain 和 LangGraph：能替代，不等于接口相同
 
@@ -70,6 +83,8 @@ assert result["status"] == "pending_review"
 
 可以。Checkpoint 属于 LangGraph 运行时，并不要求流程里有 Agent，甚至不要求有模型。
 
+先区分三个概念：**checkpoint** 是某个执行边界的状态快照；**checkpointer** 是保存和读取这些快照的组件；**thread_id** 用来标识这次会话或工作流所属的线程。它们解决的是状态与执行进度的保存问题，不是把 Python 进程的每一行、每个局部变量都冻结下来。[Persistence 文档](https://docs.langchain.com/oss/python/langgraph/persistence)
+
 如果只运行普通 LCEL 的 `a | b | c`，没有一个给 pipeline 配上 checkpointer 就自动逐步恢复的通用入口。可以把步骤接入 `StateGraph`，也可以采用不显式建图的 Functional API：
 
 ```python
@@ -96,6 +111,8 @@ assert result["approved"] is True
 恢复时 entrypoint 从函数开头重新进入，已保存的 task 结果可以复用；这不是保存 Python 每一行的执行现场。把需要复用的工作划成 task，有别于把整个长流程放在一个普通函数里。示例用内存 checkpointer，只适合演示；进程重启后继续需要持久化后端。[官方 Functional API 示例与恢复语义](https://docs.langchain.com/oss/python/langgraph/functional-api)
 
 对于 `create_agent`，checkpointer 保存的是预构建 Agent 图的状态与进度。若一个工具内部依次执行提取、审核和发布，给外层 Agent 配 checkpointer，不代表这三个内部函数之间自动各有检查点。要控制内部恢复范围，需要拆成运行时认识的执行单元，或自行记录进度。外部写入的幂等性也不会由 checkpoint 自动保证。
+
+所以，评审时可以直接问：“如果发布失败，重新执行时，提取和审核会不会再跑？”把三个动作写在同一个普通工具函数里，与把它们拆成图节点或可复用结果的 task，恢复范围并不一样。即使已经保存检查点，如果外部发布成功后、记录结果前进程退出，重试仍可能重复发布；这需要外部接口的幂等机制或业务侧结果核对。
 
 ### 真正值得比较的是替换后的维护责任
 
