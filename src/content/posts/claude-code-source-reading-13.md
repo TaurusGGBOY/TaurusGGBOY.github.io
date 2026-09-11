@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读13：如何建立命令执行安全边界"
 published: 2026-07-24T16:47:00+08:00
-updated: 2026-08-04
+updated: 2026-09-11
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -74,7 +74,7 @@ if (
 
 ## 正文
 
-本文只引用 `@anthropic-ai/claude-code@2.1.88` 的还原代码。路径用于定位实现，不代表 Anthropic 内部目录；代码片段删去无关分支，但不改写控制逻辑；代码块以 `[source]` 标注证据层级，块内注释注明 `restored-src/` 路径（2.1.88 还原源码）。
+本文以 `@anthropic-ai/claude-code@2.1.88` 的还原代码为依据，沙箱底层包装另外核对同版本的 `package/cli.js`。路径用于定位实现，不代表 Anthropic 内部目录；代码片段删去无关分支，但不改写控制逻辑；代码块以 `[source]` 标注证据层级，块内注释注明路径。沙箱部分于 2026-09-11 复核，仍以 2.1.88 为版本边界。
 
 ### 先建立一张地图
 
@@ -258,7 +258,7 @@ if (matchingAllowRules[0] !== undefined) {
 
 | 危险模式 | 常态护栏 | 拆掉护栏后的反例 | 2.1.88 源码落点 |
 |---|---|---|---|
-| `curl ... \| sh`（下载即执行） | 权限规则先检查 `curl` 子命令；沙箱再把网络与文件写入边界施加给进程 | 显式 `dangerouslyDisableSandbox: true` 且 `allowUnsandboxedCommands` 未关（默认 `true`）。命令以宿主机全量文件系统与网络权限直接落地 | `shouldUseSandbox()`、`sandbox-adapter.ts` 默认值 |
+| `curl ... \| sh`（下载即执行） | 权限规则先检查 `curl` 子命令；沙箱再把网络与文件写入边界施加给进程 | 显式 `dangerouslyDisableSandbox: true` 且 `allowUnsandboxedCommands` 未关（默认 `true`）。获权限流程放行后，命令使用当前宿主用户的权限执行，仍受操作系统权限及其他外部限制 | `shouldUseSandbox()`、`sandbox-adapter.ts` 默认值 |
 | `> /etc/passwd` 重定向越界 | 对整串原始命令单独补查 redirects 的目标路径 | 只按空格拆分出的子命令名判断权限。`cd` 或 `cat` 被放行，重定向目标从未被检查 | `checkPathConstraints(input, ...)` 与 `astCommand?.redirects` |
 | `rm -rf` / 破坏性命令 | 显式 deny 规则优先于一切；`too-complex` 分支也先跑 `checkEarlyExitDeny` | deny 规则缺失时降级为 `ask`。在 `auto` 模式下，这个 `ask` 会被分类器接管 | `checkEarlyExitDeny()`、`matchingDenyRules[0]` |
 | `$(...)` / `eval` / 进程替换（动态代码） | AST 解析出 `too-complex` 后回到 `ask`，不静默放行 | 注入检查被环境变量关闭或 `TREE_SITTER_BASH_SHADOW` 生效。系统进入 `parse-unavailable` 旧路径，静态看到的命令可能不等于运行时执行的命令 | `injectionCheckDisabled`、`astResult.kind` |
@@ -270,9 +270,51 @@ if (matchingAllowRules[0] !== undefined) {
 
 其中两行值得单独停一下。
 
-**反例 A。** `dangerouslyDisableSandbox` 不是一个单独的开关。只有 `input.dangerouslyDisableSandbox && SandboxManager.areUnsandboxedCommandsAllowed()` 同时为真，`shouldUseSandbox()` 才会返回 `false`。`allowUnsandboxedCommands` 缺失时默认是 `true`，所以没有企业策略收紧时，显式传入 `dangerouslyDisableSandbox: true` 确实可能让命令离开文件和网络边界。`excludedCommands` 也一样。源码把它叫作 user-facing convenience，它负责选择执行路径，不负责提供黑名单式保护；最终把关仍在权限层和 `allowUnsandboxedCommands`。
+**反例 A。** `dangerouslyDisableSandbox` 不是一个单独的开关。在显式绕过分支，只有 `input.dangerouslyDisableSandbox && SandboxManager.areUnsandboxedCommandsAllowed()` 同时为真，`shouldUseSandbox()` 才会返回 `false`。`allowUnsandboxedCommands` 缺失时默认是 `true`，所以没有策略收紧时，模型可以申请沙箱外执行，是否获准仍由权限层决定。`excludedCommands` 则是独立的路径选择分支，不受这里的 `allowUnsandboxedCommands` 条件约束。源码把它叫作 user-facing convenience；它不是禁止执行清单，而是允许改走沙箱外权限流程的例外。
 
 **反例 B。** `parse-unavailable` 不等于放行。注入检查被环境变量关闭或 tree-sitter 没有加载时，系统会进入旧解析路径，继续让后面的规则判断。问题在于旧路径对 `$()`、管道和控制流的拆分能力弱于 AST。AST 原本会判为“无法可靠静态判断”的结构，在旧路径下可能更晚才触发 `ask`。这就是解析信息不完整时必须保持保守的原因。
+
+### 沙箱怎样启动：包装本机命令，再创建子进程
+
+本地 Bash 的沙箱由 `@anthropic-ai/sandbox-runtime` 提供，Claude Code 的 `sandbox-adapter.ts` 负责把设置接进去。在这版执行链里，每次命令通过检查后，`Shell.exec()` 先调用 `wrapWithSandbox()` 生成受限命令，再用 `spawn()` 启动本地子进程。
+
+```text
+BashTool.runShellCommand()
+  → shouldUseSandbox(input)
+  → Shell.exec()
+      → provider.buildExecCommand()：准备 shell 命令与环境
+      → SandboxManager.wrapWithSandbox()：生成沙箱包装
+      → spawn()：启动本地进程
+      → 收集输出、处理取消、清理临时文件
+```
+
+这里没有先领取一台 microVM 的步骤。`initialize()` 复用的 `initializationPromise` 是运行时初始化状态；`bashProvider` 保存的 snapshot 是加载 shell 环境的脚本。二者都不能解释成虚拟机池或虚拟机快照。
+
+同版本 `package/cli.js` 中可以继续看到平台包装。下面是结构示意，省略了代理、转义和其他限制参数，不能直接复制成完整安全配置。
+
+```text
+macOS：env … sandbox-exec -p <策略> <本机 shell> -c <命令>
+Linux：bwrap … --ro-bind / / --bind <可写目录> <可写目录>
+       … --unshare-pid -- <本机 shell> -c <命令>
+```
+
+macOS 使用 Seatbelt 策略约束进程；Linux 使用 bubblewrap 创建受限的文件系统视图和命名空间，并按配置隔离网络、接入代理及 seccomp。Linux 文件系统包装在有写入限制时先只读绑定根目录，再放开允许写入的目录，并应用禁止读取等规则。它沿用本机可访问的软件文件，没有在每次命令前安装一套新操作系统。
+
+因此，本机的 Python、Git、Node.js 只要能被当前 shell 找到，且程序及依赖路径可访问，就可以使用。沙箱不附带一份固定的“基础命令白名单”，也不保证机器上一定安装了这些程序。`command not found` 表示命令缺失或路径问题；`ModuleNotFoundError` 表示 Python 依赖问题。它们和沙箱拒绝访问是不同的故障。
+
+### 为什么函数入口的 if/else 不能代替沙箱
+
+假设工具入口判断 `command` 以 `python` 开头就放行。`python analyze.py` 可以通过检查，但脚本随后可能写项目外的文件，或启动另一个 shell。入口处的判断不会自动再次检查脚本内部的每次操作。
+
+操作系统沙箱把限制施加给实际运行的进程。即使脚本动态生成了路径、加载了第三方库、启动了子进程，后续文件与网络访问仍受到相应限制。下面是假设只允许写 `/workspace` 的示意，不是 Claude Code 的完整默认策略。
+
+```text
+Python 写 /workspace/result.txt → 允许
+Python 写其他目录              → 拒绝
+Python 启动 Bash，Bash 写其他目录 → 仍然拒绝
+```
+
+区别在于检查发生的位置：应用层判断是否允许尝试这条命令，系统层限制命令执行过程中可使用的资源。固定业务工具仍然需要服务端的身份和权限检查；提供任意 Bash 时，入口检查则无法单独覆盖所有运行时行为。沙箱也不判断业务意图，在允许写入的目录里，错误的修改或删除仍可能发生。
 
 ### Permission 放行后，Sandbox 还要做一次资源边界判断
 
@@ -298,7 +340,7 @@ export function shouldUseSandbox(input: Partial<SandboxInput>): boolean {
 
 `shouldUseSandbox(input)` 接收的是 `Partial<SandboxInput>`，所以 `command` 和 `dangerouslyDisableSandbox` 都可能是 `undefined`。只有返回 `true`，这次命令才会被沙箱包装。沙箱全局不可用、策略允许显式绕过、命令缺失，或命中 `excludedCommands`，都会得到 `false`。
 
-这里尤其要分清 `excludedCommands`。源码把它标成 user-facing convenience，它让不兼容沙箱的命令改走 unsandboxed 路径，却不负责判断这条命令最终能不能执行。权限规则和 `allowUnsandboxedCommands` 仍然在后面把关。
+这里尤其要分清 `excludedCommands`。源码把它标成 user-facing convenience，它让不兼容沙箱的命令改走 unsandboxed 路径，却不负责判断这条命令最终能不能执行。命中这个分支后仍走权限判断，但该分支没有再次检查 `allowUnsandboxedCommands`；关闭模型的显式绕过参数，不会同时清除配置中的排除项。
 
 `restored-src/src/utils/sandbox/sandbox-adapter.ts` 里还有几组容易混在一起的默认值。
 
@@ -309,6 +351,49 @@ export function shouldUseSandbox(input: Partial<SandboxInput>): boolean {
 - `enabledPlatforms` 为 `undefined` 时允许所有受支持平台，空数组则表示没有平台启用；数组元素来自运行时的 `Platform[]` 配置。
 
 所以，看到 `shouldUseSandbox()` 返回 `false`，还不能马上说“命令不安全”或“命令被允许了”。下一步要看它为什么返回 `false`，以及上层有没有把这个结果当成降级、提示或拒绝。
+
+### 通用策略已经内置，项目只补充资源范围
+
+`convertToSandboxRuntimeConfig(settings)` 把 Claude Code 的设置转换为运行时策略。它先建立默认值，再合并各层设置和权限规则，最后交给 sandbox-runtime 生成平台对应的限制。调用方无需为 Python 写文件、Git 写文件、npm 写文件分别实现一套沙箱。
+
+```ts [source]
+// restored-src/src/utils/sandbox/sandbox-adapter.ts（2.1.88 还原源码）
+const allowWrite: string[] = ['.', getClaudeTempDir()]
+const denyWrite: string[] = []
+const denyRead: string[] = []
+const allowRead: string[] = []
+```
+
+这些数组是构造起点，不是最终配置。后续代码会加入保护路径、额外工作目录以及各设置来源中的规则。`settings` 是配置对象，返回值是 `SandboxRuntimeConfig`；目录和域名都是开放的字符串配置，不能从源码枚举出所有环境的最终允许清单。
+
+| 资源或操作 | 2.1.88 的默认方向与配置入口 |
+|---|---|
+| 程序与子进程 | 支持运行本机可访问的程序，子进程继续受沙箱限制；命令权限另行判断 |
+| 文件读取 | 采用较宽读取范围，再应用 `denyRead`；`allowRead` 可在禁止范围中开放例外，不能把它误读为默认只读项目目录 |
+| 文件写入 | 默认开放当前目录和 Claude 临时目录；额外工作目录及 `filesystem.allowWrite` 可以扩展范围 |
+| 敏感路径 | 额外禁止写入 Claude settings、`.claude/skills` 等位置；普通可写目录内部也可能存在保护项 |
+| 出站网络 | 合并 `network.allowedDomains` 和相应的 WebFetch 域名权限规则，另处理拒绝域名；未授权目标进入拒绝或权限交互路径 |
+| Socket 与监听 | `allowUnixSockets`、`allowAllUnixSockets`、`allowLocalBinding` 单独控制相关能力，支持程度受平台影响 |
+| 安装依赖 | 安装目录可写、下载目标可访问时可以尝试；全局安装、用户缓存或包源也可能触碰限制 |
+
+比如，同一条“项目目录可写”的规则就能覆盖 Python 输出 CSV、编译器写产物和 npm 写 `node_modules`。需要补充的通常是项目外缓存目录、特定包源或业务接口域名，规则围绕资源组织，不必围绕每个命令组织。需要注意，磁盘读取策略不会移除已经进入进程环境变量的凭据，环境构造是另一条边界。
+
+下面是基于这些开关写出的最小配置示例，可放入用户级 `~/.claude/settings.json`，用于启用沙箱并关闭模型的沙箱外重试。它不是完整的多租户隔离方案。
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "allowUnsandboxedCommands": false,
+    "failIfUnavailable": true
+  }
+}
+```
+
+四个字段均为布尔值。`enabled: true` 请求启用；`autoAllowBashIfSandboxed: true` 允许符合条件的沙箱命令自动批准，设为 `false` 则保留普通权限流程；`allowUnsandboxedCommands: false` 关闭模型通过参数请求绕过沙箱的入口；`failIfUnavailable: true` 要求沙箱不可用时停止。省略时的默认值见上一节。其他配置层已有的 `excludedCommands`、目录和域名授权不会被这个片段自动清空，应通过 `/sandbox` 查看生效结果。
+
+多租户服务可以借鉴“统一基础策略＋会话资源参数”，但需要由服务端绑定租户、会话目录和授权数据，不能直接照搬本地开发工具的宽读取范围。microVM 镜像、预热池和资源配额属于服务部署方案，不能记成本章这条本地 Bash 链已经提供的能力。
 
 ### 沙箱起不来时，系统不一定立刻拒绝
 
@@ -373,6 +458,8 @@ async function wrapWithSandbox(
 ```
 
 `wrapWithSandbox` 返回的是交给沙箱运行时执行的命令字符串。`command` 必填；`binShell` 可选，`undefined` 时由底层管理器选择；`customConfig` 可选，用来覆盖部分 `SandboxRuntimeConfig`；`abortSignal` 可选，存在时可以中止包装或初始化。沙箱已启用但 `initializationPromise` 不存在时，函数直接抛错，原命令还没有执行。
+
+命令已经启动后的失败，还要区分原因。`BashTool/prompt.ts` 要求模型依据被拒绝的路径、网络目标等证据判断沙箱问题，普通的缺文件、参数错误或缺少依赖不能直接当作绕过理由。允许绕过时，模型可在下一次调用中传 `dangerouslyDisableSandbox: true`，交回普通权限流程；禁止绕过时，应调整获授权的资源范围或返回失败。这是模型结合错误结果发起的新调用，不是 `spawn()` 一失败就自动换到宿主机重跑。
 
 ### 真正启动进程前，还要确定 shell、cwd 和环境
 
@@ -514,12 +601,14 @@ macOS 使用对应的沙箱运行时和日志监控实现。Linux、WSL2 的依�
 | 解析与分类 | `tools/BashTool/bashPermissions.ts` | `bashToolHasPermission()`、`parseForSecurityFromAst()`、`checkEarlyExitDeny()` | 源码已确认 |
 | 子命令与路径 | `tools/BashTool/bashPermissions.ts` | `bashToolCheckPermission()`、`checkPathConstraints()`、`astCommand.redirects` | 源码已确认 |
 | 沙箱决策 | `tools/BashTool/shouldUseSandbox.ts` | `shouldUseSandbox()`、`containsExcludedCommand()` | 源码已确认 |
-| 沙箱默认值 | `utils/sandbox/sandbox-adapter.ts` | `sandbox.enabled`、`allowUnsandboxedCommands`、`failIfUnavailable`、`enabledPlatforms` | 源码已确认 |
+| 沙箱默认值与资源策略 | `utils/sandbox/sandbox-adapter.ts` | `convertToSandboxRuntimeConfig()`、`sandbox.enabled`、`allowUnsandboxedCommands`、`failIfUnavailable`、`enabledPlatforms` | 源码已确认 |
 | 沙箱可用性 | `utils/sandbox/` | `getSandboxUnavailableReason()`、`wrapWithSandbox()`、`initialize()` | 源码已确认 |
-| 进程执行 | `utils/Shell.ts` | `exec()`、`subprocessEnv()`、`resolveProvider` | 源码已确认 |
+| 进程执行 | `utils/Shell.ts`、`utils/shell/bashProvider.ts` | `exec()`、`spawn()`、`subprocessEnv()`、shell 环境快照 | 源码已确认 |
 | 超时与取消 | `utils/ShellCommand.ts` | `ShellCommandImpl.#handleTimeout()`、`#abortHandler()`、`#doKill(SIGTERM)` | 源码已确认 |
 | 输出持久化 | `tools/BashTool/BashTool.tsx` | `EndTruncatingAccumulator`、`MAX_PERSISTED_SIZE`、`getToolResultPath()` | 源码已确认 |
 | 平台分支 | `tools/PowerShellTool/`、`tools/BashTool/` | `powershellSecurity.ts`、sandbox 兜底拒绝 | 源码已确认 |
+
+平台包装另见同版本 `package/cli.js` 第 780—781 行，可搜索 `--ro-bind`、`--unshare-pid` 和 `sandbox-exec`。这些是打包产物中的底层实现，不属于上表 `restored-src/src/` 路径。
 
 ## 设计决策
 
@@ -529,7 +618,9 @@ macOS 使用对应的沙箱运行时和日志监控实现。Linux、WSL2 的依�
 
 诊断和强制也分开。`getSandboxUnavailableReason` 只解释“为什么没启用”；`failIfUnavailable` 和初始化 Promise 缺失才会真正阻止执行。个人环境可以接受提示后降级，企业环境则可以把它们组合成硬边界。
 
-最后，`excludedCommands` 只是路径选择。它让不兼容沙箱的命令走 unsandboxed 路径，最终能否执行仍由权限层和 `allowUnsandboxedCommands` 把关。把它当黑名单，会高估这项配置的保护力。
+`excludedCommands` 只是路径选择。它让不兼容沙箱的命令走 unsandboxed 权限流程；`allowUnsandboxedCommands` 管的是另一条显式绕过分支。要求命令始终受沙箱约束时，必须同时核对排除项和沙箱不可用的处理，不能把一个布尔开关解释成所有出口都已关闭。
+
+资源策略可以通用，资源授权必须来自具体环境。Claude Code 复用运行时来限制本机进程，项目只补充目录和网络范围；多租户服务还要保证会话资源不会交叉。这里无需为每条命令设计一套隔离规则，也不能仅凭入口处的字符串检查代替操作系统约束。
 
 ## 练习，给一条危险命令画出四层护栏
 
