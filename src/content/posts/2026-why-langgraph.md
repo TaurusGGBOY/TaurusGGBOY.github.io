@@ -1,7 +1,7 @@
 ---
 title: "2026 年你为什么选 LangGraph"
 published: 2026-09-02
-updated: 2026-09-11
+updated: 2026-09-15
 description: "什么时候用 LangChain，什么时候直接用 LangGraph？从现成 Agent 循环、自定义业务流程和 checkpoint 的恢复粒度，讲清两者的关系与选型边界。"
 tags: ["langgraph", "langchain", "ai-agent", "agent-framework", "architecture", "decision-making"]
 category: "AI / Architecture"
@@ -18,7 +18,7 @@ imagePosition: "left"
 
 我会在下面这种条件下直接选择 LangGraph：应用已经有自己的执行设计，需要把业务步骤、状态转移和恢复范围交给运行时管理；现成 Agent 循环不能清楚表达它，现有后端也没有承担这些责任。只有长任务、分支、重试或人工审批，还不足以得出这个选择。
 
-LangChain 1.x 的 `create_agent` 本身就运行在 LangGraph 上，能使用持久化、流式输出和人工介入等能力。选型要比较的是：复用现成 Agent 循环，还是自己组织工作流。本文的接口说明以 LangChain 1.x 为背景；本次于 2026-09-11 复核两者的分层与 checkpoint 能力，其他框架保留为候选方向，不构成跨框架性能排名。
+LangChain 1.x 的 `create_agent` 本身就运行在 LangGraph 上，能使用持久化、流式输出和人工介入等能力。选型要比较的是：复用现成 Agent 循环，还是自己组织工作流。本文的接口说明以 LangChain 1.x 为背景；两者的分层与 checkpoint 能力于 2026-09-11 复核，State、Channel 与恢复机制于 2026-09-15 补充核实。其他框架保留为候选方向，不构成跨框架性能排名。
 
 ## 先回答：什么时候用哪一个
 
@@ -79,6 +79,82 @@ assert result["status"] == "pending_review"
 
 如果使用 `create_agent`，middleware 可以在模型或工具调用周围更新状态、重试、调整工具与提示，也可以条件跳转。但公开的 `jump_to` 目标是 `model`、`tools` 和 `end`，不能仅写 `jump_to="合同审核"` 就注册并连接任意业务节点。自定义流程可以包住 Agent，也可以把 Agent 作为 LangGraph 的节点。[Middleware 跳转](https://docs.langchain.com/oss/python/langchain/middleware/custom#agent-jumps) · [自定义工作流](https://docs.langchain.com/oss/python/langchain/multi-agent/custom-workflow)
 
+### State 看起来是字典，运行时管理的是 Channel
+
+前面说节点可以只返回一个字段的更新，这背后有一层值得理解的设计。开发者写的是 State schema，例如：
+
+```python
+from typing import Annotated, TypedDict
+from langgraph.graph.message import add_messages
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+    sql: str
+    retry_count: int
+```
+
+运行时并不把整个 State 当成一个黑盒 dict。对这里的普通状态字段，可以这样理解映射关系：
+
+```text
+Developer View             Runtime View
+
+State                      Channels
+├── messages     ───────▶   ├── messages channel
+├── sql          ───────▶   ├── sql channel
+└── retry_count  ───────▶   └── retry_count channel
+                建图 / compile
+```
+
+`messages`、`sql`、`retry_count` 都是我们自己起的字段名，不是 LangGraph 固定自带的三个 Channel。**State 可以理解为：多个状态 Channel 在某个执行时刻共同形成的逻辑快照。** Channel 则负责各自的值及更新规则；运行时还会创建用于触发节点、等待分支汇合的内部 Channel，所以全部 Channel 并不等于业务字段清单。
+
+严格说，schema 到 Channel 的解析在建图时已经发生，`compile()` 再把它们与节点、边装配成可执行图；图中的箭头是概念映射。这里讨论的是普通 State 字段，源码还会把 managed value 等特殊声明分开处理。本仓库是 Astro 文章站，没有声明或锁定 Python LangGraph 依赖；以下实现细节对照官方文档及本次读取的 [LangGraph 源码快照 `230927fb3a9a`](https://github.com/langchain-ai/langgraph/tree/230927fb3a9ac9b2893a30322b4dfea7cdea9a8f)（其中包版本声明为 `1.2.11`），不把内部结构当作跨版本不变的 API。[State schema 映射源码](https://github.com/langchain-ai/langgraph/blob/230927fb3a9ac9b2893a30322b4dfea7cdea9a8f/libs/langgraph/langgraph/graph/state.py)
+
+#### Reducer 决定更新如何变成下一状态
+
+节点推荐返回 State Update，只说明自己产生了什么：
+
+```python
+return {"messages": [new_message]}
+```
+
+Runtime 收集写入，再交给对应 Channel 合并。这样节点不必复制并返回所有字段，也不应依赖直接修改输入对象来改变共享 State。[State 更新与 reducer](https://docs.langchain.com/oss/python/langgraph/graph-api#reducers)
+
+没有声明 reducer 的普通字段，默认使用 `LastValue`。单次更新可以理解为覆盖；带 reducer 的字段，则把旧值和更新交给函数：
+
+```text
+普通字段：old = 5, update = 10  →  new = 10
+Reducer：new = reducer(old, update)
+```
+
+这里的 `Annotated[list, add_messages]` 会映射到 `BinaryOperatorAggregate`，由这个 Channel 依次把收到的更新交给 reducer。对 messages，概念上就是 `messages = add_messages(old_messages, new_messages)`。这个公式描述常规合并路径；当前实现也支持用显式 `Overwrite` 绕过 reducer，并单独处理初始值。[LastValue 源码](https://github.com/langchain-ai/langgraph/blob/230927fb3a9ac9b2893a30322b4dfea7cdea9a8f/libs/langgraph/langgraph/channels/last_value.py) · [BinaryOperatorAggregate 源码](https://github.com/langchain-ai/langgraph/blob/230927fb3a9ac9b2893a30322b4dfea7cdea9a8f/libs/langgraph/langgraph/channels/binop.py)
+
+`add_messages` 也不等于 `list + list` 或 `list.extend()`：
+
+- 新 ID 的 Message 通常追加到列表末尾。
+- 相同 message ID 的新 Message 会替换已有 Message，适合修正之前的消息，不会只追加一个重复项。
+- `RemoveMessage(id=...)` 表达按 ID 删除；删除不存在的 ID 会报错。当前实现还支持 `REMOVE_ALL_MESSAGES` 特殊标记，清除之前的消息并保留该标记之后的消息。
+- 它会把支持的输入形式转换成 LangChain Message，并为缺少 ID 的消息补 ID。因此去重依据是 ID，不是“文字看起来一样”。
+
+这让消息列表可以表达追加、修订和删除，而不只是越积越长的文本记录。[add_messages 源码](https://github.com/langchain-ai/langgraph/blob/230927fb3a9ac9b2893a30322b4dfea7cdea9a8f/libs/langgraph/langgraph/graph/message.py)
+
+#### 并行时，谁来合并 B 和 C 的结果
+
+考虑一张最小的分叉汇合图，D 等待 B、C 都完成：
+
+```text
+       A
+      / \
+     B   C
+      \ /
+       D
+```
+
+B 返回 `{"messages": [B_msg]}`，C 返回 `{"messages": [C_msg]}`。在同一个 superstep（运行时的一轮执行）里，两个节点读取本轮输入，写入在更新阶段统一应用，不会因为 B 先结束，C 就在本轮自动读到 B 的结果。显式等待两个前驱可以用 `add_edge(["B", "C"], "D")` 表达；汇合条件由图的调度结构负责。[Runtime 的执行阶段](https://docs.langchain.com/oss/python/langgraph/pregel) · [边与汇合的实现](https://github.com/langchain-ai/langgraph/blob/230927fb3a9ac9b2893a30322b4dfea7cdea9a8f/libs/langgraph/langgraph/graph/state.py)
+
+如果 messages 只是普通 `LastValue` 字段，同一步收到两个写入会抛出 `InvalidUpdateError`，并不是“谁最后结束就覆盖谁”。使用 `add_messages` 后，不同 ID 的两条消息可以归并进下一状态。Runtime 决定更新应用顺序，reducer 定义合并结果；同 ID 的修订仍可能依赖顺序，不能把 reducer 理解成自动解决所有业务冲突。[更新收集与应用源码](https://github.com/langchain-ai/langgraph/blob/230927fb3a9ac9b2893a30322b4dfea7cdea9a8f/libs/langgraph/langgraph/pregel/_algo.py)
+
+> Reducer 定义的是“多个更新如何形成下一状态”，而不是 Node 自己直接修改共享 State。
+
 ### LCEL 原生不支持循环编排
 
 **LCEL 原生不提供通用的循环编排构件。** `a | b | c` 表达顺序执行，`RunnableBranch` 负责选择分支，都不能直接声明“校验未通过就回到生成步骤，直到通过或达到次数上限”。LangGraph 则可以用条件边连回前面的节点，显式表达这类循环。[RunnableSequence](https://reference.langchain.com/python/langchain-core/runnables/base/RunnableSequence) · [LangGraph 工作流示例](https://docs.langchain.com/oss/python/langgraph/workflows-agents)
@@ -121,6 +197,103 @@ assert result["approved"] is True
 对于 `create_agent`，checkpointer 保存的是预构建 Agent 图的状态与进度。若一个工具内部依次执行提取、审核和发布，给外层 Agent 配 checkpointer，不代表这三个内部函数之间自动各有检查点。要控制内部恢复范围，需要拆成运行时认识的执行单元，或自行记录进度。外部写入的幂等性也不会由 checkpoint 自动保证。
 
 所以，评审时可以直接问：“如果发布失败，重新执行时，提取和审核会不会再跑？”把三个动作写在同一个普通工具函数里，与把它们拆成图节点或可复用结果的 task，恢复范围并不一样。即使已经保存检查点，如果外部发布成功后、记录结果前进程退出，重试仍可能重复发布；这需要外部接口的幂等机制或业务侧结果核对。
+
+#### Checkpoint 保存的不只是业务字段
+
+前面的恢复边界，进一步看就是：checkpoint 不能简单理解成 `checkpoint = deepcopy(state)`。业务数据只是其中一部分，Runtime 还要知道这张图执行到了哪里。
+
+```text
+Checkpoint 及关联的恢复记录（概念图）
+├── channel_values
+├── channel_versions
+├── versions_seen
+└── execution / runtime metadata、pending writes 等
+```
+
+这张图表示恢复所需信息的组成，不是一个可以原样调用的公开数据结构。当前源码中的几个字段，各自回答不同的问题：
+
+| 信息 | 它回答什么 | 需要保留的边界 |
+| --- | --- | --- |
+| `channel_values` | 各 Channel 在检查点处保存了什么值 | 更准确地说是反序列化后的 Channel 快照；对上面的普通状态 Channel，它包含开发者所见 State 当前值的核心部分，也可能包含内部 Channel 的状态 |
+| `channel_versions` | 各 Channel 当前推进到了哪个版本 | 用于识别新的更新，不是业务值的哈希，也不是每个字段各自简单 `+1` 的公开保证；写入相同业务值也可能推进版本 |
+| `versions_seen` | 执行单元已经见过哪些 Channel 版本 | 当前更新逻辑按任务的节点名记录其触发 Channel 的版本，并参与后续调度；不是逐次记录节点读过的全部业务字段，也不是完整的节点完成日志 |
+
+当前 `Checkpoint` 还包含 `id`、`ts`、格式版本 `v`、`updated_channels` 等字段。`metadata` 与 `pending_writes` 则作为 `CheckpointTuple` 的关联成员返回；保存快照的 `put` 和保存任务写入的 `put_writes` 也是分开的接口。不能把概念图里的执行信息都说成 `Checkpoint` 字典的直接字段。[Checkpoint 与 CheckpointTuple 定义](https://github.com/langchain-ai/langgraph/blob/230927fb3a9ac9b2893a30322b4dfea7cdea9a8f/libs/checkpoint/langgraph/checkpoint/base/__init__.py)
+
+恢复时，Runtime 结合版本记录、内部触发与汇合 Channel、已保存的任务写入和图定义，判断哪些任务还需要运行。面向应用的 `get_state()` 则返回 `StateSnapshot`，提供 `values`、`next`、`tasks` 等观察入口；它和底层 `Checkpoint` 不是同一个结构。[调度源码](https://github.com/langchain-ai/langgraph/blob/230927fb3a9ac9b2893a30322b4dfea7cdea9a8f/libs/langgraph/langgraph/pregel/_algo.py) · [StateSnapshot 文档](https://docs.langchain.com/oss/python/langgraph/checkpointers#statesnapshot-fields)
+
+#### 为什么不能只保存整个 State？其实可以
+
+如果只是 `A → B → C` 的简单串行工作流，完全可以保存：
+
+```text
+full state snapshot + current step
+```
+
+这是一种合理、甚至更简单的 Agent Runtime 实现。恢复时读出业务状态，再从记录的下一步继续即可；前面说的外部副作用幂等性仍需单独处理。
+
+难点出现在刚才那张 `A → B / C → D` 的图：如果 B 已完成、C 尚未完成时进程崩溃，只恢复 `{"messages": [...], "sql": "..."}`，我们只知道数据是什么。仅凭这几个业务字段，不一定能判断 B、C 分别是否完成、哪些更新已经合并、下游是否消费了对应更新，以及下一批应该运行哪些任务。
+
+LangGraph 在这里区分两种保存粒度：完整 checkpoint 位于 superstep 边界；步内已完成任务的输出可以作为 pending writes 关联保存。B 的输出已持久化而 C 失败时，正常故障恢复可以复用 B 的写入，继续处理 C；这不意味着 B 刚返回，系统就已经生成了一个“B、C 都完成”的新 State 快照。若是进程突然退出，能复用什么仍取决于哪些记录已落盘及所用持久化模式，不能承诺所有刚完成的工作都不会重跑。[Superstep 与 pending writes](https://docs.langchain.com/oss/python/langgraph/checkpointers#super-steps) · [持久化模式](https://docs.langchain.com/oss/python/langgraph/checkpointers#durability-modes)
+
+当然，我们也可以把这些执行信息全塞进一个大 State：
+
+```text
+business state
++ executed nodes
++ pending tasks
++ versions
++ interrupt metadata
+```
+
+技术上完全能实现。但做到这里，就已经自己实现了一套 Runtime State。LangGraph 要处理并行执行、fan-out / fan-in、reducer、interrupt / resume、checkpoint recovery 和增量调度，因此需要把业务值和图执行进度一起管理。
+
+> LangGraph 不是因为“保存整个 State 是错误的”才使用 Channel。真正的问题是：它需要恢复的不只是业务数据，还包括一个执行到一半的数据流计算。
+
+#### 把 State、Channel、Checkpoint 连起来看
+
+```text
+Developer
+   │
+   ▼
+State Schema
+┌──────────────────────────────────┐
+│ messages / sql / retry_count     │
+└──────────────────────────────────┘
+   │ 建图 / compile / runtime mapping
+   ▼
+Channels
+┌──────────────────────────────────┐
+│ messages    + add_messages        │
+│ sql         + LastValue           │
+│ retry_count + LastValue           │
+│ 以及触发、汇合等内部 Channel      │
+└──────────────────────────────────┘
+   │ 接收 node writes
+   ▼
+Reducer / Channel Update
+   │
+   ▼
+New Channel Values / Versions
+   │ superstep 边界
+   ▼
+Checkpoint + 关联记录
+├── values
+├── versions
+├── execution progress
+└── metadata / pending writes
+    （pending writes 也可在步内保存）
+```
+
+这仍是一张职责图，不要求所有存储后端采用相同物理布局。记住三句话就够了：
+
+> State：开发者定义“系统知道什么”。
+>
+> Channel：Runtime 根据 schema 等声明定义“这些状态字段如何接收和合并更新”。
+>
+> Checkpoint：持久化“当前状态 + 恢复执行所需的信息”，其中一部分由关联记录承载。
+
+如果自己实现的是 `LLM → Tool → LLM → Tool → Finish` 这样的简单串行 Agent，没有复杂并行、fan-in、interrupt / resume 等要求，`full state snapshot + current step` 通常已经足够，不需要为了模仿 LangGraph 实现 Channel Version 系统。只有当 Runtime 需要可靠处理并行图、增量更新和复杂恢复时，这层抽象的价值才明显。
 
 ### 真正值得比较的是替换后的维护责任
 
