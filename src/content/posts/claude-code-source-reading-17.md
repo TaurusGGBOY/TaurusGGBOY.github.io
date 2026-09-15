@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读17：长会话如何继续运行"
 published: 2026-07-24T16:47:04+08:00
-updated: 2026-09-10
+updated: 2026-09-15
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -872,6 +872,29 @@ boundary 也承担程序状态的交接。摘要不保留原来的 `tool_referen
 > 证据，`restored-src/src/services/compact/compact.ts:344-365,603-612,737-749,1021-1028`（保留区间、工具状态与全量返回值）；`restored-src/src/screens/REPL.tsx:4943-4953`（局部压缩的前后缀顺序）；`prompt.ts:345-355`（transcript 路径和续接说明）。
 
 ![压缩后的 boundary、摘要、保留消息与附件重新接回主循环](/images/posts/claude-code-source-reading-17/17-compaction-rehydration-detail-handdrawn.png)
+
+#### 下一次请求怎样知道从哪里开始？
+
+**起点是一条 `compact_boundary` 消息。** 刚完成压缩时，`query()` 用 `buildPostCompactMessages(compactionResult)` 构造新数组，直接赋给 `messagesForQuery`；后续请求则调用 `getMessagesAfterCompactBoundary(messages)`，从内存数组末尾往前找最近的边界。找到后的截取代码只有两行：
+
+```ts
+const boundaryIndex = findLastCompactBoundaryIndex(messages)
+const sliced = boundaryIndex === -1 ? messages : messages.slice(boundaryIndex)
+```
+
+`boundaryIndex` 是本次扫描临时算出的下标；`-1` 表示没有边界，保留全部输入消息。识别条件是 `type === 'system' && subtype === 'compact_boundary'`。所以，即使全屏 REPL 还留着旧消息供滚动查看，请求也只取最后一个边界及之后的内容，无需每轮重读 JSONL。
+
+随后，`deps.callModel` 指向的 `queryModelWithStreaming()` 进入 `queryModel()`，由 `normalizeMessagesForAPI()` 去掉边界这条 system 消息。摘要以 `type: 'user'`、`isCompactSummary: true` 保存，正文在 `message.content`；`isVisibleInTranscriptOnly` 控制显示，并不阻止摘要发送。最后 `addCacheBreakpoints()` 把内部消息转换成 API 的 `role/content`，交给 `anthropic.beta.messages.create()`。
+
+```text
+内存 messages → 最后一个 compact_boundary 及之后
+             → 移除边界本身，保留摘要、保留片段与后续内容
+             → API messages
+```
+
+退出后，这个临时下标当然会丢失。持久化的线索在 JSONL：边界的 `parentUuid` 为 `null`，摘要接在边界后面；resume 沿 UUID 父链恢复到这个新根就停止。有保留片段时还需按 `preservedSegment` 接链，具体见[第 20 篇](/posts/claude-code-source-reading-20/)。这里说的是产生摘要边界的 compact；前面的 microcompact 缓存编辑不需要建立同样的新根。
+
+> 证据：`restored-src/src/query.ts:365,528-536,659-660`；`src/query/deps.ts:33-38`；`src/utils/messages.ts:4608-4655,2057-2074`；`src/services/api/claude.ts:752-780,1266,1699-1709,1822-1833,3063-3112`；`src/utils/sessionStorage.ts:1039-1042`。以上为源码确认的调用与字段。
 
 #### 完整压缩之外，还有手动的局部变体
 

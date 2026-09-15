@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读20：如何恢复、续接与分叉对话"
 published: 2026-07-24T16:47:07+08:00
-updated: 2026-08-26
+updated: 2026-09-15
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -434,6 +434,45 @@ export function buildConversationChain(
 **参数说明，** `messages` 以 UUID 为 key；`leafMessage` 必须来自这个集合对应的会话。`parentUuid` 为 `null` 时到达链根；父 UUID 在 Map 中找不到时，`messages.get()` 返回 `undefined`，遍历同样终止。遇到环不会抛弃已收集的部分链，而是记录错误后返回部分 transcript。
 
 这一层的目标是重建当前分支，JSONL 的追加顺序提供时间线，`parentUuid` 提供拓扑；两者用途不同。
+
+### compact 后再 resume，为什么不会把旧历史全部带回来？
+
+**边界信息保存在 JSONL 的消息链里。** `compactConversation()` 返回 `CompactionResult`，其中摘要是 `summaryMessages` 里的 user 消息，带 `isCompactSummary: true`，文本放在 `message.content`。REPL 的 `useLogMessages()` 把它们交给 `recordTranscript()`，再进入前文的追加写入队列。日志中另有 `type: 'summary'`、`leafUuid` 的会话摘要记录，加载到独立的 `summaries` Map；它与给模型续接的 user 摘要用途不同。
+
+关键发生在 `insertMessageChain()`。写入边界时，它设置：
+
+```ts
+parentUuid: isCompactBoundary ? null : effectiveParentUuid,
+logicalParentUuid: isCompactBoundary ? parentUuid : undefined,
+```
+
+普通完整压缩后，文件里的关系可以简化为下面这样。箭头表示沿 `parentUuid` 找父节点，字母是示意 UUID：
+
+```text
+旧消息 A ← 旧消息 B                 原 JSONL 行仍然存在
+
+边界 C ← 摘要 S ← 新消息 D          C.parentUuid = null
+  └─ logicalParentUuid = B          只保留旧历史的逻辑关联
+```
+
+重启后，`loadConversationForResume()` 按 session ID 进入 `getLastSessionLog()`；从列表选择则可能经 `loadFullLog()`。两条路径都由 `loadTranscriptFile()` 读取 JSONL、按 UUID 建表，再选中要恢复的末端消息。前文的 `buildConversationChain()` 只沿 `parentUuid` 回溯，因此从 D 找到 S、C，遇到 `null` 停止，不沿 `logicalParentUuid` 走回 B。**旧行仍在文件中，但不属于这条恢复后的上下文链。** compact 的正常写入路径使用 `appendFile`，没有原地删除或截断旧 JSONL。
+
+有一个需要单独处理的情况：压缩保留了部分旧消息。旧 UUID 会被写入去重跳过，磁盘上的父节点仍是旧值。因此边界额外保存 `compactMetadata.preservedSegment` 的三个字段：`headUuid` 是保留片段第一条，`tailUuid` 是最后一条，`anchorUuid` 是新链中应接在片段前面的消息。保留尾部时 anchor 通常是最后一条摘要；保留前部时则是边界。
+
+加载器的 `applyPreservedSegmentRelinks()` 先从 tail 沿旧父链走到 head，再在内存 Map 中把 head 接到 anchor，把 anchor 的其他子节点接到 tail，最后移除边界前未保留的消息。它不改写磁盘旧行；若 tail→head 无法连通，则记录异常并跳过这次接链与裁剪。
+
+```text
+JSONL → loadTranscriptFile / parseJSONL → UUID Map
+      → 有 preservedSegment 则在内存接链
+      → buildConversationChain：沿 parentUuid 到新根
+      → 反序列化修复 → REPL initialMessages → query()
+      → 按最后一个 compact_boundary 截取
+      → normalizeMessagesForAPI 移除边界 → API messages
+```
+
+源码里确实还能搜到 `boundaryStartOffset`。它由大文件读取函数 `readTranscriptForLoad()` 当场扫描计算，用于跳过压缩前正文并补读早期元数据；遇到普通边界时清空的是内存输出缓冲区，文件以 `'r'` 打开。有 `preservedSegment` 时需要保留旧行供接链，不能直接跳过。这个 offset 是读取优化，真正持久化的定位依据仍是 **compact 边界、UUID 父链，以及可选的保留片段元数据**。
+
+> 证据：`restored-src/src/services/compact/compact.ts:299-310,349-366,598-624`；`src/hooks/useLogMessages.ts:62-78`；`src/utils/sessionStorage.ts:634-641,1039-1068,1408-1450,1839-1955,2069-2092,2950-3005,3658-3660,3867-3904`；`src/utils/sessionStoragePortable.ts:640-645,717-752`；`src/utils/conversationRecovery.ts:456-568`；`src/query.ts:365`；`src/utils/messages.ts:2057-2074,4608-4655`。
 
 ### resume｜加载消息只是第一半，恢复状态才是第二半
 
