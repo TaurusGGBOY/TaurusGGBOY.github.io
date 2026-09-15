@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 900" role="img" aria-labelledby="title desc">
+  <title id="title">Agent 自进化的三个对象</title>
+  <desc id="desc">模型和运行系统共同产生任务产物。环境反馈可以用于更新模型、改造运行系统或搜索更好的产物。</desc>
+  <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 8 4 0 8" fill="none" stroke="#64756f" stroke-width="1.5"/></marker></defs>
+  <rect width="1000" height="900" rx="28" fill="#f7f5ed"/>
+  <g font-family="system-ui, PingFang SC, Microsoft YaHei, sans-serif" fill="#233c36">
+    <text x="55" y="70" font-size="34" font-weight="700">经验，可以改变三个不同的对象</text>
+    <text x="55" y="112" font-size="23" fill="#586b64">Model + Harness → Agent → Artifact</text>
+    <rect x="55" y="154" width="745" height="162" rx="20" fill="#e0ece4"/>
+    <text x="82" y="198" font-size="29" font-weight="700">01  MODEL · 模型学习</text>
+    <text x="82" y="245" font-size="26">奖励 / 自博弈 / 自监督 → 参数或快速状态</text>
+    <text x="82" y="284" font-size="23" fill="#586b64">R1-Zero · Absolute Zero · TTT</text>
+    <rect x="55" y="350" width="745" height="162" rx="20" fill="#e1e8f0"/>
+    <text x="82" y="394" font-size="29" font-weight="700">02  HARNESS · 运行系统改造</text>
+    <text x="82" y="441" font-size="26">经验 → 记忆 / 工具 / 工作流 / 框架代码</text>
+    <text x="82" y="480" font-size="23" fill="#586b64">ACE · Alita · DGM · Hyperagents</text>
+    <rect x="55" y="546" width="745" height="162" rx="20" fill="#f1e4d0"/>
+    <text x="82" y="590" font-size="29" font-weight="700">03  ARTIFACT · 产物搜索</text>
+    <text x="82" y="637" font-size="26">候选 → 执行 / 比较 → 新候选</text>
+    <text x="82" y="676" font-size="23" fill="#586b64">AlphaEvolve · FARS</text>
+    <rect x="55" y="764" width="890" height="85" rx="20" fill="#314d43"/>
+    <text x="86" y="818" font-size="28" fill="#fff">环境反馈：执行结果、实验、奖励与评价</text>
+    <path d="M870 764V235" fill="none" stroke="#64756f" stroke-width="3"/>
+    <path d="M870 235H810" fill="none" stroke="#64756f" stroke-width="3" marker-end="url(#arrow)"/>
+    <path d="M870 431H810" fill="none" stroke="#64756f" stroke-width="3" marker-end="url(#arrow)"/>
+    <path d="M870 627H810" fill="none" stroke="#64756f" stroke-width="3" marker-end="url(#arrow)"/>
+  </g>
+</svg>

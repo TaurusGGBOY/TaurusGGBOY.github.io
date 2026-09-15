@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 920" role="img" aria-labelledby="title desc">
+  <title id="title">一次经验如何流向后续改进</title>
+  <desc id="desc">任务轨迹可以保留为产物候选，提炼为记忆与工具，筛选为训练样本，或用于改进搜索机制。不同更新采用不同节奏。</desc>
+  <rect width="1000" height="920" rx="28" fill="#f7f5ed"/>
+  <g font-family="system-ui, PingFang SC, Microsoft YaHei, sans-serif" fill="#233c36">
+    <text x="55" y="70" font-size="34" font-weight="700">一次执行，四种可能的去向</text>
+    <rect x="55" y="107" width="890" height="90" rx="18" fill="#314d43"/>
+    <text x="86" y="164" font-size="29" fill="#fff">输入 → 行动 → 工具结果 → 产物与反馈</text>
+    <path d="M500 198V227 M130 227H860 M130 227V255 M370 227V255 M610 227V255 M860 227V255" fill="none" stroke="#82968a" stroke-width="3"/>
+    <text x="55" y="280" font-size="23" fill="#586b64">按复用范围与更新成本选择，不必同时更新所有层</text>
+    <rect x="55" y="316" width="890" height="110" rx="18" fill="#f1e4d0"/>
+    <text x="80" y="359" font-size="29" font-weight="700">保留产物候选</text>
+    <text x="80" y="399" font-size="25">正确的代码、实验结果 → 下一轮搜索的起点</text>
+    <rect x="55" y="450" width="890" height="110" rx="18" fill="#e1e8f0"/>
+    <text x="80" y="493" font-size="29" font-weight="700">沉淀记忆与工具</text>
+    <text x="80" y="533" font-size="25">适用条件、操作步骤、程序 → 后续任务检索与调用</text>
+    <rect x="55" y="584" width="890" height="110" rx="18" fill="#e0ece4"/>
+    <text x="80" y="627" font-size="29" font-weight="700">积累训练样本</text>
+    <text x="80" y="667" font-size="25">经筛选的轨迹与奖励 → 模型更新后的行动倾向</text>
+    <rect x="55" y="718" width="890" height="110" rx="18" fill="#eae2ed"/>
+    <text x="80" y="761" font-size="29" font-weight="700">改进搜索机制</text>
+    <text x="80" y="801" font-size="25">候选与失败的记录 → 怎样提出、选择下一次改动</text>
+    <text x="55" y="881" font-size="23" fill="#586b64">更新节奏可以不同：任务中适应、任务后整理、分阶段训练</text>
+  </g>
+</svg>
