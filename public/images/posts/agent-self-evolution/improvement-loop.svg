@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">让经验进入下一次行动</title>
+  <desc id="desc">执行任务后收集证据，提出候选修改，与固定基线对比。有效修改进入常用版本，无效修改撤回或继续修订。后续任务产生新反馈。</desc>
+  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5L0 10" fill="none" stroke="#326d68" stroke-width="1.6"/></marker></defs>
+  <rect width="1200" height="760" rx="28" fill="#f7f4ec"/>
+  <g font-family="PingFang SC, Microsoft YaHei, sans-serif" fill="#263a3b">
+    <text x="64" y="76" font-size="34" font-weight="700">让经验进入下一次行动</text>
+    <text x="64" y="115" font-size="21" fill="#536767">每项修改都是待检验的假设；效果决定是否保留</text>
+    <g fill="#fffdf8" stroke="#b3c4bd" stroke-width="2">
+      <rect x="64" y="176" width="300" height="136" rx="18"/>
+      <rect x="450" y="176" width="300" height="136" rx="18"/>
+      <rect x="836" y="176" width="300" height="136" rx="18"/>
+      <rect x="836" y="404" width="300" height="146" rx="18"/>
+      <rect x="450" y="404" width="300" height="146" rx="18" fill="#e4eee8"/>
+      <rect x="64" y="404" width="300" height="146" rx="18"/>
+    </g>
+    <g font-size="27" font-weight="700">
+      <text x="90" y="221">执行任务</text><text x="476" y="221">保留证据</text><text x="862" y="221">提出候选修改</text>
+      <text x="862" y="449">与固定基线比较</text><text x="476" y="449">保留有效修改</text><text x="90" y="449">用于后续任务</text>
+    </g>
+    <g font-size="21" fill="#536767">
+      <text x="90" y="261">目标、环境、操作与结果</text>
+      <text x="476" y="261">报错、状态与成功条件</text>
+      <text x="862" y="261">记忆、技能或执行流程</text>
+      <text x="862" y="486">完成情况、退步与成本</text>
+      <text x="862" y="520">模型与任务预算可比较</text>
+      <text x="476" y="486">纳入常用版本</text>
+      <text x="476" y="520">保留证据与撤回路径</text>
+      <text x="90" y="486">检查经验是否适用</text>
+      <text x="90" y="520">记录实际效果</text>
+    </g>
+    <g fill="none" stroke="#326d68" stroke-width="3" marker-end="url(#arrow)">
+      <path d="M364 244H440"/><path d="M750 244H826"/><path d="M986 312V394"/>
+      <path d="M836 474H760"/><path d="M450 474H374"/><path d="M214 404V322"/>
+      <path d="M986 550V632H1170V244H1146" stroke-dasharray="7 6"/>
+    </g>
+    <text x="225" y="365" font-size="19" fill="#326d68">新反馈</text>
+    <text x="770" y="453" font-size="19" fill="#326d68">有效</text>
+    <text x="668" y="639" font-size="21" fill="#8c613a">无效或退步：撤回 / 修订候选</text>
+    <text x="64" y="708" font-size="20" fill="#536767">本文工程示意 · 选择候选的验证数据，与最终报告表现的测试数据分开</text>
+  </g>
+</svg>
