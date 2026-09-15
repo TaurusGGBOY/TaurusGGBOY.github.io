@@ -16,19 +16,22 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aliyun]
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: site
     env:
-      # Keep install networking conservative across hosted and fallback runners.
+      # Keep install networking conservative on the persistent self-hosted runner.
       NODE_OPTIONS: --dns-result-order=ipv4first
+      npm_config_store_dir: /var/cache/pnpm/store
       npm_config_registry: https://registry.npmmirror.com/
       npm_config_fetch_retries: "5"
       npm_config_fetch_retry_factor: "2"
       npm_config_fetch_retry_mintimeout: "2000"
       npm_config_fetch_retry_maxtimeout: "15000"
       npm_config_fetch_timeout: "120000"
+      PLAYWRIGHT_BROWSERS_PATH: /var/cache/playwright
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,12 +47,17 @@ jobs:
           version: 9.14.4
           run_install: false
 
-      - name: Enable pnpm cache
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: pnpm
-          cache-dependency-path: site/pnpm-lock.yaml
+
+      - name: Verify persistent package stores
+        run: |
+          test -d "$npm_config_store_dir"
+          test -d "$PLAYWRIGHT_BROWSERS_PATH"
+          echo "pnpm store: $(pnpm store path --silent)"
+          echo "Playwright browsers: $PLAYWRIGHT_BROWSERS_PATH"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
@@ -90,7 +98,8 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aliyun]
+    timeout-minutes: 10
     needs: build
     steps:
       - name: Deploy to GitHub Pages
