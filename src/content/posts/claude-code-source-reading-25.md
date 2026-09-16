@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读25：多个智能体如何协作与协调"
 published: 2026-07-24T16:47:12+08:00
-updated: 2026-08-04
+updated: 2026-09-16
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -296,6 +296,36 @@ export type ClaimTaskOptions = {
 
 锁只解决单个临界区竞争。比如 `blockTask()` 要分别更新 A 的 `blocks` 和 B 的 `blockedBy`；`TaskUpdate` 先改 owner，再写 assignment mailbox。进程若在两个步骤之间退出，磁盘上可能出现短暂不一致。这就是图中"files + locks, not a transaction"的含义。
 
+#### 创建和领取之后，谁保证任务按描述执行
+
+假设金额单位工单已经拆成“修复换算逻辑”和“补充回归测试”两项任务，成员也已经领取。任务表能保存这些要求，但下一步读哪个文件、改哪段代码、运行什么测试，仍由模型在执行循环中选择。`TaskCreate` 不会把 `description` 编译成执行步骤，也不会因为创建了一条记录就启动 subagent。单会话同样可以使用这套任务工具。
+
+工具提示词承担了第一层约束。`TaskGetTool/prompt.ts` 要求模型在开始前读取完整描述、检查依赖；`TaskUpdateTool/prompt.ts` 要求开始时标记 `in_progress`，完全完成后才标记 `completed`，测试失败、实现不完整或存在未解决错误时继续保持 `in_progress`。这些文字进入模型上下文，指导它选择动作；`TaskUpdate` 本身不会因为提示词里写了“测试必须通过”，就自动替调用方运行测试。
+
+第二层是执行过程中的提醒。`getTaskReminderAttachments()` 会读取磁盘任务列表，生成 `task_reminder`；`utils/messages.ts` 再把它转换成带 `<system-reminder>` 的 meta user message。当前代码要求距最近一次 `TaskCreate` / `TaskUpdate`、距最近一次任务提醒都达到 10 个计数的 assistant 消息，才进入提醒分支；thinking 消息不计数。这不是每 10 次工具调用必定提醒：任务功能未启用、`USER_TYPE === 'ant'`、工具集中有 `SendUserMessage`、缺少 `TaskUpdate` 或没有消息历史时，都会跳过。
+
+这里的“任务摘要”只是已有字段的精简展示，没有额外调用模型或 subagent 做总结。标题 `subject` 在创建或更新任务时已经由调用方提供，提醒生成时直接执行下面的字段拼接，
+
+```ts
+const taskItems = attachment.content
+  .map(task => `#${task.id}. [${task.status}] ${task.subject}`)
+  .join('\n')
+```
+
+例如，它会得到 `#2. [in_progress] 补充金额换算回归测试`。这段列表不包含完整 `description`，也不根据文件修改、测试输出或执行记录重新推导进度；模型需要完整要求时再调用 `TaskGet`。提醒文案本身还明确允许在不适用时忽略，所以它帮助模型重新看见待办，并不强制下一步选择哪一个工具。
+
+> 证据，`restored-src/src/utils/attachments.ts` 的 `getTaskReminderTurnCounts()`、`getTaskReminderAttachments()` 与 `TODO_REMINDER_CONFIG`；`restored-src/src/utils/messages.ts` 的 `case 'task_reminder'`。上面代码块是字段拼接的原文。
+
+第三层才是可以阻止完成状态写入的检查点。模型调用 `TaskUpdate({ taskId: '2', status: 'completed' })` 时，如果原状态还不是 `completed`，工具会先执行 `executeTaskCompletedHooks()`。Hook 返回 `blockingError` 后，工具返回 `success: false`，这次更新不会写入完成状态。没有相应的阻断检查时，完成判断仍主要来自调用模型。
+
+`TaskUpdate` 的 `status` 可省略，此时不请求状态变更；`pending`、`in_progress`、`completed` 是保存的状态，`deleted` 则走删除任务文件的分支。提示词给出的 `pending → in_progress → completed` 是推荐工作顺序，当前更新实现并没有要求必须逐级经过这些状态。完成 Hook 的触发条件是“请求变为 completed，且原状态不同”，重复写入已有的 `completed` 不会在这条分支重新验收。
+
+对于这张金额单位工单，可以自行配置完成 Hook 检查相关测试是否通过。这是可加入的验收策略，不能写成系统默认已执行的测试。Hook 只覆盖它实际检查的条件，也不会逐步证明此前每次文件修改都符合 `description`。具体阻断返回如何被调用方处理，见[第 18 篇的 TaskCompleted 说明](/posts/claude-code-source-reading-18/#taskcompleted完成检查可以拒绝状态更新)。
+
+因此，文件锁保证的是任务记录在特定临界区内的并发更新，`claimTask()` 检查的是领取时的 owner 与依赖，提示词和提醒帮助模型遵循要求，完成 Hook 则提供可配置的验收点。**任务记录能够可靠保存，不等于任务描述已经被可靠兑现。** 任务状态、实际产物和验证结果仍需要一起看。
+
+> 证据，`restored-src/src/tools/TaskGetTool/prompt.ts`、`restored-src/src/tools/TaskUpdateTool/prompt.ts`、`restored-src/src/tools/TaskUpdateTool/TaskUpdateTool.ts` 的 `call()`；`restored-src/src/utils/tasks.ts` 的 `claimTask()` 与 `updateTask()`。
+
 ### 第四层｜Mailbox 同时传业务消息和控制协议
 
 Task list 适合保存稳定状态，不适合表达"请多看一下这个边界""停止当前方向""你的 plan 已批准"。这些增量信息进入 Mailbox。`SendMessageTool` 同时接受普通字符串与结构化控制消息，
@@ -415,6 +445,7 @@ Coordinator mode 与 Agent Teams 使用独立开关。`isCoordinatorMode()` 同�
 | 团队创建 | `tools/TeamCreateTool/TeamCreateTool.ts` | `TeamCreateTool.call()`、`generateUniqueTeamName()` | 源码已确认 |
 | 成员 spawn | `utils/swarm/` | `handleSpawn()`、`handleSpawnInProcess()`、`handleSpawnSplitPane()` | 源码已确认 |
 | 协作任务表 | `utils/tasks.ts` | `getTaskListId()`、`createTask()`、`claimTask()`、`TaskCreateTool.call()` | 源码已确认 |
+| 执行提醒与完成检查 | `utils/attachments.ts`、`utils/messages.ts`、`tools/TaskUpdateTool/` | `getTaskReminderAttachments()`、`task_reminder`、`executeTaskCompletedHooks()` 调用点 | 源码已确认 |
 | 信箱与协议 | `tools/SendMessageTool/`、`utils/swarm/` | `StructuredMessage()`、`getTeammateMailboxAttachments()`、`waitForNextPromptOrShutdown()` | 源码已确认 |
 | Coordinator 过滤 | `utils/toolPool.ts` | `applyCoordinatorToolFilter()`、`getCoordinatorSystemPrompt()` | 源码已确认 |
 | 收敛与删除 | Team/teammate 相关模块 | `unassignTeammateTasks()`、`TeamDeleteTool.call()`、`idle_notification` | 调用关系确认 |

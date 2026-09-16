@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读23：前台、后台与状态机如何协作"
 published: 2026-07-24T16:47:10+08:00
-updated: 2026-08-04
+updated: 2026-09-16
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -431,7 +431,13 @@ export async function stopTask(taskId: string, context: StopTaskContext) {
 
 `TodoWriteTool/prompt.ts` 先给当前 coding session 一个轻量任务表：任务达到三步、存在明显复杂度、用户明确要求分解或有多个独立任务时才使用；开始执行后立刻把一个任务标成 `in_progress`，完成后改成 `completed`，其余保持 `pending`。字段也有写作约束，`content` 用祈使式，`activeForm` 用现在进行时。它与 Plan mode、记忆文件分别解决短期执行视图、审批前计划和长期事实沉淀。
 
-V2 的 `TaskCreate/Get/List/Update/Stop` prompt 把同一协议扩展到持久任务：Create 负责描述任务和团队分配，Get 读取完整描述与依赖，List 只展示可用的 pending、未拥有且未阻塞任务，Update 只在真正完成或删除时收束状态，Stop 按任务 ID 取消后台执行。prompt 规定模型什么时候改变状态；`Task`、AppState、output file 和终态通知才是实际持久化与回收边界。
+协作待办的 `TaskCreate` / `TaskGet` / `TaskList` / `TaskUpdate` 使用 JSON 任务记录。Create 保存标题和描述，初始状态为 `pending`、owner 为空；分派由后续更新 owner 完成。Get 读取完整要求与依赖，List 返回非内部任务的摘要，包含不同状态和 owner，并从 `blockedBy` 中移除已经完成的依赖。提示词要求模型优先寻找可领取的任务，这不等于 List 的实现只返回 pending、无人领取且未阻塞的任务。
+
+模型继续选择 Read、Edit、Bash 等工具完成工作，再用 Update 修改任务状态。任务提醒只是把已有的 ID、状态和标题拼接回上下文，没有启动 subagent 生成摘要。`TaskCompleted` Hook 可以在请求变为 `completed` 时阻止状态更新，但工具默认不会自动证明任务描述已被兑现。创建、提醒与验收的完整路径见[第 25 篇](/posts/claude-code-source-reading-25/#创建和领取之后谁保证任务按描述执行)。
+
+`TaskStop` 则属于前面讨论的运行时任务路径，负责取消后台执行实例；它不负责关闭这些协作待办。运行时 Task 的 AppState、output file 和终态通知，与协作任务的 JSON 记录需要分别理解。
+
+> 证据，`restored-src/src/tools/TaskCreateTool/TaskCreateTool.ts`、`tools/TaskListTool/TaskListTool.ts`、`tools/TaskUpdateTool/TaskUpdateTool.ts`、`utils/messages.ts` 的 `task_reminder` 分支；运行时取消路径见本篇“取消”一节。
 
 ## 源码映射
 

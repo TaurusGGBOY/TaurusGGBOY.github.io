@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读18：生命周期机制如何横切整个运行时"
 published: 2026-07-24T16:47:05+08:00
-updated: 2026-08-04
+updated: 2026-09-16
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -52,7 +52,7 @@ Hook 的贡献在于把观察与控制接到生命周期边界；具体控制权
 1. **27 个生命周期事件与八类分界**，输入、工具与权限、会话、压缩、Agent/团队任务、通知、MCP 交互、配置/目录/文件监听。
 2. **事件，matcher，执行器三层配置模型**，`HooksSchema` 以事件为 key、matcher 为中间层、Hook 为最内层。
 3. **输入输出协议**，公共会话坐标（`createBaseHookInput`）+ 事件专属字段；退出码、JSON 公共字段、`hookSpecificOutput` 三级表达力。
-4. **同步/异步执行模型与四个关键事件的控制权边界**。
+4. **同步/异步执行模型与五个关键事件的控制权边界**。
 
 ## 问题
 
@@ -425,7 +425,7 @@ z.object({
 
 因此，选择同步还是异步会改变控制能力。需要 `allow / ask / deny`、`updatedInput` 或当场阻止的 Hook 必须同步等待；只做日志、通知、上报的 Hook 才适合异步。`asyncRewake` 适合"先让主流程走，后台发现问题后再要求 Agent 处理"的场景，但无法提供事务回滚。
 
-### 四个关键事件，分别能改变什么
+### 五个关键事件，分别能改变什么
 
 #### PreToolUse｜工具执行前的最后一道扩展门
 
@@ -461,6 +461,16 @@ command Hook 退出码 2 或 JSON block 会形成 blocking error。`handleStopHo
 
 这两个分支看起来接近，实际方向相反，blocking feedback 让 Agent 继续修正，`continue: false` 阻止继续。写 Stop Hook 时若不区分它们，很容易得到和名字直觉相反的行为。
 
+#### TaskCompleted｜完成检查可以拒绝状态更新
+
+协作任务的完成也有一个检查点。模型调用 `TaskUpdate`，请求把原本尚未完成的任务改为 `completed` 时，`TaskUpdateTool.call()` 先运行 `executeTaskCompletedHooks()`。输入包括任务 ID、标题、描述，以及可选的成员名和团队名，供 Hook 决定检查什么。
+
+如果返回结果包含 `blockingError`，调用方会收集错误并返回 `success: false`，在写入本次任务字段更新之前结束。因此，这里阻止的是一次完成状态更新；模型会在工具结果中收到失败原因。它与 Stop Hook 驱动 query loop 继续运行的路径不同，也不会回滚已经完成的文件修改。
+
+这个 Hook 可以用于自行配置的测试或产物检查，但 `TaskUpdate` 默认不会自动运行这些检查。没有阻断结果时，工具继续写入状态；原状态已经是 `completed` 的重复更新不会再次进入完成 Hook 分支。**标记完成是否可信，取决于调用模型的判断和实际配置的验收条件。** 任务提示词、执行提醒与这层检查如何配合，见[第 25 篇](/posts/claude-code-source-reading-25/#创建和领取之后谁保证任务按描述执行)。
+
+> 证据，`restored-src/src/tools/TaskUpdateTool/TaskUpdateTool.ts` 的 `call()`，以及 `restored-src/src/utils/hooks.ts` 的 `executeTaskCompletedHooks()`。后者生成事件输入，前者决定阻断结果能否阻止状态写入。
+
 ### 失败默认值｜大多数 Hook 错误不会拖垮主任务
 
 共享执行器把结果分为 `'success' | 'blocking' | 'non_blocking_error' | 'cancelled'`。command 的普通非零码、HTTP 非 2xx、JSON 校验失败、prompt/agent 执行异常，通常变成 non-blocking attachment；只有明确退出码 2、block/deny 或事件专属阻断字段才进入控制分支。
@@ -485,7 +495,7 @@ command Hook 退出码 2 或 JSON block 会形成 blocking error。`handleStopHo
 | 执行器 | `executeHooks()` / `createCombinedAbortSignal()` | `src/utils/hooks.ts` | [source] 已确认 |
 | 输出 Schema | 同步 JSON 公共字段 / `hookSpecificOutput` | `src/types/hooks.ts` | [source] 已确认 |
 | 权限聚合 | `deny > ask > allow` | `src/utils/hooks.ts` | [source] 已确认 |
-| 四个关键事件 | `runPreToolUseHooks()` / `executePreCompactHooks()` / `handleStopHooks()` | `src/utils/hooks.ts` | [source] 已确认 |
+| 五个关键事件 | `runPreToolUseHooks()` / `executePreCompactHooks()` / `handleStopHooks()` / `executeTaskCompletedHooks()` | `src/utils/hooks.ts`；`TaskUpdateTool.call()` 解释完成阻断 | [source] 已确认 |
 
 > 证据说明，上表全部条目都来自 2.1.88 还原源码的静态确认。两类边界需要区分，workspace trust、managed-only、`CLAUDE_CODE_SIMPLE`、具体 settings 内容属于 [runtime]，决定"哪些 Hook 在哪些环境有资格运行"；27 个事件按八类的归类是本文的 [inference] 整理，事件集合本身是 [source] 常量。
 
