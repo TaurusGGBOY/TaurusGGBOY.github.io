@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="760" viewBox="0 0 1100 760" role="img" aria-labelledby="title desc">
+  <title id="title">按页面与区域选择 PDF 解析路径</title>
+  <desc id="desc">可靠文字层使用原生提取；简单扫描文字使用轻量 OCR；复杂扫描区域使用专用 VLM。汇总时保留页码、位置与结构，检查完整性和错误后进入检索。</desc>
+  <defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#58727d" stroke-width="1.5"/></marker></defs>
+  <rect width="1100" height="760" rx="28" fill="#f7f5ef"/>
+  <g font-family="system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle" fill="#203d4b">
+    <text x="550" y="61" font-size="30" font-weight="700">先判断页面，再决定识别路径</text>
+    <text x="550" y="98" font-size="19" fill="#5e727a">建议架构 · 混合 PDF 可以按区域分流</text>
+    <rect x="300" y="135" width="500" height="76" rx="16" fill="#203d4b"/>
+    <text x="550" y="166" font-size="24" fill="white" font-weight="600">检查文字层与页面内容</text>
+    <text x="550" y="193" font-size="18" fill="#dce8eb">覆盖、乱码、扫描图像、表格与公式</text>
+    <g fill="none" stroke="#58727d" stroke-width="2.5" marker-end="url(#arrow)">
+      <path d="M550 211V239H195V279"/><path d="M550 211V279"/><path d="M550 239H905V279"/>
+    </g>
+    <rect x="45" y="289" width="300" height="131" rx="18" fill="#e0eee9"/>
+    <rect x="400" y="289" width="300" height="131" rx="18" fill="#e6edf2"/>
+    <rect x="755" y="289" width="300" height="131" rx="18" fill="#f8e7d7"/>
+    <text x="195" y="325" font-size="19">可靠文字层</text><text x="195" y="366" font-size="28" font-weight="700">原生提取</text><text x="195" y="398" font-size="17">检查结构与阅读顺序</text>
+    <text x="550" y="325" font-size="19">简单扫描文字</text><text x="550" y="366" font-size="28" font-weight="700">轻量 OCR</text><text x="550" y="398" font-size="17">按目标语言识别</text>
+    <text x="905" y="325" font-size="19">复杂扫描页／区域</text><text x="905" y="366" font-size="28" font-weight="700">专用 VLM</text><text x="905" y="398" font-size="17">分块识别或整页生成</text>
+    <g fill="none" stroke="#58727d" stroke-width="2.5"><path d="M195 420V458H905V420"/><path d="M550 420V492" marker-end="url(#arrow)"/></g>
+    <rect x="150" y="501" width="800" height="77" rx="16" fill="white" stroke="#b6c8ca"/>
+    <text x="550" y="532" font-size="24" font-weight="600">合并结果，保留来源</text><text x="550" y="561" font-size="18">页码 · 区域位置 · 文字 · 表格 · 公式</text>
+    <path d="M550 578V617" fill="none" stroke="#58727d" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <rect x="150" y="627" width="800" height="77" rx="16" fill="#203d4b"/>
+    <text x="550" y="659" font-size="24" fill="white" font-weight="600">验收后进入切块与检索</text><text x="550" y="688" font-size="18" fill="#dce8eb">检查漏字、数字、顺序与截断；异常结果进入修订</text>
+  </g>
+</svg>
