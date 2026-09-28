@@ -1,0 +1,45 @@
+{
+  "date": "2026-09-28",
+  "clientBefore": "2.1.263",
+  "clientAfter": "2.1.283",
+  "baseline": "2.1.88",
+  "tool": "claude-tap 0.1.145",
+  "mode": "live reverse proxy, not --tap-export-prompt",
+  "model": "dots3-note-prev",
+  "provider": "user-configured third-party Anthropic-compatible gateway; underlying model identity unverified",
+  "configuration": "--safe-mode --permission-mode dontAsk; built-in tools retained; no customized system prompt supplied by experiment",
+  "measure": {
+    "unit": "Python len(str), Unicode code points, not model tokens",
+    "baselineDefaultChars": 5581,
+    "currentDefaultChars": 6361,
+    "deltaChars": 780,
+    "increasePercent": 13.975989965955925,
+    "normalization": "Remove preceding merged conversation text and only the experiment Additional Instructions block; preserve all template whitespace."
+  },
+  "observations": {
+    "manualCompactBoundary": true,
+    "savedSummaryHasAnalysisTag": false,
+    "savedSummaryContainsMarker": false,
+    "correctionRetained": true,
+    "rejectedApproachRetained": true,
+    "notImplementedAndNotTestedRetained": true,
+    "securityConstraintTranslatedRatherThanVerbatim": true,
+    "implementationAddedToPendingTasksAlthoughOnlyDesignRequested": true
+  },
+  "limitations": [
+    "One manual compaction in a short synthetic conversation, not an automatic-threshold experiment.",
+    "Model identifier is a gateway alias, not verified Anthropic Opus/Fable.",
+    "Outgoing body also contains environment/system messages from local integration; not a pristine official-request benchmark.",
+    "Same system/tools in adjacent requests is evidence of prefix reuse, not proof of an actual cache hit.",
+    "Resume question restated the marker; its appearance in the reply cannot prove retention.",
+    "Client token/cost accounting is not authoritative gateway billing."
+  ],
+  "verification": {
+    "httpStatus": 200,
+    "stopReason": "end_turn",
+    "boundaryTrigger": "manual",
+    "systemEqualToInitialRequest": true,
+    "toolDefinitionsEqualToInitialRequest": true,
+    "toolCount": 20
+  }
+}

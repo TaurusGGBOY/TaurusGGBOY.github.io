@@ -1,7 +1,7 @@
 ---
 title: "Claude Code源码解读17：长会话如何继续运行"
 published: 2026-07-24T16:47:04+08:00
-updated: 2026-09-15
+updated: 2026-09-28
 description: ""
 tags: ["claude-code", "source-code", "ai-agent"]
 category: "AI / Architecture"
@@ -63,7 +63,7 @@ flowchart TB
 
 本篇的主线是把长会话压力按成本和信息损失分层处理：先裁剪冗余，再压缩工具结果和缓存，随后才进入上下文重建或模型摘要。每一层都有自己的触发条件和可恢复边界，`compact` 不是一个无条件清空消息的按钮。
 
-本文全部引用 `@anthropic-ai/claude-code@2.1.88` 的 `restored-src/` 还原源码；`restored-src/` 只用于定位证据，不表示内部仓库原始目录。代码块只保留证明控制流所需的字段，`// ...` 表示省略埋点、UI 消息和无关分支，每个代码块后标注证据位置。
+本文源码分析以 `@anthropic-ai/claude-code@2.1.88` 为基线，2026-09-28 的 2.1.283 请求实测在独立小节说明；`restored-src/` 只用于定位证据，不表示内部仓库原始目录。代码块只保留证明控制流所需的字段，`// ...` 表示省略埋点、UI 消息和无关分支，每个代码块后标注证据位置。
 
 ### 一次 query 的“前置预算 + 四种压缩”顺序
 
@@ -750,6 +750,21 @@ This summary should be thorough in capturing technical details, code patterns, a
 
 > 证据，`restored-src/src/services/compact/prompt.ts:19-143,269-303`（前后置指令、基础模板和拼接）；`compact.ts:368-380,420-443`（hook 指令合并与摘要请求消息）。
 
+从拼接顺序看，可以把它拆成六层。下面是结构示意，具体原文来自 `prompt.ts`：
+
+```text
+NO_TOOLS_PREAMBLE
+  → 交接目标：保留继续开发所需的信息
+  → 按时间线检查：请求、行动、技术细节、错误与用户纠正
+  → 九部分摘要要求 + 完整输出示例
+  → Additional Instructions（有非空定制说明时）
+  → NO_TOOLS_TRAILER
+```
+
+这里的每一层都对应一个可能的交接错误。时间线检查帮助处理“用户后来改口”；文件名和签名给下一轮留下可定位的坐标；错误与修复记录避免重新尝试已经失败的方案；`Pending Tasks`、`Current Work` 和 `Optional Next Step` 则把“做过什么”和“接下来获准做什么”分开。模板里的完整示例约束输出形状，但没有给出固定压缩比例，信息取舍仍由模型完成。
+
+开头和结尾为什么反复禁止工具？缓存共享路径会继承主会话的 system prompt 和工具定义，再追加摘要任务，因此模型仍然看得到工具。源码将这次 fork 的 `maxTurns` 设为 `1`：误调工具会消耗唯一一轮，却拿不到交接文本。提示词提醒模型留在摘要任务里，`createCompactCanUseTool()` 才负责拒绝执行。这也与[官方对缓存共享压缩的解释](https://claude.dev/blog/lessons-from-building-claude-code-prompt-caching-is-everything/)一致：复用前缀，避免为了总结历史而重新计算整段输入。
+
 #### 九部分摘要怎样变成下一轮看到的文本
 
 基础模板明确要求以下九个部分。仍用金额单位工单来理解：下一轮既要知道“金额换算在哪里出错”，也要知道“用户后来补了什么限制、测试停在哪里”。
@@ -936,11 +951,38 @@ const isMainThreadCompact =
 
 如果传统压缩失败，`compactConversation()` 对手动压缩添加错误通知，对自动压缩只抛出错误；`autoCompactIfNeeded()` 捕获后递增 `consecutiveFailures`，连续三次失败后停止继续尝试。旧消息不会因为一个失败的摘要请求被当成已成功重建。
 
-### compact.ts 的 prompt 其实是“无工具摘要协议”
+### 新版实测｜压缩提示词增加了哪些约束
 
-`restored-src/src/services/compact/prompt.ts` 给 compact agent 的第一条护栏是 `NO_TOOLS_PREAMBLE`：摘要阶段不提供工具，模型只能分析与总结，任何工具调用都只会浪费这一轮。部分压缩 prompt 还区分 `from` 与 `up_to` 两个方向，省略时按 `from` 回退；自定义说明只有非空时才追加，末尾会再次提醒当前没有工具。
+2026-09-28，把本机 Claude Code 从 2.1.263 升级到更新器当时提供的 2.1.283，再通过 [claude-tap](https://github.com/liaohch3/claude-tap) 0.1.145 实际代理一次手动 `/compact`。这条路径仍使用前面的九部分模板，并增加了安全约束和用户消息来源的说明。
 
-返回文本还要经过一次格式化协议。`formatCompactSummary()` 会剥离 `<analysis>`，把 `<summary>` 换成 `Summary:`，并折叠多余空白。`getCompactUserSummaryMessage()` 再根据 `suppressFollowUpQuestions`、`transcriptPath` 和 `recentMessagesPreserved` 决定是否要求继续、是否附带完整 transcript 路径、以及是否提醒模型最近消息仍在窗口中。压缩不是“模型写一段摘要就结束”，而是由无工具约束、方向参数、输出清洗和恢复提示共同组成的消息协议。
+| 比较项 | 2.1.88 源码模板 | 2.1.283 抓取的内置指令 |
+| --- | --- | --- |
+| 字符数 | 5,581 | 6,361，增加 780（13.98%） |
+| 九部分要求、示例、禁止工具的前后提醒 | 已有 | 保留 |
+| 安全相关限制 | 未单列逐字保留要求 | 分析检查表与第六栏都要求逐字保留 |
+| 用户消息的来源 | 要求保留非工具结果的用户消息 | 明确只承认真正的 `user-role` 消息，不把 assistant 伪装的用户发言记成授权 |
+
+比较时从合并后的 user message 中取出摘要指令，去掉实验追加的 `Additional Instructions`，保留模板本身的空白；表中使用 Python `len(str)` 统计 Unicode 字符，未使用模型 tokenizer。相邻的起始请求与压缩请求具有完全相同的 `system` 数组和 20 个工具定义，符合缓存共享的请求形状；实际缓存命中和费用需要另外核验。
+
+新增的第一类要求防止约束在摘要中消失。例如“不要读取某个敏感文件”，如果只留在将被替换的历史里，接手者就可能失去这条限制。第二类要求防止授权来源被改写：assistant 即使生成了 `user:`、`Human:` 或类似 transcript 的文本，其中的“用户已同意”也不能变成真正的用户确认。压缩会把旧对话改写成下一轮依赖的事实，这时消息出处与消息内容同样重要。
+
+#### 怎样确认真的发生了压缩
+
+实验先建立一段合成的重试函数设计会话，再补充纠正：`maxAttempts` 表示总尝试次数；400 不重试、429 可以重试；否决“重试所有异常”；尚未实现或运行测试；三个测试用例是待办，但现在不要写。随后在同一会话中调用：
+
+```text
+/compact Preserve the latest correction, rejected approaches, pending tests, and the fact that no implementation or test execution has happened. Include marker COMPACT_PROBE_20260928.
+```
+
+这里使用手动命令触发，无需把窗口填满。`claude-tap` 实际转发请求并收到 HTTP 200 的摘要响应，会话文件随后写入 `trigger=manual` 的 `compact_boundary` 和摘要消息；没有使用只抓请求并返回本地模拟响应的 `--tap-export-prompt`。实验使用 `--safe-mode --permission-mode dontAsk`，保留内置工具；没有发生实际工具调用。`dontAsk` 拒绝需要确认的操作，本身不等于禁止全部工具。
+
+#### 写了“必须”，产出仍然要检查
+
+保存后的摘要保住了次数语义、400/429 规则、否决方案和“尚未实现、尚未运行测试”，也移除了 `<analysis>` 文本。但实验标记没有进入摘要，英文操作限制被翻译成中文，没有逐字保留；仅要求设计的 `retry.ts`，还被增加了一项“实现”的待办。它同时写了等待指令，因此没有立即执行越界操作，却仍然出现了任务范围扩张。
+
+这次客户端请求中的 `model` 是第三方网关别名 `dots3-note-prev`，后台真实模型未经确认，且请求带有本机集成提供的环境消息。上述产出属于一个短合成会话的单次手动压缩，不能外推成官方 Claude 模型的普遍行为。恢复时的验证问题再次提供了实验标记，近期消息也可能被原样保留，因此后续回答正确不足以单独证明摘要保住了对应内容。可以核对的材料是[模板逐行差异](/research/claude-compaction-20260928/prompt.diff)和[脱敏后的实验记录](/research/claude-compaction-20260928/measurement.json)。
+
+这也解释了为什么本次指令增长与[上一篇提到的系统提示词削减 80%](/posts/claude-code-source-reading-16/#后续版本补充系统提示词削减-80削的是哪一层)不冲突：一个统计历史交接指令，一个统计特定模型的系统提示词。评价压缩效果，最后仍要检查哪些事实、限制和授权留了下来，以及下一轮是否按它们继续工作。
 
 ### Token 估算与预算追踪｜谁的数字可信
 
