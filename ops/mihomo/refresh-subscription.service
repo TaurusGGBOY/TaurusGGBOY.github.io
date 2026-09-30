@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh Mihomo subscription through local proxy
+After=mihomo.service
+Wants=mihomo.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mihomo-refresh-subscription

@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Mihomo subscription every six hours
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
